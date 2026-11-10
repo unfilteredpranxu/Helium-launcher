@@ -1,0 +1,25 @@
+[package]
+name = "helium-metal-prototype"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+description = "Isolated offscreen direct-Metal terrain experiment for Helium"
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+# Deliberately independent of the game workspace and its lockfile.
+[workspace]
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+objc2 = "=0.6.5"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSString", "NSError"] }
+objc2-metal = { version = "=0.3.2", default-features = false, features = [
+    "std", "objc2-core-foundation", "MTLAllocation", "MTLArgument", "MTLDevice",
+    "MTLCommandQueue", "MTLCommandBuffer", "MTLCommandEncoder", "MTLBuffer",
+    "MTLBlitCommandEncoder", "MTLDepthStencil", "MTLLibrary", "MTLPixelFormat",
+    "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline",
+    "MTLResource", "MTLTexture", "MTLTypes",
+] }
