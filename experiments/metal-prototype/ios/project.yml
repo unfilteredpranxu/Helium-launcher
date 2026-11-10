@@ -1,0 +1,67 @@
+name: HeliumMetalProbe
+options:
+  projectFormat: xcode15_3
+  xcodeVersion: '15.4'
+  deploymentTarget:
+    iOS: '15.0'
+settings:
+  base:
+    SWIFT_VERSION: '5.0'
+    IPHONEOS_DEPLOYMENT_TARGET: '15.0'
+    SUPPORTED_PLATFORMS: iphoneos
+    SDKROOT: iphoneos
+    ARCHS: arm64
+    TARGETED_DEVICE_FAMILY: '1,2'
+    MARKETING_VERSION: '0.1.0'
+    CURRENT_PROJECT_VERSION: 1
+    CODE_SIGN_STYLE: Automatic
+    # Cargo needs its own target/cache directories; applies only to this test app.
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+targets:
+  HeliumMetalProbe:
+    type: application
+    platform: iOS
+    sources:
+      - path: MetalProbeApp.swift
+      - path: ProbeRunner.swift
+    preBuildScripts:
+      - name: Build experimental Rust static library
+        shell: /bin/bash
+        showEnvVarsInLog: false
+        basedOnDependencyAnalysis: false
+        script: '"$SRCROOT/build-rust.sh"'
+    dependencies:
+      - sdk: UIKit.framework
+      - sdk: SwiftUI.framework
+      - sdk: Foundation.framework
+      - sdk: CoreFoundation.framework
+      - sdk: CoreGraphics.framework
+      - sdk: Metal.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.helium.metalprobe
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Helium Metal Probe
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: 'UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight'
+        ASSETCATALOG_COMPILER_APPICON_NAME: ''
+        SWIFT_OBJC_BRIDGING_HEADER: $(SRCROOT)/../helium_metal_prototype.h
+        LIBRARY_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/../target/aarch64-apple-ios/release
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -lhelium_metal_prototype
+          - -liconv
+          - -lSystem
+          - -lobjc
+schemes:
+  HeliumMetalProbe:
+    build:
+      targets:
+        HeliumMetalProbe: all
+    run:
+      config: Debug
+      environmentVariables:
+        MTL_DEBUG_LAYER: '1'

@@ -64,17 +64,14 @@ xcrun -sdk iphoneos metal -std=ios-metal2.0 -c experiments/metal-prototype/src/t
 cargo +1.95.0 build --release --locked --target aarch64-apple-ios --manifest-path experiments/metal-prototype/Cargo.toml --lib
 ```
 
-The example creates a new PPM file and refuses to overwrite an existing one. For an A16
-run, use a **separate signed test app**, iOS 15+, link `libhelium_metal_prototype.a` from
-`experiments/metal-prototype/target/aarch64-apple-ios/release`, and link Metal, Foundation,
-and the Rust static library's native system dependencies. Import `helium_metal_prototype.h`
-and call `helium_metal_smoke_test()` from a background dispatch queue. Its return code and
-console diagnostics report completion or failure. Enable Metal API Validation; verify the
-depth oracle and inspect the Mac image before any integration. Xcode app linking/signing,
+The example creates a new PPM file and refuses to overwrite an existing one. The separate
+[G01-C iOS test app](ios/README.md) provides a SwiftUI host, caller-owned RGBA output bridge,
+and unsigned IPA packaging instructions. It does not link or launch Minecraft. The original
+status-only `helium_metal_smoke_test()` remains available unchanged. Xcode linking/signing,
 MSL compilation, GPU execution and A16 correctness are NOT established by Rust type checks.
 Objective-C exceptions/device removal are not caught by the Rust panic boundary.
 
 Rollback: leave this workspace unreferenced and return to the normal launcher build.
-No production source/configuration needs reverting. Preserve this uncommitted directory
-before switching branches; do not use reset/clean. Next action: execute the standalone
+No production source/configuration needs reverting. Preserve any local changes
+before switching branches; do not use reset/clean. Next action after owner review: execute the standalone
 smoke test on an Apple GPU and capture its status, validation output and readback image.
