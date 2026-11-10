@@ -406,6 +406,7 @@ impl Loading {
                 }
 
                 "launcher-start" => {
+                    log::info!("Horizon startup: stage=launcher.start.received");
                     // Play: take the folder an archive dropped into `Documents` produced, if it is in.
                     self.adopt_imported_resources();
                     horizon_ios_launcher::start();

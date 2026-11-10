@@ -365,6 +365,10 @@ pub(super) fn spawn_loader(
     let handle = std::thread::Builder::new()
         .name("resource-loader".into())
         .spawn(move || {
+            log::info!(
+                "Horizon startup: stage=resource_loader.begin elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
             let mut pack_error = None;
             // On a phone the folders were resolved at launch, before the archive a player dropped
             // into `Documents` was unpacked: wait for that and take the folder it produced.
@@ -394,6 +398,11 @@ pub(super) fn spawn_loader(
                 loaded
             })
             .map_err(|error| error.to_string());
+            log::info!(
+                "Horizon startup: stage=resource_loader.complete elapsed_ms={} outcome={}",
+                started.elapsed().as_millis(),
+                if result.is_ok() { "ok" } else { "error" }
+            );
             let _ = sender.send(LoaderMsg::Done(result));
         })?;
     Ok((receiver, handle))
@@ -414,6 +423,9 @@ impl Loading {
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
+                        log::info!(
+                            "Horizon startup: stage=resource_loader.disconnected outcome=error"
+                        );
                         // The loader sends `Done` before it returns: it panicked.
                         let reason = match self.handle.take().map(JoinHandle::join) {
                             Some(Err(payload)) => panic_text(payload.as_ref()).to_owned(),

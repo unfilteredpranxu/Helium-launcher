@@ -11351,6 +11351,11 @@ impl Renderer {
             self.first_frame = FirstFrame::Drawn;
         }
         let submission = crate::spans::time("submit", || self.queue.submit([commands]));
+        if first_frame {
+            log::info!(
+                "Horizon startup: stage=first_frame.submit.returned gpu_completion=unverified"
+            );
+        }
         if let Some(read) = after.or_else(|| self.after_submit()) {
             read();
         }
@@ -11416,6 +11421,12 @@ impl Renderer {
                 startup_step(format_args!("presenting the first frame"));
             }
             self.queue.present(surface_frame);
+            if first_frame {
+                // wgpu schedules presentation and returns (), not a display-completion result.
+                log::info!(
+                    "Horizon startup: stage=first_frame.present.returned display_completion=unverified"
+                );
+            }
             if self.hdr.is_some()
                 && let Some(marker) = self.hdr_marker.take()
             {

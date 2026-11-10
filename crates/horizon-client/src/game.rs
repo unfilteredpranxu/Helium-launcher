@@ -23377,6 +23377,10 @@ impl Loading {
     }
     fn finish(&mut self, loaded: Loaded) -> Result<Option<split::Split<'static>>> {
         let handoff_at = Instant::now();
+        log::info!(
+            "Horizon startup: stage=handoff.begin elapsed_ms={}",
+            self.started.elapsed().as_millis()
+        );
         let mut options = self.options.take().ok_or("loading already finished")?;
         options.resources = loaded.root.clone();
         // StartupMenu owns world selection until it can hand it to Game.
@@ -23389,6 +23393,10 @@ impl Loading {
             renderer.release_surface();
         }
         let renderer_at = Instant::now();
+        log::info!(
+            "Horizon startup: stage=renderer.world.begin elapsed_ms={}",
+            self.started.elapsed().as_millis()
+        );
         let renderer = match startup::time("renderer.world", || {
             build_renderer(
                 window.clone(),
@@ -23410,6 +23418,10 @@ impl Loading {
             Ok(renderer) => renderer,
             // The screen that says why (a phone's import screen) draws on the loading renderer.
             Err(e) => {
+                log::info!(
+                    "Horizon startup: stage=renderer.world.returned outcome=error duration_ms={}",
+                    renderer_at.elapsed().as_millis()
+                );
                 if let Some(renderer) = &mut self.renderer {
                     let _ = renderer.recreate_surface();
                 }
@@ -23608,9 +23620,21 @@ impl App {
         };
         match step {
             Step::Waiting => {}
-            Step::Ready(game) => *self = App::Ready(game),
+            Step::Ready(game) => {
+                log::info!(
+                    "Horizon startup: stage=app.ready elapsed_ms={} state={}",
+                    game.host.started.elapsed().as_millis(),
+                    if game.host.title.is_some() {
+                        "title"
+                    } else {
+                        "game"
+                    }
+                );
+                *self = App::Ready(game);
+            }
             Step::Done => event_loop.exit(),
             Step::Failed(e) => {
+                log::info!("Horizon startup: stage=loading.failed outcome=error");
                 // A phone with nothing to load has one useful move left: stay open and say what it
                 // needs, and take the files over Wi-Fi or a cable. Everywhere else the window has a
                 // terminal behind it that already said it. A phone waits whatever the loader's reason
