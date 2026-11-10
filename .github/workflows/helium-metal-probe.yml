@@ -1,0 +1,218 @@
+name: Helium Metal Probe
+
+on:
+  push:
+    branches:
+      - feature/helium-g01-metal-prototype
+    paths:
+      - 'experiments/metal-prototype/**'
+      - '.github/workflows/helium-metal-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: '2'
+      RUSTUP_TOOLCHAIN: '1.95.0'
+      IPHONEOS_DEPLOYMENT_TARGET: '15.0'
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+    steps:
+      - name: Check out the triggering commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Record Apple toolchain and source revision
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/helium-metal-probe-logs"
+          {
+            test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+            git show --no-patch --oneline HEAD
+            sw_vers
+            uname -m
+            xcode-select -p
+            xcodebuild -version
+            xcrun --sdk iphoneos --show-sdk-version
+            xcrun --sdk iphoneos --show-sdk-build-version
+          } 2>&1 | tee "$RUNNER_TEMP/helium-metal-probe-logs/apple-toolchain.log"
+
+      - name: Install Rust 1.95.0 and iOS standard library
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          {
+            if ! command -v rustup >/dev/null 2>&1; then
+              curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+                -o "$RUNNER_TEMP/helium-metal-probe-rustup.sh"
+              sh "$RUNNER_TEMP/helium-metal-probe-rustup.sh" -y --no-modify-path \
+                --profile minimal --default-toolchain 1.95.0
+            fi
+            rustup toolchain install 1.95.0 --profile minimal
+            rustup target add --toolchain 1.95.0 aarch64-apple-ios
+            rustc +1.95.0 --version
+            cargo +1.95.0 --version
+            rustup show active-toolchain
+          } 2>&1 | tee "$RUNNER_TEMP/helium-metal-probe-logs/rust-toolchain.log"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Ensure XcodeGen is available
+        run: |
+          set -euo pipefail
+          {
+            if ! command -v xcodegen >/dev/null 2>&1; then
+              brew install xcodegen
+            fi
+            xcodegen --version
+          } 2>&1 | tee "$RUNNER_TEMP/helium-metal-probe-logs/xcodegen-toolchain.log"
+
+      - name: Compile the actual iOS Metal shader
+        id: msl
+        run: |
+          set -euo pipefail
+          {
+            # Xcode 26 can provide Metal as a separately downloaded component.
+            # This checks compiler availability, without executing any GPU test.
+            if ! xcrun --sdk iphoneos metal --version; then
+              xcodebuild -downloadComponent MetalToolchain
+            fi
+            mkdir -p "$RUNNER_TEMP/helium-metal-probe-msl"
+            xcrun --sdk iphoneos metal -std=ios-metal2.0 \
+              -c experiments/metal-prototype/src/terrain.metal \
+              -o "$RUNNER_TEMP/helium-metal-probe-msl/terrain.air"
+          } 2>&1 | tee "$RUNNER_TEMP/helium-metal-probe-logs/msl-build.log"
+
+      - name: Build the independent Rust static library
+        id: rust
+        env:
+          SRCROOT: ${{ github.workspace }}/experiments/metal-prototype/ios
+          PLATFORM_NAME: iphoneos
+          ARCHS: arm64
+        run: |
+          set -euo pipefail
+          bash experiments/metal-prototype/ios/build-rust.sh \
+            2>&1 | tee "$RUNNER_TEMP/helium-metal-probe-logs/rust-build.log"
+          test -s experiments/metal-prototype/target/aarch64-apple-ios/release/libhelium_metal_prototype.a
+
+      - name: Generate the standalone Xcode project
+        working-directory: experiments/metal-prototype/ios
+        run: |
+          set -euo pipefail
+          xcodegen generate --spec project.yml \
+            2>&1 | tee "$RUNNER_TEMP/helium-metal-probe-logs/xcodegen-build.log"
+
+      - name: Build and package only the unsigned Metal Probe app
+        id: app
+        run: |
+          set -euo pipefail
+          # The existing helper generates the project and invokes Cargo incrementally
+          # in Xcode's pre-build phase; it never builds the Minecraft workspace.
+          bash experiments/metal-prototype/ios/build-unsigned.sh \
+            2>&1 | tee "$RUNNER_TEMP/helium-metal-probe-logs/xcode-build-and-package.log"
+
+      - name: Validate the IPA, bundle identity and executable architecture
+        id: ipa
+        run: |
+          set -euo pipefail
+          {
+            python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import plistlib
+          import zipfile
+
+          ipa = Path('experiments/metal-prototype/ios/build/HeliumMetalProbe-unsigned.ipa')
+          inspection = Path(os.environ['RUNNER_TEMP']) / 'helium-metal-probe-inspection'
+          inspection.mkdir()
+          prefix = 'Payload/HeliumMetalProbe.app/'
+          with zipfile.ZipFile(ipa) as archive:
+              names = archive.namelist()
+              assert archive.testzip() is None, 'IPA CRC validation failed'
+              bundles = {name.split('/')[1] for name in names
+                         if name.startswith('Payload/') and len(name.split('/')) > 2}
+              assert bundles == {'HeliumMetalProbe.app'}, bundles
+              info_bytes = archive.read(prefix + 'Info.plist')
+              info = plistlib.loads(info_bytes)
+              assert info['CFBundleIdentifier'] == 'dev.helium.metalprobe', info
+              assert info['CFBundleExecutable'] == 'HeliumMetalProbe', info
+              assert info['MinimumOSVersion'] == '15.0', info
+              executable = archive.read(prefix + info['CFBundleExecutable'])
+              assert executable, 'Packaged executable is empty'
+              (inspection / 'HeliumMetalProbe').write_bytes(executable)
+              (inspection / 'Info.plist').write_bytes(info_bytes)
+          report = {
+              'commit': os.environ['GITHUB_SHA'],
+              'ipa': str(ipa),
+              'ipa_bytes': ipa.stat().st_size,
+              'bundle_identifier': info['CFBundleIdentifier'],
+              'minimum_ios': info['MinimumOSVersion'],
+              'gpu_execution': 'NOT RUN',
+          }
+          logs = Path(os.environ['RUNNER_TEMP']) / 'helium-metal-probe-logs'
+          (logs / 'ipa-manifest.json').write_text(json.dumps(report, indent=2) + '\n')
+          print(json.dumps(report, indent=2))
+          PY
+            file "$RUNNER_TEMP/helium-metal-probe-inspection/HeliumMetalProbe"
+            lipo -info "$RUNNER_TEMP/helium-metal-probe-inspection/HeliumMetalProbe"
+            test "$(lipo -archs "$RUNNER_TEMP/helium-metal-probe-inspection/HeliumMetalProbe")" = arm64
+            plutil -p "$RUNNER_TEMP/helium-metal-probe-inspection/Info.plist"
+            shasum -a 256 experiments/metal-prototype/ios/build/HeliumMetalProbe-unsigned.ipa
+          } 2>&1 | tee "$RUNNER_TEMP/helium-metal-probe-logs/ipa-validation.log"
+
+      - name: Upload the standalone unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: helium-metal-probe-unsigned
+          path: experiments/metal-prototype/ios/build/HeliumMetalProbe-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Summarize the single build attempt
+        if: always()
+        env:
+          MSL_OUTCOME: ${{ steps.msl.outcome }}
+          RUST_OUTCOME: ${{ steps.rust.outcome }}
+          APP_OUTCOME: ${{ steps.app.outcome }}
+          IPA_OUTCOME: ${{ steps.ipa.outcome }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          logs = Path(os.environ['RUNNER_TEMP']) / 'helium-metal-probe-logs'
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('# Helium Metal Probe: single Apple build attempt\n\n')
+              summary.write('Commit: `' + os.environ['GITHUB_SHA'] + '`\n\n')
+              for label, key in [('MSL compilation', 'MSL_OUTCOME'),
+                                 ('Rust static library', 'RUST_OUTCOME'),
+                                 ('Swift/link/package step', 'APP_OUTCOME'),
+                                 ('IPA validation', 'IPA_OUTCOME')]:
+                  summary.write('- ' + label + ': ' + os.environ[key] + '\n')
+              summary.write('- Apple GPU execution: **NOT RUN**\n\n')
+              for name in ['apple-toolchain.log', 'rust-toolchain.log', 'msl-build.log',
+                           'rust-build.log', 'xcodegen-build.log',
+                           'xcode-build-and-package.log', 'ipa-validation.log']:
+                  path = logs / name
+                  if path.is_file():
+                      tail = '\n'.join(path.read_text(errors='replace').splitlines()[-80:])
+                      summary.write('## ' + name + ' (last 80 lines)\n\n````text\n'
+                                    + tail + '\n````\n\n')
+          PY
+
+      - name: Preserve toolchain and build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: helium-metal-probe-build-logs
+          path: ${{ runner.temp }}/helium-metal-probe-logs/
+          if-no-files-found: warn
+          retention-days: 7
