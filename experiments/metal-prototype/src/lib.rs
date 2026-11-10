@@ -3,6 +3,7 @@
 mod scene;
 pub use scene::{Mesh, Vertex, fixture, fixture_camera};
 
+pub mod section;
 pub mod terrain;
 
 #[cfg(any(target_os = "macos", target_os = "ios", test))]

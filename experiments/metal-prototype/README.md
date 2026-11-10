@@ -5,6 +5,10 @@ The G01 draw, shader and smoke checks remain unchanged. The standalone
 [iOS probe](ios/README.md) now selects G01 (default) or G02 with separate results;
 the production launcher is untouched.
 
+G03 adds a [borrowed SectionMesh CPU bridge](docs/G03-A.md) and a separately
+compiled production-side adapter test. The standalone runtime still has no wgpu
+dependency; authentic asset-dependent mesher validation is explicitly opt-in.
+
 Experimental, opt-in, and not wired into Helium. Independent Cargo workspace/lockfile;
 normal game builds neither resolve nor compile it. Only macOS/iOS compile `metal.rs`
 or depend on objc2. Linux builds test the fixture and validation, and return an explicit
