@@ -1,0 +1,426 @@
+//! Startup shared by the gameplay library and its executable.
+use crate::{crash, game, logging};
+
+/// Start the game. The executable supplies the allocator and retains the mod API marker.
+pub fn main() {
+    main_with(Default::default());
+}
+
+/// Start the game with trait mods in dispatch order.
+pub fn main_with(mods: crate::mod_api::Mods) {
+    boot_stage("entry");
+    // First: a trait injection into anything below (logging, the crash handler) calls its mod.
+    if crate::mod_api::MODS.set(mods).is_err() {
+        log::warn!("Trait mods already installed; ignoring the second list");
+    }
+    boot_stage("mods installed");
+    horizon_threads::configure_allocator();
+    boot_stage("allocator");
+    // Before the event loop: iOS asks for the AirPlay scene's delegate by name when a display connects.
+    horizon_airplay::register();
+    boot_stage("airplay registered");
+    horizon_airplay::audio::start();
+    boot_stage("airplay audio");
+    #[cfg(target_os = "ios")]
+    let documents = match into_app_sandbox() {
+        Ok(documents) => documents,
+        Err(error) => {
+            boot_stage(&format!("no sandbox: {error}"));
+            eprintln!("Horizon: {error}");
+            std::process::exit(1);
+        }
+    };
+    #[cfg(target_os = "ios")]
+    boot_stage(&format!("sandbox {}", documents.display()));
+    // `android_main` already moved into the app's files folder.
+    #[cfg(target_os = "android")]
+    let documents = std::env::current_dir().unwrap_or_default();
+    horizon_client::telemetry::mark_start();
+    horizon_client::spans::startup::init(std::time::Instant::now());
+    horizon_client::spans::trace::start_from_env();
+    boot_stage("telemetry");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let game_args = args.iter().take_while(|a| *a != "--dedicated");
+    let help = game_args
+        .clone()
+        .any(|a| a == "--help" || a == "-h" || a == "--launch-api");
+    // --home before the log opens in it.
+    if let Some(dir) = game_args.clone().skip_while(|a| *a != "--home").nth(1) {
+        logging::set_game_home(std::path::absolute(dir).unwrap_or_else(|_| dir.into()));
+    }
+    // A phone has no cable to download the app container with: its log and crash reports sit in
+    // Documents beside the saves, where the Files app can hand them to a bug report.
+    #[cfg(target_os = "ios")]
+    logging::set_game_home(documents.clone());
+    // The dedicated server logs in its own folder (--game-dir's), as vanilla's does; the game in its home.
+    let (home, side, thread) = if args.iter().any(|a| a == "--dedicated") {
+        let folder = game_args
+            .clone()
+            .skip_while(|a| *a != "--game-dir" && *a != "--gameDir")
+            .nth(1)
+            .and_then(|dir| std::path::absolute(dir).ok())
+            .unwrap_or_else(|| ".".into());
+        (folder, "server", "Server thread")
+    } else {
+        // --player-dir too (a game's, not a server's): a player of a shared game folder keeps
+        // its log and crash reports in its own; crash telemetry stays with the home's consent.
+        if let Some(dir) = game_args
+            .clone()
+            .skip_while(|a| *a != "--player-dir")
+            .nth(1)
+        {
+            logging::set_player_dir(std::path::absolute(dir).unwrap_or_else(|_| dir.into()));
+        }
+        (logging::game_home(), "client", "Render thread")
+    };
+    // Before the log opens, so a mod's injection hears its first lines.
+    logging::set_line_hook(crate::native_client_hooks::native_log_line);
+    boot_stage(&format!("home {}", home.display()));
+    if !help {
+        logging::init(
+            logging::player_dir_override().unwrap_or(home.as_path()),
+            thread,
+        );
+        // The log's first line names the build, so a bug report that carries the log says which one it was.
+        log::info!("Horizon {}", crash::version());
+        boot_stage("log open");
+        crash::install(home.clone(), side);
+        boot_stage("crash handler");
+        // What a phone does with its files before the game looks for them, once the log can say so.
+        // On a worker: unpacking an archive takes long enough that the iOS watchdog would kill a
+        // launch that did it here, before the window even exists. The launcher shows its progress,
+        // and the resource loader waits for it.
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        {
+            crate::import::boot(&documents);
+            boot_stage("import started");
+        }
+    }
+    let renderers = crate::mod_api::mods()
+        .iter()
+        .filter_map(|m| m.render())
+        .collect();
+    if crate::gfx::native_render::install(renderers).is_err() {
+        log::warn!("Trait renderers already installed; keeping the first list");
+    }
+    if horizon_world::native_load_hooks::install(
+        horizon_world::native_load_hooks::NativeLoadHooks {
+            loot_table_load: |id, table| {
+                crate::mod_api::dispatch_loot_table_load(crate::mod_api::mods(), id, table);
+            },
+            modify_default_components: |item, components| {
+                crate::mod_api::dispatch_modify_default_components(
+                    crate::mod_api::mods(),
+                    item,
+                    components,
+                );
+            },
+            loot_function: |kind, data, ctx, stack| {
+                crate::mod_api::dispatch_loot_function(
+                    crate::mod_api::mods(),
+                    kind,
+                    data,
+                    ctx,
+                    stack,
+                );
+            },
+            loot_condition: |kind, data, ctx, holds| {
+                crate::mod_api::dispatch_loot_condition(
+                    crate::mod_api::mods(),
+                    kind,
+                    data,
+                    ctx,
+                    holds,
+                );
+            },
+        },
+    )
+    .is_err()
+    {
+        log::warn!("Native data-load hooks already installed; keeping the first callbacks");
+    }
+    if horizon_world::worldgen::native_generate::install(
+        horizon_world::worldgen::native_generate::NativeGenerateHooks {
+            chunk_generate: |dimension, chunk, seed, flat, chunk_out, generate| {
+                crate::mod_api::dispatch_chunk_generate(
+                    crate::mod_api::mods(),
+                    dimension,
+                    chunk,
+                    seed,
+                    flat,
+                    chunk_out,
+                    generate,
+                );
+            },
+            lod_column: |dimension, column, seed, flat, column_out| {
+                crate::mod_api::dispatch_lod_column(
+                    crate::mod_api::mods(),
+                    dimension,
+                    column,
+                    seed,
+                    flat,
+                    column_out,
+                );
+            },
+        },
+    )
+    .is_err()
+    {
+        log::warn!("Native generation hooks already installed; keeping the first callbacks");
+    }
+    if crate::native_client_hooks::install(crate::native_client_hooks::NativeClientHooks {
+        menu_slot_rules: |menu, slot, stack, may_place, max_stack| {
+            crate::mod_api::dispatch_menu_slot_rules(
+                crate::mod_api::mods(),
+                menu,
+                slot,
+                stack,
+                may_place,
+                max_stack,
+            );
+        },
+        player_chat: |player, name, message, replies, cancel| {
+            crate::mod_api::dispatch_player_chat(
+                crate::mod_api::mods(),
+                player,
+                name,
+                message,
+                replies,
+                cancel,
+            );
+        },
+        sound_play: |sound, volume, pitch, cancel| {
+            crate::mod_api::dispatch_sound_play(
+                crate::mod_api::mods(),
+                sound,
+                volume,
+                pitch,
+                cancel,
+            );
+        },
+        living_heal: |entity, amount, cancel| {
+            crate::mod_api::dispatch_living_heal(crate::mod_api::mods(), entity, amount, cancel);
+        },
+        living_breathe: |entity, kind, can_breathe, consume, refill| {
+            crate::mod_api::dispatch_living_breathe(
+                crate::mod_api::mods(),
+                entity,
+                kind,
+                can_breathe,
+                consume,
+                refill,
+            );
+        },
+        living_drown: |entity, kind, is_drowning, damage_amount, bubble_count, cancel| {
+            crate::mod_api::dispatch_living_drown(
+                crate::mod_api::mods(),
+                entity,
+                kind,
+                is_drowning,
+                damage_amount,
+                bubble_count,
+                cancel,
+            );
+        },
+        living_fall: |entity, kind, distance, multiplier, cancel| {
+            crate::mod_api::dispatch_living_fall(
+                crate::mod_api::mods(),
+                entity,
+                kind,
+                distance,
+                multiplier,
+                cancel,
+            );
+        },
+        living_jump: |entity, kind| {
+            crate::mod_api::dispatch_living_jump(crate::mod_api::mods(), entity, kind);
+        },
+        register_goals: |mob| {
+            crate::mod_api::dispatch_register_goals(crate::mod_api::mods(), mob);
+        },
+        player_pre_login: |player, name, address, defer| {
+            crate::mod_api::dispatch_player_pre_login(
+                crate::mod_api::mods(),
+                player,
+                name,
+                address,
+                defer,
+            );
+        },
+        player_profile: |player, name, properties| {
+            crate::mod_api::dispatch_player_profile(
+                crate::mod_api::mods(),
+                player,
+                name,
+                properties,
+            );
+        },
+        ingredient: |kind, data, items| {
+            crate::mod_api::dispatch_ingredient(crate::mod_api::mods(), kind, data, items);
+        },
+        ingredient_test: |kind, data, stack, accept| {
+            crate::mod_api::dispatch_ingredient_test(
+                crate::mod_api::mods(),
+                kind,
+                data,
+                stack,
+                accept,
+            );
+        },
+        log_line: |level, thread, message, line| {
+            crate::mod_api::dispatch_log_line(crate::mod_api::mods(), level, thread, message, line);
+        },
+        handshake: |address, host, intent, cancel, reason| {
+            crate::mod_api::dispatch_handshake(
+                crate::mod_api::mods(),
+                address,
+                host,
+                intent,
+                reason,
+                cancel,
+            );
+        },
+    })
+    .is_err()
+    {
+        log::warn!("Native client hooks already installed; keeping the first callbacks");
+    }
+    if horizon_client::sound_engine::install_playback_hook(
+        horizon_client::sound_playback::native_sound_play,
+    )
+    .is_err()
+    {
+        log::warn!("Native sound hook already installed; keeping the first callback");
+    }
+    raise_open_file_limit();
+    boot_stage("hooks installed");
+    boot_stage("game loop");
+    if let Err(error) = game::run_with() {
+        boot_stage(&format!("game loop failed: {error}"));
+        // A bad command line is the caller's mistake, not a crash: no report.
+        let usage = error.is::<game::UsageError>();
+        log::error!("Horizon: {error}");
+        logging::flush();
+        // The report's path is the last line on stderr (crash::SAVED_LINE).
+        if !help && !usage {
+            crash::report_error(&home, side, &*error);
+        }
+        // Started from Explorer, the console window closes with the game:
+        // keep the message on screen until it is read.
+        #[cfg(windows)]
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            eprintln!("Press Enter to close.");
+            let _ = std::io::stdin().read_line(&mut String::new());
+        }
+        std::process::exit(if usage {
+            game::exit_code::USAGE
+        } else {
+            game::exit_code::ERROR
+        });
+    }
+    logging::flush();
+}
+
+/// Write one startup stage to `Documents/horizon-boot.log`, the first call truncating it.
+///
+/// A phone cannot be watched with a console and the game's own log may never open (a crash before
+/// `logging::init`, a lock a stale instance holds), so the stages are written straight to the folder
+/// the Files app shows, flushed one by one, to say where a launch stopped.
+fn boot_stage(step: &str) {
+    #[cfg(target_os = "ios")]
+    boot::stage(step);
+    #[cfg(not(target_os = "ios"))]
+    let _ = step;
+}
+
+#[cfg(target_os = "ios")]
+mod boot {
+    use std::io::Write;
+    use std::sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    static OPENED: AtomicBool = AtomicBool::new(false);
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+
+    pub fn stage(step: &str) {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let path = std::path::Path::new(&home).join("Documents/horizon-boot.log");
+        let first = !OPENED.swap(true, Ordering::Relaxed);
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true).truncate(first);
+        // Later stages append, or every open would rewrite the file from its start.
+        options.append(!first);
+        let Ok(mut file) = options.open(&path) else {
+            return;
+        };
+        let start = START.get_or_init(std::time::Instant::now);
+        let _ = writeln!(file, "[{:8.3}] {step}", start.elapsed().as_secs_f64());
+        let _ = file.flush();
+    }
+}
+
+/// The JVM raises its open-file limit to the hard limit as it starts
+/// (`-XX:+MaxFDLimit`, on by default), so a vanilla server may hold as many
+/// sockets and region files as the host allows, not the soft default (often
+/// 1024 in a container). The same here; macOS caps it at `OPEN_MAX`, as the
+/// JVM does there.
+fn raise_open_file_limit() {
+    #[cfg(unix)]
+    {
+        use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+        let limit = getrlimit(Resource::Nofile);
+        let hard = if cfg!(target_os = "macos") {
+            Some(limit.maximum.map_or(10_240, |h| h.min(10_240)))
+        } else {
+            limit.maximum
+        };
+        let raised = match (limit.current, hard) {
+            (Some(soft), Some(hard)) => hard > soft,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if raised {
+            let to = Rlimit {
+                current: hard,
+                maximum: limit.maximum,
+            };
+            match setrlimit(Resource::Nofile, to) {
+                Ok(()) => log::info!(
+                    "Open file limit raised from {:?} to {hard:?}",
+                    limit.current
+                ),
+                Err(e) => log::warn!("Open file limit stays at {:?}: {e}", limit.current),
+            }
+        }
+    }
+}
+
+/// Start the game where a phone lets it write.
+///
+/// iOS hands an app a working directory of `/`, which is read-only, while the game builds its world saves,
+/// its `options.txt`, its `.horizon-cache` and its `resourcepacks/` from `current_dir()` -- so every one of
+/// those is a path it cannot create. The writable place is the app's data container, and `$HOME` names it,
+/// so the fix is one call made before anything reads a path: work in `Documents`. The launcher runs the game
+/// inside its game home instead; a phone has no launcher, and `Documents` is the folder the Files app shows,
+/// which is where a player drops a resource pack or a world.
+///
+/// Prepared resources are looked for by `Options::read`, which checks a `resources/` beside the
+/// executable first and then the `resources/` that `horizon_client::import` unpacks into this very
+/// folder -- so both the assets shipped in the bundle and the ones carried in by a player are found
+/// with no argument to pass.
+#[cfg(target_os = "ios")]
+fn into_app_sandbox() -> Result<std::path::PathBuf, String> {
+    let documents = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| std::path::PathBuf::from(home).join("Documents"))
+        .ok_or("iOS gave this app no HOME")?;
+    let describe = |error: std::io::Error| format!("{}: {error}", documents.display());
+    std::fs::create_dir_all(&documents).map_err(describe)?;
+    std::env::set_current_dir(&documents).map_err(describe)?;
+    Ok(documents)
+}
+

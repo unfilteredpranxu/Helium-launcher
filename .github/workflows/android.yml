@@ -1,0 +1,96 @@
+name: android
+# The game for Android: crates/horizon-android (horizon-client's bin as a NativeActivity library) cross-compiled
+# for arm64 with the runner's NDK, packed with packaging/android/AndroidManifest.xml by aapt2 (no Gradle: the app
+# has no Java), signed, and uploaded as Horizon.apk. No tests run here.
+#
+# Signing: set the repository secrets ANDROID_KEYSTORE (a base64 .jks/.keystore holding the alias `horizon`) and
+# ANDROID_KEYSTORE_PASSWORD, so every build updates the installed app. Without them each run signs with a new
+# throwaway key, and installing it means uninstalling the last one first, which deletes the app's files.
+on:
+  # Off the push and pull-request paths on purpose: an Android run that fails turned every commit red and
+  # mailed it out even when the iOS build passed. Build it by hand from the Actions tab when it is wanted.
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: android-${{ github.sha }}
+  cancel-in-progress: false
+env:
+  HORIZON_TELEMETRY_URL: "off"
+  ANDROID_TARGET: aarch64-linux-android
+  # The manifest's minSdkVersion.
+  ANDROID_API: "26"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.ANDROID_TARGET }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/horizon-android
+          shared-key: android-${{ env.ANDROID_TARGET }}
+      - name: Build the game
+        env:
+          HORIZON_MSA_CLIENT_ID: ${{ vars.HORIZON_MSA_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          ndk="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$bin/aarch64-linux-android$ANDROID_API-clang"
+          export CXX_aarch64_linux_android="$bin/aarch64-linux-android$ANDROID_API-clang++"
+          export AR_aarch64_linux_android="$bin/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+          cargo build --release --locked --manifest-path crates/horizon-android/Cargo.toml --target "$ANDROID_TARGET"
+      - name: Pack and sign the .apk
+        env:
+          # PR code is unmerged: always use the throwaway key, even for same-repository PRs.
+          KEYSTORE: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEYSTORE || '' }}
+          KEYSTORE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEYSTORE_PASSWORD || '' }}
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          tools="$(find "$sdk/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          platform="$(find "$sdk/platforms" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          work=$(mktemp -d)
+          mkdir -p "$work/res/mipmap-xxxhdpi" "$work/apk/lib/arm64-v8a"
+          cp packaging/icons/hicolor/256x256/apps/horizon.png "$work/res/mipmap-xxxhdpi/ic_launcher.png"
+          "$tools/aapt2" compile --dir "$work/res" -o "$work/res.zip"
+          "$tools/aapt2" link -o "$work/base.apk" -I "$platform/android.jar" \
+            --manifest packaging/android/AndroidManifest.xml "$work/res.zip"
+          so="crates/horizon-android/target/$ANDROID_TARGET/release/libhorizon_android.so"
+          cp "$so" "$work/apk/lib/arm64-v8a/"
+          ( cd "$work/apk" && zip -qr "$work/base.apk" lib )
+          "$tools/zipalign" -f -p 4 "$work/base.apk" "$work/aligned.apk"
+          if [ -n "$KEYSTORE" ]; then
+            echo "$KEYSTORE" | base64 -d > "$work/key.jks"
+            pass="$KEYSTORE_PASSWORD"
+          else
+            echo "::warning::no ANDROID_KEYSTORE secret: signed with a throwaway key, so this .apk cannot update the last one"
+            pass=throwaway
+            keytool -genkeypair -keystore "$work/key.jks" -alias horizon -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$pass" -keypass "$pass" -dname "CN=Horizon debug"
+          fi
+          "$tools/apksigner" sign --ks "$work/key.jks" --ks-key-alias horizon --ks-pass "pass:$pass" \
+            --out Horizon.apk "$work/aligned.apk"
+          "$tools/apksigner" verify Horizon.apk
+          # The library must really export the entry point NativeActivity calls.
+          "${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" -D --defined-only "$so" \
+            | grep -q ' ANativeActivity_onCreate$'
+          unzip -l Horizon.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: horizon-android
+          path: Horizon.apk
+          retention-days: 7
+          if-no-files-found: error
