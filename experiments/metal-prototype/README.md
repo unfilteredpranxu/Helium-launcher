@@ -1,5 +1,8 @@
 # G01: direct Metal offscreen terrain probe
 
+G02 adds a separate [production-format terrain path and engineering assessment](docs/G02-A.md).
+The G01 draw, shader, smoke checks and iOS app selection remain unchanged.
+
 Experimental, opt-in, and not wired into Helium. Independent Cargo workspace/lockfile;
 normal game builds neither resolve nor compile it. Only macOS/iOS compile `metal.rs`
 or depend on objc2. Linux builds test the fixture and validation, and return an explicit

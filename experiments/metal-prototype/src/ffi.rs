@@ -27,6 +27,28 @@ pub unsafe extern "C" fn helium_metal_smoke_test_rgba(
     }
 }
 
+/// G02's independent full-image terrain oracle, with the same caller-owned ABI.
+/// # Safety
+/// The original bridge's allocation, capacity and exclusivity contract applies.
+#[cfg_attr(any(target_os = "macos", target_os = "ios"), unsafe(no_mangle))]
+pub unsafe extern "C" fn helium_metal_terrain_test_rgba(
+    rgba_out: *mut u8,
+    rgba_capacity: usize,
+    message_out: *mut c_char,
+    message_capacity: usize,
+) -> i32 {
+    // SAFETY: identical checked output path; no pointer is stored beyond this call.
+    unsafe {
+        run_with(
+            rgba_out,
+            rgba_capacity,
+            message_out.cast(),
+            message_capacity,
+            crate::terrain::smoke_test,
+        )
+    }
+}
+
 fn region(pointer: *mut u8, capacity: usize) -> Option<(usize, usize)> {
     if pointer.is_null() || capacity == 0 || capacity > isize::MAX as usize {
         return None;
@@ -49,7 +71,7 @@ unsafe fn write_message(destination: *mut u8, capacity: usize, message: &str) {
 }
 
 // The injected operation exists only to exercise output/exception handling in
-// CPU unit tests. The exported entry always invokes the real crate::smoke_test.
+// CPU unit tests. Each exported entry always invokes its real GPU smoke test.
 unsafe fn run_with(
     rgba_out: *mut u8,
     rgba_capacity: usize,
@@ -117,6 +139,25 @@ unsafe fn run_with(
 mod tests {
     use super::*;
     use std::ffi::CStr;
+
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    #[test]
+    fn terrain_entry_reports_unsupported_without_fabricated_pixels() {
+        let mut pixels = vec![0x5a; RGBA_BYTES];
+        let mut text = [0u8; 128];
+        // SAFETY: two live, disjoint caller-owned output buffers.
+        let code = unsafe {
+            helium_metal_terrain_test_rgba(
+                pixels.as_mut_ptr(),
+                pixels.len(),
+                text.as_mut_ptr().cast(),
+                text.len(),
+            )
+        };
+        assert_eq!(code, 1);
+        assert_eq!(message(&text), "direct Metal requires macOS or iOS");
+        assert!(pixels.iter().all(|&b| b == 0x5a));
+    }
 
     fn message(bytes: &[u8]) -> &str {
         CStr::from_bytes_until_nul(bytes).unwrap().to_str().unwrap()

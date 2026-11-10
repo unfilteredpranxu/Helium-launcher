@@ -3,6 +3,8 @@
 mod scene;
 pub use scene::{Mesh, Vertex, fixture, fixture_camera};
 
+pub mod terrain;
+
 #[cfg(any(target_os = "macos", target_os = "ios", test))]
 mod ffi;
 
@@ -13,7 +15,8 @@ pub const SIDE: usize = 256;
 
 #[derive(Debug)]
 pub struct Image {
-    /// Tightly packed RGBA8Unorm, SIDE by SIDE, after GPU completion.
+    /// Tightly packed RGBA8Unorm after completion. G01 uses SIDE square;
+    /// the terrain renderer uses the caller's Options width/height.
     pub rgba: Vec<u8>,
     /// Entire render+blit command buffer; None if Metal supplies no valid timestamps.
     pub gpu_seconds: Option<f64>,

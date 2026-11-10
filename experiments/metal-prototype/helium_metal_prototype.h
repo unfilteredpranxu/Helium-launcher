@@ -39,6 +39,13 @@ enum {
 // GPU completion/readback does not establish physical display presentation.
 int32_t helium_metal_smoke_test_rgba(uint8_t *rgba_out, size_t rgba_capacity,
                                      char *message_out, size_t message_capacity);
+
+// G02: same buffer/lifetime/status contract; runs the separate production-format
+// full-image oracle (normal order, reversed triangles, forward/reversed depth).
+// Returns real first-pass 256x256 pixels only after ALL oracle checks succeed.
+// Does not change the original G01 entry or select a production renderer.
+int32_t helium_metal_terrain_test_rgba(uint8_t *rgba_out, size_t rgba_capacity,
+                                     char *message_out, size_t message_capacity);
 #ifdef __cplusplus
 }
 #endif
