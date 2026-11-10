@@ -12,36 +12,59 @@ struct MetalProbeApp: App {
 
 @MainActor
 final class ProbeModel: ObservableObject {
-    @Published private(set) var running = false
-    @Published private(set) var passed: Bool?
-    @Published private(set) var image: UIImage?
-    @Published private(set) var status = NSLocalizedString("Ready", comment: "Probe status")
-    @Published private(set) var report = NSLocalizedString(
-        "Run the standalone offscreen Metal smoke test.", comment: "Initial instructions"
-    )
+    @Published private(set) var selectedMode: ProbeMode = .g01
+    @Published private(set) var runningMode: ProbeMode?
+    @Published private(set) var results: [ProbeMode: ProbeResult] = [:]
     private let worker = DispatchQueue(label: "dev.helium.metalprobe.worker", qos: .userInitiated)
+
+    var running: Bool { runningMode != nil }
+
+    // Hide a previous image/status while that mode is being rerun. Other modes
+    // retain their independent results for this app session only.
+    var selectedResult: ProbeResult? {
+        runningMode == selectedMode ? nil : results[selectedMode]
+    }
+
+    var report: String {
+        if running {
+            return selectedMode.title + "\n" + NSLocalizedString(
+                "Waiting for the worker and GPU. A stalled driver has no timeout; close this test app if necessary.",
+                comment: "Blocking probe instructions"
+            )
+        }
+        guard let result = selectedResult else {
+            return selectedMode.title + "\n" + NSLocalizedString(
+                "Not run in this app session. Run this renderer to obtain its result and actual GPU image.",
+                comment: "Initial instructions"
+            )
+        }
+        return "Helium Metal Probe — G02-C\niOS \(UIDevice.current.systemVersion)\n" + result.report
+    }
+
+    func status(for mode: ProbeMode) -> String {
+        if runningMode == mode { return NSLocalizedString("Running", comment: "Probe status") }
+        guard let result = results[mode] else { return NSLocalizedString("Not run", comment: "Probe status") }
+        return result.passed
+            ? NSLocalizedString("PASS", comment: "Probe status")
+            : NSLocalizedString("FAIL", comment: "Probe status")
+    }
+
+    func select(_ mode: ProbeMode) {
+        guard !running else { return }
+        selectedMode = mode
+    }
 
     func run() {
         guard !running else { return }
-        running = true
-        passed = nil
-        image = nil
-        status = NSLocalizedString("Running", comment: "Probe status")
-        report = NSLocalizedString(
-            "Waiting for the worker and GPU. A stalled driver has no timeout; close this test app if necessary.",
-            comment: "Blocking probe instructions"
-        )
+        // Capture the selection before dispatch; completion never derives its
+        // identity from mutable UI selection.
+        let mode = selectedMode
+        runningMode = mode
         worker.async {
-            let result = ProbeRunner.run()
+            let result = ProbeRunner.run(mode: mode)
             DispatchQueue.main.async {
-                self.running = false
-                self.passed = result.passed
-                self.image = result.image
-                self.status = result.passed
-                    ? NSLocalizedString("PASS", comment: "Probe status")
-                    : NSLocalizedString("FAIL", comment: "Probe status")
-                self.report = "Helium Metal Probe — G01-C\niOS \(UIDevice.current.systemVersion)\n"
-                    + result.report
+                self.results[result.mode] = result
+                self.runningMode = nil
             }
         }
     }
@@ -50,45 +73,81 @@ final class ProbeModel: ObservableObject {
 @MainActor
 struct ProbeView: View {
     @StateObject private var model = ProbeModel()
-    @State private var sharing = false
+    @State private var sharePayload: SharePayload?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Helium Direct Metal Test").font(.title).bold()
                 Text("Standalone 256 × 256 indexed terrain and depth probe")
+                Group {
+                    Picker("Renderer", selection: Binding(
+                        get: { model.selectedMode }, set: { model.select($0) }
+                    )) {
+                        ForEach(ProbeMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(model.running)
+                    Text(model.selectedMode.title).font(.headline)
+                    Text(model.selectedMode.details)
+                    ForEach(ProbeMode.allCases) { mode in
+                        HStack {
+                            Text(mode.title)
+                            Spacer()
+                            Text(model.status(for: mode)).bold()
+                                .foregroundColor(statusColor(for: mode))
+                        }
+                    }
+                }
                 HStack {
                     Button("Run Metal Test") { model.run() }
                         .buttonStyle(.borderedProminent)
                         .disabled(model.running)
                     if model.running { ProgressView() }
-                    Text(model.status).bold()
-                        .foregroundColor(model.passed == true ? .green : model.passed == false ? .red : .secondary)
                 }
-                if let image = model.image {
+                if let result = model.selectedResult, let image = result.image {
+                    Text(result.mode.title).font(.headline)
                     Image(uiImage: image)
                         .interpolation(.none)
                         .resizable()
                         .scaledToFit()
                         .frame(maxWidth: 512)
                         .border(Color.secondary)
-                        .accessibilityLabel(Text("Actual Metal GPU readback of the stepped block hill"))
-                    Text("Inspect the hill for missing faces, wrong colors and depth errors. PASS is a smoke-check result, not a complete image oracle.")
+                        .accessibilityLabel(Text(result.mode.imageDescription))
+                    Text(result.mode.inspection)
                 }
                 Text(model.report)
                     .font(.system(.body, design: .monospaced))
                     .textSelection(.enabled)
-                Text("GPU timing covers one offscreen render + blit command buffer. It is not gameplay FPS. Readback completion does not prove physical display presentation.")
+                Text("Results apply only to this run and device. GPU duration is not gameplay FPS. Readback completion does not prove physical display presentation.")
                     .font(.footnote)
-                Button("Share Diagnostics and Image") { sharing = true }
-                    .disabled(model.running || model.passed == nil)
+                Button("Share Diagnostics and Image") {
+                    if let result = model.selectedResult {
+                        sharePayload = SharePayload(report: model.report, image: result.image)
+                    }
+                }
+                .disabled(model.running || model.selectedResult == nil)
             }
             .padding()
         }
-        .sheet(isPresented: $sharing) {
-            ActivitySheet(report: model.report, image: model.image)
+        .sheet(item: $sharePayload) { payload in
+            ActivitySheet(report: payload.report, image: payload.image)
         }
     }
+
+    private func statusColor(for mode: ProbeMode) -> Color {
+        guard model.runningMode != mode, let result = model.results[mode] else { return .secondary }
+        return result.passed ? .green : .red
+    }
+}
+
+// Freeze the matching diagnostics and image while the share sheet is presented.
+private struct SharePayload: Identifiable {
+    let id = UUID()
+    let report: String
+    let image: UIImage?
 }
 
 private struct ActivitySheet: UIViewControllerRepresentable {

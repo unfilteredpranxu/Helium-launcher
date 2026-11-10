@@ -74,7 +74,7 @@ jobs:
             xcodegen --version
           } 2>&1 | tee "$RUNNER_TEMP/helium-metal-probe-logs/xcodegen-toolchain.log"
 
-      - name: Compile the actual iOS Metal shader
+      - name: Compile G01 iOS Metal shader
         id: msl
         run: |
           set -euo pipefail
@@ -87,8 +87,17 @@ jobs:
             mkdir -p "$RUNNER_TEMP/helium-metal-probe-msl"
             xcrun --sdk iphoneos metal -std=ios-metal2.0 \
               -c experiments/metal-prototype/src/terrain.metal \
-              -o "$RUNNER_TEMP/helium-metal-probe-msl/terrain.air"
-          } 2>&1 | tee "$RUNNER_TEMP/helium-metal-probe-logs/msl-build.log"
+              -o "$RUNNER_TEMP/helium-metal-probe-msl/g01-terrain.air"
+          } 2>&1 | tee "$RUNNER_TEMP/helium-metal-probe-logs/msl-g01-build.log"
+
+      - name: Compile G02 iOS Metal shader
+        id: msl_g02
+        run: |
+          set -euo pipefail
+          xcrun --sdk iphoneos metal -std=ios-metal2.0 \
+            -c experiments/metal-prototype/src/terrain/terrain24.metal \
+            -o "$RUNNER_TEMP/helium-metal-probe-msl/g02-terrain.air" \
+            2>&1 | tee "$RUNNER_TEMP/helium-metal-probe-logs/msl-g02-build.log"
 
       - name: Build the independent Rust static library
         id: rust
@@ -179,7 +188,8 @@ jobs:
       - name: Summarize the single build attempt
         if: always()
         env:
-          MSL_OUTCOME: ${{ steps.msl.outcome }}
+          MSL_G01_OUTCOME: ${{ steps.msl.outcome }}
+          MSL_G02_OUTCOME: ${{ steps.msl_g02.outcome }}
           RUST_OUTCOME: ${{ steps.rust.outcome }}
           APP_OUTCOME: ${{ steps.app.outcome }}
           IPA_OUTCOME: ${{ steps.ipa.outcome }}
@@ -192,13 +202,15 @@ jobs:
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
               summary.write('# Helium Metal Probe: single Apple build attempt\n\n')
               summary.write('Commit: `' + os.environ['GITHUB_SHA'] + '`\n\n')
-              for label, key in [('MSL compilation', 'MSL_OUTCOME'),
+              for label, key in [('G01 MSL compilation', 'MSL_G01_OUTCOME'),
+                                 ('G02 MSL compilation', 'MSL_G02_OUTCOME'),
                                  ('Rust static library', 'RUST_OUTCOME'),
                                  ('Swift/link/package step', 'APP_OUTCOME'),
                                  ('IPA validation', 'IPA_OUTCOME')]:
                   summary.write('- ' + label + ': ' + os.environ[key] + '\n')
               summary.write('- Apple GPU execution: **NOT RUN**\n\n')
-              for name in ['apple-toolchain.log', 'rust-toolchain.log', 'msl-build.log',
+              for name in ['apple-toolchain.log', 'rust-toolchain.log',
+                           'msl-g01-build.log', 'msl-g02-build.log',
                            'rust-build.log', 'xcodegen-build.log',
                            'xcode-build-and-package.log', 'ipa-validation.log']:
                   path = logs / name
