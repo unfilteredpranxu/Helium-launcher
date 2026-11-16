@@ -32,6 +32,10 @@ pub fn main_with(mods: crate::mod_api::Mods) {
     };
     #[cfg(target_os = "ios")]
     boot_stage(&format!("sandbox {}", documents.display()));
+    // Isolated diagnostic metadata must exist even if startup never reaches a view.
+    // Bundle/config checks perform no UIKit attachment or GPU work.
+    #[cfg(all(target_os = "ios", feature = "helium-direct-metal"))]
+    horizon_metal_bridge::bootstrap_diagnostics();
     // `android_main` already moved into the app's files folder.
     #[cfg(target_os = "android")]
     let documents = std::env::current_dir().unwrap_or_default();
@@ -423,4 +427,3 @@ fn into_app_sandbox() -> Result<std::path::PathBuf, String> {
     std::env::set_current_dir(&documents).map_err(describe)?;
     Ok(documents)
 }
-

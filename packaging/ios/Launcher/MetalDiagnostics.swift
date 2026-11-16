@@ -17,7 +17,7 @@ func diagnosticValues() -> [UInt64] {
 }
 @_cdecl("horizon_diag_install_v2")
 public func installMetalDiagnostics(_ version:UInt32,_ event:MetalDiagnosticEvent?,_ snapshot:MetalDiagnosticSnapshot?) -> UInt32 {
-    guard version==2, Bundle.main.bundleIdentifier=="dev.helium.g06ctest",
+    guard version==2, let event=event, let snapshot=snapshot, Bundle.main.bundleIdentifier=="dev.helium.g06ctest",
           Bundle.main.object(forInfoDictionaryKey:"HeliumMetalDiagnosticsVersion") as? Int == 2 else {return 0}
     if eventFunction == nil {eventFunction=event; snapshotFunction=snapshot}
     return 2

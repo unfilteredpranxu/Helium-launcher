@@ -5,6 +5,7 @@ on:
     paths:
       - 'crates/horizon-metal-bridge/**'
       - 'crates/horizon-client/src/game.rs'
+      - 'crates/horizon-client/src/entry.rs'
       - 'packaging/ios/Launcher/**'
       - 'packaging/ios/project.yml'
       - 'packaging/ios/GameInfo.plist'
@@ -306,6 +307,6 @@ jobs:
           cargo +1.95.0 test --locked -p horizon-client-render --lib gfx::material_snapshot::
           python3 experiments/metal-prototype/tools/test_section_bridge.py
           cargo +1.95.0 fmt --manifest-path experiments/metal-prototype/Cargo.toml --check
-          rustfmt +1.95.0 --check --edition 2024 --config skip_children=true crates/horizon-metal-bridge/src/runtime.rs crates/horizon-metal-bridge/src/lib.rs crates/horizon-client/src/game.rs crates/horizon-client-render/src/gfx/material_snapshot.rs
+          rustfmt +1.95.0 --check --edition 2024 --config skip_children=true crates/horizon-metal-bridge/src/runtime.rs crates/horizon-metal-bridge/src/lib.rs crates/horizon-client/src/game.rs crates/horizon-client/src/entry.rs crates/horizon-client-render/src/gfx/material_snapshot.rs
           python3 tools/check_public_tree.py
           git diff --check

@@ -677,6 +677,7 @@ impl Recorder {
 
                 Stage::ModeSelected => {
                     s.fields[9] = observed;
+                    s.fields[15] = expected;
                 }
                 Stage::SelfTest => {
                     s.fields[10] = observed;
@@ -871,8 +872,9 @@ impl Store {
         let json = events.iter().map(Event::json).collect::<String>();
         self.replace("helium-metal-events.jsonl", json.as_bytes())?;
         let mut report = format!(
-            "HELIUM METAL G06-D DIAGNOSTIC\nSCHEMA 2 | source={}\nboot={} | TEST_ONLY={}\nrecorder_status={} | persisted_sequence={} | lost_timeline_events={}\nPREVIOUS_BOOT_INCOMPLETE={} | malformed_previous_records={}\nWGpu FALLBACK ACTIVE | PHYSICAL_PIXELS_UNVERIFIED\nPersistence acknowledgement is not a power-loss/fsync guarantee.\nSELF_TEST: typed initialization/serialization running; GPU/UI checks listed separately.\n",
+            "HELIUM METAL G06-D DIAGNOSTIC\nSCHEMA 2 | source={}\napp_build={}\nboot={} | TEST_ONLY={}\nrecorder_status={} | persisted_sequence={} | lost_timeline_events={}\nPREVIOUS_BOOT_INCOMPLETE={} | malformed_previous_records={}\nWGpu FALLBACK ACTIVE | PHYSICAL_PIXELS_UNVERIFIED\nPersistence acknowledgement is not a power-loss/fsync guarantee.\nSELF_TEST: typed initialization/serialization running; GPU/UI checks listed separately.\n",
             option_env!("HELIUM_DIAGNOSTIC_SHA").unwrap_or("development-unidentified"),
+            s.fields[15],
             s.boot,
             events.first().map(|e| e.test_only).unwrap_or(false),
             if s.torn == 0 { "OK" } else { "DEGRADED" },

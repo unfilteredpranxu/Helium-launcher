@@ -16,15 +16,16 @@ public func nativeDisplayABI() -> UInt32 { 1 }
 // Test-only bundle marker AND a strict <=64-byte sandbox file. Default is OFF.
 @_cdecl("horizon_native_display_mode")
 public func nativeDisplayMode() -> Int32 {
+    let build=UInt64(Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "") ?? 0
     let path=FileManager.default.urls(for:.documentDirectory,in:.userDomainMask)[0].appendingPathComponent("helium-metal-test.txt")
     var data:Data?=nil
     if FileManager.default.fileExists(atPath:path.path) {
-        guard let file=try? FileHandle(forReadingFrom:path) else {setMetalDebugMode("INVALID");diagnosticEvent(0,2,39);return -1}
+        guard let file=try? FileHandle(forReadingFrom:path) else {setMetalDebugMode("INVALID");diagnosticEvent(0,2,39,build,0);return -1}
         data=try? file.read(upToCount:65);try? file.close()
-        if data==nil {setMetalDebugMode("INVALID");diagnosticEvent(0,2,39);return -1}
+        if data==nil {setMetalDebugMode("INVALID");diagnosticEvent(0,2,39,build,0);return -1}
     }
     let result=MetalDiagnosticModel.mode(bundle:Bundle.main.bundleIdentifier ?? "",marker:Bundle.main.object(forInfoDictionaryKey:"HeliumMetalDiagnosticsVersion") as? Int,legacy:Bundle.main.object(forInfoDictionaryKey:"HeliumNativeMetalTest") as? Bool == true,file:data)
-    setMetalDebugMode(result.1);diagnosticEvent(0,2,result.0 < 0 ? 39 : 0,0,UInt64(max(result.0,0)))
+    setMetalDebugMode(result.1);diagnosticEvent(0,2,result.0 < 0 ? 39 : 0,build,UInt64(max(result.0,0)))
     return result.0
 }
 

@@ -43,3 +43,12 @@ pub fn checkpoint(stage: u32) {
         );
     }
 }
+
+/// Called after iOS has selected Documents, before loading resources/window creation.
+/// The qualified bundle marker is checked by the native host; ordinary apps remain off.
+pub fn bootstrap_diagnostics() {
+    #[cfg(target_os = "ios")]
+    {
+        let _ = helium_metal_prototype::attached::device_test_mode();
+    }
+}

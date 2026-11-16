@@ -10,6 +10,7 @@ import Foundation
    assert(report.contains("PREVIOUS_BOOT_INCOMPLETE=true") && report.contains("ViewLayoutInvalid"))
    print("TEST_EVENT_ONLY previous process recovery PASS");return
   }
+  assert(helium_diag_event_v2(0,2,0,11002,2)==2)
   assert(helium_diag_test_attempt_v2(101)==2)
   for (code,expected) in [(UInt32(10),UInt64(2360)),(12,1),(14,1),(13,1)] {assert(helium_diag_event_v2(101,30,code,expected,0)==2)}
   for code in [UInt32(11),18,19,24,34,28,30,31,6,2,4,15,21,22,23,33] { assert(helium_diag_event_v2(101,30,code,11,12)==2) }
@@ -23,7 +24,7 @@ import Foundation
   var state=[UInt64](repeating:0,count:32);assert(state.withUnsafeMutableBufferPointer{helium_diag_snapshot_v2($0.baseAddress,32)}==2)
   assert(state[2]==103 && state[4]==3 && state[6]>=state[5] && state[8]==0 && state[15]==1)
   let report=try String(contentsOfFile:root+"/Helium-Metal-Report.txt",encoding:.utf8)
-  assert(report.contains("recorder_status=OK") && report.contains("ViewLayoutInvalid") && report.contains("LightmapChanged") && report.contains("ColumnUnloaded") && report.contains("PHYSICAL_PIXELS_UNVERIFIED"))
+  assert(report.contains("app_build=11002") && report.contains("recorder_status=OK") && report.contains("ViewLayoutInvalid") && report.contains("LightmapChanged") && report.contains("ColumnUnloaded") && report.contains("PHYSICAL_PIXELS_UNVERIFIED"))
   let lines=try String(contentsOfFile:root+"/helium-metal-events.jsonl",encoding:.utf8).split(separator:"\n").map{try JSONSerialization.jsonObject(with:Data($0.utf8)) as! [String:Any]}
   let sequence=lines.map{($0["event_seq"] as! NSNumber).uint64Value}
   assert(zip(sequence,sequence.dropFirst()).allSatisfy{$0 < $1})
