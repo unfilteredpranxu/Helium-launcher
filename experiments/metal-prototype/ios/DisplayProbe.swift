@@ -39,7 +39,7 @@ final class DisplayView: UIView {
         stop()
         let token = helium_display_create()
         guard token != 0 else {
-            label.text = "Previous display request retiring; retrying"
+            label.text = NSLocalizedString("Previous display request retiring; retrying", comment: "Display status")
             DispatchQueue.main.asyncAfter(deadline: .now()+0.2) { [weak self] in self?.setNeedsLayout() }
             return
         }
@@ -53,11 +53,11 @@ final class DisplayView: UIView {
         metal.frame = bounds; metal.drawableSize = size
         layer.insertSublayer(metal, at: 0)
         target = metal; handle = token; requested = size
-        label.text = "Initializing native Metal display"
+        label.text = NSLocalizedString("Initializing native Metal display", comment: "Display status")
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self = self, self.handle == token else { return }
             let state = helium_display_status(token)
-            self.label.text = [1:"Initializing",2:"Submitted",3:"GPU completed; scanout unverified",4:"Drawable unavailable",5:"Failed or cancelled"] [Int(state)] ?? "Released"
+            self.label.text = NSLocalizedString([1:"Initializing",2:"Submitted",3:"GPU completed; scanout unverified",4:"Drawable unavailable",5:"Failed or cancelled"] [Int(state)] ?? "Released", comment: "Display status")
         }
         Thread.detachNewThread {
             autoreleasepool {
