@@ -144,7 +144,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/bridge"
           cargo +1.95.0 test --locked -p horizon-metal-bridge 2>&1 | tee "$RUNNER_TEMP/bridge/tests.log"
-          cargo +1.95.0 test --locked -p horizon-metal-bridge --lib runtime::ownership_tests::native_worker_from_production_owned_bank_and_typed_section -- --ignored --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/bridge/native.log"
+          HORIZON_SPRITE_SPLIT=512 cargo +1.95.0 test --locked -p horizon-metal-bridge --lib runtime::ownership_tests::native_worker_from_production_owned_bank_and_typed_section -- --ignored --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/bridge/native.log"
           cargo +1.95.0 check --locked -p horizon-client --no-default-features --features helium-direct-metal 2>&1 | tee "$RUNNER_TEMP/bridge/game.log"
           cargo +1.95.0 check --locked --target aarch64-apple-ios -p horizon-metal-bridge 2>&1 | tee "$RUNNER_TEMP/bridge/ios.log"
           cargo +1.95.0 check --locked --target aarch64-apple-ios -p horizon-client --no-default-features --features helium-direct-metal 2>&1 | tee "$RUNNER_TEMP/bridge/ios-game.log"

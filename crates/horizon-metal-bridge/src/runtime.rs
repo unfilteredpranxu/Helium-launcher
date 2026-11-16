@@ -808,10 +808,35 @@ mod ownership_tests {
     #[test]
     #[ignore = "actual Metal worker; handcrafted SectionMesh/lighting/camera, production mip generator; NOT category D"]
     fn native_worker_from_production_owned_bank_and_typed_section() {
-        let bank = handcrafted_bridge_bank();
-        let geometry = geometry(&bank);
+        let banks = crate::adapter::material_adapter::handcrafted_banked_sources();
+        assert_eq!(
+            banks[0].description().split,
+            512,
+            "native test must set HORIZON_SPRITE_SPLIT=512"
+        );
+        assert_eq!(banks.len(), 3);
+        let original = geometry(&banks[0]);
+        let mut vertices = original.vertices.clone();
+        let mut indices = original.indices.clone();
+        for id in [512u16, 1026] {
+            let start = (vertices.len() / 24) as u32;
+            let mut quad = original.vertices.clone();
+            for v in quad.chunks_exact_mut(24) {
+                v[16..18].copy_from_slice(&(0x8000 | id).to_le_bytes());
+            }
+            vertices.extend_from_slice(&quad);
+            indices.extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+        }
+        let geometry = Arc::new(Geometry {
+            vertices,
+            indices,
+            ..Arc::try_unwrap(original).ok().unwrap()
+        });
+        let expected = banks[0].retained_bytes()
+            + geometry.vertices.capacity()
+            + geometry.indices.capacity() * 4;
         let job = Job {
-            source: vec![bank],
+            source: banks,
             geometry,
             cancel: Arc::new(AtomicBool::new(false)),
             lightmap: [255; 1024],
@@ -828,6 +853,10 @@ mod ownership_tests {
         };
         let report = run(job).expect("real Metal bridge worker");
         assert!(report.contains("backend=direct-Metal"));
+        assert!(
+            report.contains(&format!("source_retained: {expected}")),
+            "shared snapshot must count once: {report}"
+        );
         eprintln!(
             "G06 native worker with HANDCRAFTED production structs and production mip preparation, synthetic camera/lightmap; NOT game-runtime evidence: {report}"
         );

@@ -441,3 +441,29 @@ pub(crate) fn handcrafted_bridge_bank() -> BankSource {
         bank: 0,
     }
 }
+
+/// Controlled native-test source; the CI command selects the existing production
+/// split=512 option externally. Actual PreparedTextures mip/bank code is used.
+#[cfg(test)]
+pub(crate) fn handcrafted_banked_sources() -> Vec<BankSource> {
+    let prepared = horizon_client_render::gfx::PreparedTextures::new(
+        &vec![255; 1027 * 16],
+        2,
+        1027,
+        &[],
+        (&[255; 16], 2),
+    )
+    .retain_material_snapshot(1 << 20);
+    let state = prepared.capture_materials(2, 1027, false);
+    let snapshot = state.snapshot().unwrap();
+    snapshot
+        .banks()
+        .iter()
+        .enumerate()
+        .map(|(bank, _)| BankSource {
+            snapshot: snapshot.clone(),
+            ticket: state.ticket().unwrap(),
+            bank: bank as u32,
+        })
+        .collect()
+}
