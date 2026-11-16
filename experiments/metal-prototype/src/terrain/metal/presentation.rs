@@ -8,6 +8,11 @@ use crate::{
 use block2::RcBlock;
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use std::sync::Arc;
+struct KeepAlive<S> {
+    owners: Ownership<S>,
+    _device: Retained<Device>,
+    _queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+}
 pub struct Display {
     layer: Retained<CAMetalLayer>,
     device: crate::upload::Id,
@@ -177,14 +182,18 @@ impl Display {
         self.encode(&command, &source, &target, viewport)?;
         // Retaining command owns drawable/texture/pipeline. Callback owns ONLY CPU
         // source/permit; it captures no command, view, layer, or borrowed session.
-        let lease = Arc::new(Ownership {
-            source: owner,
-            previous: None,
-            _permit: permit,
+        let lease = Arc::new(KeepAlive {
+            owners: Ownership {
+                source: owner,
+                previous: None,
+                _permit: permit,
+            },
+            _device: renderer.device.clone(),
+            _queue: renderer.queue.clone(),
         });
         let kept = lease.clone();
         let callback = move |_: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
-            let _source = &kept.source;
+            let _source = &kept.owners.source;
         };
         fn checked<T: Send + Sync + 'static>(_: &T) {}
         checked(&callback);

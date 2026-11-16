@@ -175,10 +175,21 @@ fn drive(layer: Retained<CAMetalLayer>, t: &Token) -> Result<(), String> {
 /// The driver may wait/poll on its dedicated worker, never on a UIKit thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helium_display_run(id: u64, layer: *mut AnyObject) -> i32 {
-    let Some(t) = token(id) else { return -1 };
-    if t.status.load(Ordering::Acquire) != 1 || t.running.swap(true, Ordering::AcqRel) {
-        return -1;
-    }
+    // Claim under the registry lock: release cannot remove this issued handle
+    // between lookup and the running transition, then admit a replacement worker.
+    let t = {
+        let Ok(slot) = TOKEN.lock() else { return -1 };
+        let Some((key, t)) = slot.as_ref() else {
+            return -1;
+        };
+        if *key != id
+            || t.status.load(Ordering::Acquire) != 1
+            || t.running.swap(true, Ordering::AcqRel)
+        {
+            return -1;
+        }
+        t.clone()
+    };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if objc2_foundation::NSThread::isMainThread_class() || layer.is_null() {
             return Err("worker/live layer required".into());
