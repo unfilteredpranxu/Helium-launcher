@@ -65,4 +65,3 @@ int32_t helium_display_run(uint64_t handle, void *layer);
 }
 #endif
 #endif
-

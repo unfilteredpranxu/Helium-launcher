@@ -235,6 +235,11 @@ mod tests {
         size.width = 256.;
         size.height = 256.;
         layer.setDrawableSize(size);
+        let color = objc2_core_graphics::CGColorSpace::with_name(Some(unsafe {
+            objc2_core_graphics::kCGColorSpaceLinearSRGB
+        }))
+        .unwrap();
+        layer.setColorspace(Some(&color));
         let id = helium_display_create();
         assert_ne!(id, 0);
         let code = unsafe { helium_display_run(id, Retained::as_ptr(&layer).cast_mut().cast()) };

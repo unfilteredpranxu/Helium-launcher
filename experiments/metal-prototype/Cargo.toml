@@ -26,4 +26,5 @@ objc2-metal = { version = "=0.3.2", default-features = false, features = [
     "MTLDrawable", "MTLResource", "MTLTexture", "MTLTypes",
 ] }
 
-objc2-quartz-core = { version = "=0.3.2", default-features = false, features = ["std", "CALayer", "CAMediaTiming", "CAMetalLayer", "objc2-metal", "objc2-core-foundation"] }
+objc2-quartz-core = { version = "=0.3.2", default-features = false, features = ["std", "CALayer", "CAMediaTiming", "CAMetalLayer", "objc2-core-graphics", "objc2-metal", "objc2-core-foundation"] }
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["std", "CGColorSpace"] }
