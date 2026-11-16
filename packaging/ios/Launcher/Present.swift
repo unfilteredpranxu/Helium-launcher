@@ -42,6 +42,7 @@ private func present(attempts: Int) {
             let scene = host.view.window?.windowScene
             host.dismiss(animated: true) {
                 LauncherLog.write("launcher dismissed; game lifecycle resumed");
+                diagnosticEvent(0,6)
                 Task { @MainActor in
                     // The window allows only landscape again before the phone turns back.
                     _ = await Bridge.send("launcher-visible false")

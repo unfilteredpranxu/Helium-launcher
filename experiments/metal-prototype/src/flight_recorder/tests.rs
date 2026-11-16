@@ -1,0 +1,302 @@
+use super::*;
+fn temp() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "helium-recorder-test-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+#[test]
+fn first_cause_priority_survives_saturation_and_ack() {
+    let path = temp();
+    let r = Recorder::persistent_kind(path.clone(), true).unwrap();
+    assert!(r.begin_world(1, 12));
+    r.record(
+        1,
+        Stage::Cancelled,
+        Emitter::Swift,
+        Some(Cause::ViewLayoutInvalid),
+        2360,
+        0,
+    );
+    for n in 0..3000 {
+        r.record(1, Stage::UploadStarted, Emitter::Worker, None, n, 8);
+    }
+    assert!(r.wait_ack(Duration::from_secs(5)));
+    let text = fs::read_to_string(path.join("Helium-Metal-Report.txt")).unwrap();
+    assert!(text.contains("ViewLayoutInvalid"));
+    assert!(r.status()[7] > 0);
+    assert_eq!(r.status()[8], 0);
+    assert!(
+        fs::metadata(path.join("helium-metal-events.jsonl"))
+            .unwrap()
+            .len()
+            <= 512 * 1024
+    );
+    assert!(text.len() <= 256 * 1024);
+}
+#[test]
+fn concurrent_cancel_latch_and_stale_callback_separation() {
+    let r = Arc::new(Recorder::memory());
+    r.begin_world(1, 5);
+    r.begin_world(2, 5);
+    std::thread::scope(|s| {
+        for c in [Cause::MaterialChanged, Cause::ViewLayoutInvalid] {
+            let r = r.clone();
+            s.spawn(move || r.record(1, Stage::Cancelled, Emitter::Swift, Some(c), 10, 11));
+        }
+    });
+    r.record(
+        2,
+        Stage::Cancelled,
+        Emitter::Game,
+        Some(Cause::LightmapChanged),
+        11,
+        12,
+    );
+    assert_eq!(
+        r.snapshot()
+            .iter()
+            .filter(|e| e.attempt == 1 && e.first)
+            .count(),
+        1
+    );
+    assert_eq!(r.first(2), Some(Cause::LightmapChanged));
+    let before = r.first(1);
+    assert!(!r.begin_world(1, 99));
+    assert_eq!(before, r.first(1));
+    let events = r.snapshot();
+    assert!(events.windows(2).all(|e| e[0].seq < e[1].seq));
+}
+#[test]
+fn attempt_cap_and_explicit_ids() {
+    let r = Recorder::memory();
+    for id in 1..=3 {
+        assert!(r.begin_world(id, 7));
+    }
+    assert!(!r.begin_world(4, 7));
+    r.record(
+        99,
+        Stage::Cancelled,
+        Emitter::Swift,
+        Some(Cause::Panic),
+        0,
+        0,
+    );
+    assert!(r.snapshot().is_empty());
+}
+#[test]
+fn disk_failure_never_acknowledges_then_recovers() {
+    let path = temp();
+    fs::write(&path, b"not a directory").unwrap();
+    let r = Recorder::persistent_kind(path.clone(), true).unwrap();
+    r.begin(1);
+    r.record(
+        1,
+        Stage::Cancelled,
+        Emitter::Game,
+        Some(Cause::MeshReplaced),
+        0,
+        0,
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(r.status()[8], 1);
+    assert_eq!(r.status()[6], 0);
+    assert_eq!(r.first(1), Some(Cause::MeshReplaced));
+    fs::remove_file(&path).unwrap();
+    assert!(r.wait_ack(Duration::from_secs(5)));
+    assert!(
+        fs::read_to_string(path.join("Helium-Metal-Report.txt"))
+            .unwrap()
+            .contains("MeshReplaced")
+    );
+}
+#[test]
+fn rename_failure_and_recovery_are_explicit() {
+    let path = temp();
+    fs::create_dir_all(path.join("Helium-Metal-Report.txt")).unwrap();
+    let r = Recorder::persistent_kind(path.clone(), true).unwrap();
+    r.begin(1);
+    r.record(
+        1,
+        Stage::Cancelled,
+        Emitter::Game,
+        Some(Cause::ColumnUnloaded),
+        0,
+        0,
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(r.status()[8], 1);
+    assert_eq!(r.status()[6], 0);
+    fs::remove_dir(path.join("Helium-Metal-Report.txt")).unwrap();
+    assert!(r.wait_ack(Duration::from_secs(5)));
+}
+#[test]
+fn previous_boot_and_torn_tail_are_preserved_without_private_text() {
+    let path = temp();
+    let r = Recorder::persistent_kind(path.clone(), true).unwrap();
+    r.begin(1);
+    r.record(1, Stage::UploadStarted, Emitter::Worker, None, 1, 3);
+    r.record(
+        1,
+        Stage::Cancelled,
+        Emitter::Game,
+        Some(Cause::LightmapChanged),
+        11,
+        12,
+    );
+    assert!(r.wait_ack(Duration::from_secs(5)));
+    drop(r);
+    std::thread::sleep(Duration::from_millis(300));
+    use std::io::Write;
+    fs::OpenOptions::new()
+        .append(true)
+        .open(path.join("helium-metal-events.jsonl"))
+        .unwrap()
+        .write_all(b"token=SECRET /private/owner 10.0.0.1 PIN999999")
+        .unwrap();
+    let next = Recorder::persistent_kind(path.clone(), true).unwrap();
+    next.record(0, Stage::ModeSelected, Emitter::Game, None, 0, 2);
+    assert!(next.wait_ack(Duration::from_secs(5)));
+    let text = fs::read_to_string(path.join("Helium-Metal-Report.txt")).unwrap();
+    assert!(text.contains("PREVIOUS_BOOT_INCOMPLETE=true"));
+    assert!(text.contains("LightmapChanged"));
+    assert!(!text.contains("SECRET"));
+    assert!(next.status()[14] > 0);
+}
+#[test]
+fn allowlist_roundtrip_and_invalid_records() {
+    let r = Recorder::memory();
+    r.begin(8);
+    r.record(
+        8,
+        Stage::Cancelled,
+        Emitter::Swift,
+        Some(Cause::WindowNotKey),
+        1,
+        0,
+    );
+    let e = r.snapshot()[0].clone();
+    let line = e.json();
+    let parsed = Event::parse(line.trim_end()).unwrap();
+    assert_eq!(parsed.cause, e.cause);
+    assert_eq!(parsed.attempt, 8);
+    assert!(Event::parse("account=PRIVATE").is_none());
+    assert!(Stage::from_code(u32::MAX).is_none());
+    assert_eq!(Cause::reason("/private/token=SECRET"), Cause::Unknown);
+}
+#[test]
+fn retries_require_current_fresh_input_and_retirement() {
+    for c in [
+        Cause::MaterialChanged,
+        Cause::LightmapChanged,
+        Cause::MeshReplaced,
+    ] {
+        assert!(retry_allowed(
+            c,
+            1,
+            true,
+            true,
+            true,
+            Duration::from_secs(5)
+        ));
+        assert!(!retry_allowed(
+            c,
+            3,
+            true,
+            true,
+            true,
+            Duration::from_secs(5)
+        ));
+        assert!(!retry_allowed(
+            c,
+            1,
+            false,
+            true,
+            true,
+            Duration::from_secs(5)
+        ));
+        assert!(!retry_allowed(
+            c,
+            1,
+            true,
+            true,
+            false,
+            Duration::from_secs(5)
+        ));
+    }
+    for c in [
+        Cause::MemoryPressure,
+        Cause::AppInactive,
+        Cause::WorldChanged,
+        Cause::DeviceFailure,
+    ] {
+        assert!(!retry_allowed(
+            c,
+            1,
+            true,
+            true,
+            true,
+            Duration::from_secs(5)
+        ));
+    }
+}
+
+#[test]
+fn historical_events_do_not_mutate_current_hud_and_stop_causes_survive_rotation() {
+    let r = Recorder::memory();
+    r.begin_world(1, 10);
+    r.begin_world(2, 11);
+    r.record(2, Stage::CameraReady, Emitter::Game, None, 50, 60);
+    r.record(1, Stage::CameraReady, Emitter::Game, None, 1, 2);
+    r.record(1, Stage::UiRevealed, Emitter::Swift, None, 0, 0);
+    assert_eq!(r.status()[18], 50);
+    assert_eq!(r.status()[19], 60);
+    assert_eq!(r.status()[24], 0);
+    r.record(
+        2,
+        Stage::Cancelled,
+        Emitter::Swift,
+        Some(Cause::AppInactive),
+        0,
+        0,
+    );
+    for n in 0..600 {
+        r.record(2, Stage::UploadStarted, Emitter::Worker, None, n, 8);
+    }
+    assert!(!r.retry_safe(2));
+}
+#[test]
+fn cleanup_and_no_fresh_mesh_cannot_invent_failure_after_reveal() {
+    let r = Recorder::memory();
+    r.begin(1);
+    r.record(1, Stage::UiRevealed, Emitter::Swift, None, 0, 0);
+    r.record(
+        1,
+        Stage::Removed,
+        Emitter::Swift,
+        Some(Cause::SnapshotExpired),
+        0,
+        0,
+    );
+    r.record(
+        1,
+        Stage::Cancelled,
+        Emitter::Ticket,
+        Some(Cause::TicketCancelled),
+        0,
+        0,
+    );
+    r.record(
+        1,
+        Stage::RetryWaiting,
+        Emitter::Game,
+        Some(Cause::NoFreshMesh),
+        0,
+        0,
+    );
+    assert_eq!(r.first(1), None);
+    assert_eq!(r.status()[24], 1);
+}

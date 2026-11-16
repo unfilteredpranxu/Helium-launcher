@@ -576,3 +576,15 @@ pub(crate) mod tests;
 
 #[cfg(all(test, any(target_os = "macos", target_os = "ios")))]
 mod async_native_tests;
+
+/// One observation, including orphaned submitted work retained by completion callbacks.
+pub fn native_busy() -> bool {
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    {
+        slot::Slot::global().busy()
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "macos")))]
+    {
+        false
+    }
+}

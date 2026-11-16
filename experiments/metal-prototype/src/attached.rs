@@ -9,7 +9,7 @@ use std::{
     ffi::{CString, c_void},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver},
     },
 };
@@ -21,7 +21,7 @@ struct Entry {
     work: Option<Work>,
 }
 static ENTRY: Mutex<Option<Entry>> = Mutex::new(None);
-static NEXT: AtomicU64 = AtomicU64::new(1);
+
 /// No UIKit/Metal object is transferred through this Send CPU registry.
 pub struct Ticket {
     id: u64,
@@ -82,7 +82,76 @@ fn symbol(name: &str) -> Result<*mut c_void, String> {
         Ok(p)
     }
 }
+static DIAGNOSTICS_ENABLED: AtomicBool = AtomicBool::new(false);
+pub fn diagnostics_enabled() -> bool {
+    DIAGNOSTICS_ENABLED.load(Ordering::Acquire)
+}
+fn install_diagnostics() -> Result<bool, String> {
+    let p = symbol("horizon_diag_install_v2")?;
+    let f: extern "C" fn(
+        u32,
+        extern "C" fn(u64, u32, u32, u64, u64) -> u32,
+        unsafe extern "C" fn(*mut u64, usize) -> u32,
+    ) -> u32 = unsafe { std::mem::transmute(p) };
+    let enabled = f(
+        2,
+        diagnostic_event,
+        crate::diagnostic_ffi::helium_diag_snapshot_v2,
+    ) == 2;
+    if enabled {
+        crate::diagnostic_ffi::helium_diag_init_v2(0);
+        DIAGNOSTICS_ENABLED.store(true, Ordering::Release);
+    }
+    Ok(enabled)
+}
+extern "C" fn diagnostic_event(
+    id: u64,
+    stage: u32,
+    code: u32,
+    expected: u64,
+    observed: u64,
+) -> u32 {
+    let result = crate::diagnostic_ffi::helium_diag_event_v2(id, stage, code, expected, observed);
+    if result == 2 && matches!(stage, 29 | 30) && code != 0 {
+        if let Ok(entry) = ENTRY.lock() {
+            if let Some(e) = entry.as_ref().filter(|e| e.id == id) {
+                e.status.cancel();
+            }
+        }
+    }
+    result
+}
+pub fn hud_window(window: &impl HasWindowHandle) -> Result<(), String> {
+    if !objc2_foundation::NSThread::isMainThread_class() {
+        return Err("HUD main thread required".into());
+    }
+    if !install_diagnostics()? {
+        return Ok(());
+    }
+    let RawWindowHandle::UiKit(view) = window.window_handle().map_err(|e| e.to_string())?.as_raw()
+    else {
+        return Err("HUD UIKit handle required".into());
+    };
+    let p = symbol("horizon_diag_hud_v2")?;
+    let f: extern "C" fn(*mut c_void) = unsafe { std::mem::transmute(p) };
+    f(view.ui_view.as_ptr());
+    Ok(())
+}
+pub fn can_start() -> bool {
+    if !objc2_foundation::NSThread::isMainThread_class() {
+        return false;
+    }
+    if crate::upload::native_busy() || ENTRY.lock().map(|e| e.is_some()).unwrap_or(true) {
+        return false;
+    }
+    let Ok(p) = symbol("horizon_diag_host_idle_v2") else {
+        return false;
+    };
+    let f: extern "C" fn() -> bool = unsafe { std::mem::transmute(p) };
+    f()
+}
 pub fn device_test_mode() -> Result<i32, String> {
+    let _ = install_diagnostics()?;
     let p = symbol("horizon_native_display_mode")?;
     let f: extern "C" fn() -> i32 = unsafe { std::mem::transmute(p) };
     Ok(f())
@@ -92,7 +161,7 @@ extern "C" fn invalidate(id: u64) {
         id,
         Stage::Cancelled,
         Emitter::Swift,
-        Some(Cause::Unknown),
+        None, // typed v2 Swift event precedes this v1 compatibility cleanup
         0,
         0,
     );
@@ -101,6 +170,9 @@ extern "C" fn invalidate(id: u64) {
             e.status.cancel();
         }
     }
+}
+pub(crate) fn diagnostic_reveal_allowed(id: u64) -> bool {
+    ready(id)
 }
 extern "C" fn ready(id: u64) -> bool {
     ENTRY.lock().ok().is_some_and(|e| {
@@ -172,6 +244,15 @@ pub fn submit<T: Send + 'static>(
     cancel: Arc<AtomicBool>,
     job: impl FnOnce(Layer) -> Result<T, String> + Send + 'static,
 ) -> Result<(Ticket, Receiver<Result<T, String>>), String> {
+    let id = recorder::global().allocate(0).ok_or("attempt limit")?;
+    submit_attempt(window, cancel, id, job)
+}
+pub fn submit_attempt<T: Send + 'static>(
+    window: &impl HasWindowHandle,
+    cancel: Arc<AtomicBool>,
+    id: u64,
+    job: impl FnOnce(Layer) -> Result<T, String> + Send + 'static,
+) -> Result<(Ticket, Receiver<Result<T, String>>), String> {
     if !objc2_foundation::NSThread::isMainThread_class() {
         return Err("attachment request requires main thread".into());
     }
@@ -190,9 +271,7 @@ pub fn submit<T: Send + 'static>(
         extern "C" fn(u64),
         extern "C" fn(u64) -> bool,
     ) -> bool = unsafe { std::mem::transmute(request) };
-    let id = NEXT
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-        .map_err(|_| "native session IDs exhausted")?;
+
     let (send, recv) = mpsc::sync_channel(1);
     let status = Arc::new(Gate::new(cancel.clone()));
     let state = status.clone();
@@ -201,8 +280,7 @@ pub fn submit<T: Send + 'static>(
         if e.is_some() {
             return Err("native attached session busy/retiring".into());
         }
-        recorder::global().begin(id);
-        recorder::emit(Stage::HostRequested, Emitter::Game, None, 0, 0);
+        recorder::global().record(id, Stage::HostRequested, Emitter::Game, None, 0, 0);
         *e = Some(Entry {
             id,
             cancel: cancel.clone(),
@@ -244,10 +322,21 @@ pub fn submit<T: Send + 'static>(
     Ok((Ticket { id, cancel }, recv))
 }
 impl Ticket {
+    pub fn diagnostic_id(&self) -> u64 {
+        self.id
+    }
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Acquire)
     }
     pub fn publish(&self) {
+        recorder::global().record(
+            self.id,
+            Stage::PublishRequested,
+            Emitter::Ticket,
+            None,
+            0,
+            0,
+        );
         let allowed = ENTRY.lock().ok().is_some_and(|e| {
             e.as_ref()
                 .is_some_and(|e| e.id == self.id && e.status.publish())

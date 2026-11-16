@@ -4,6 +4,7 @@ mod scene;
 pub use scene::{Mesh, Vertex, fixture, fixture_camera};
 
 pub mod banks;
+mod diagnostic_ffi;
 pub mod display;
 pub mod flight_recorder;
 pub mod frame;

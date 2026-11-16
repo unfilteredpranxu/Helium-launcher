@@ -66,6 +66,11 @@ def verify(app: Path, rust: Path) -> None:
     for name in ("abi", "mode", "request", "publish", "cancel"):
         if "_horizon_native_display_" + name not in defined:
             raise ValueError("missing native host definition: " + name)
+    for name in ("horizon_diag_install_v2","horizon_diag_hud_v2","horizon_diag_host_idle_v2"):
+        if "_"+name not in defined: raise ValueError("missing diagnostics ABI v2 export: "+name)
+    for marker in (b"Helium-Metal-Report.txt",b"helium-metal-events.jsonl"):
+        with binary.open("rb") as stream, mmap.mmap(stream.fileno(),0,access=mmap.ACCESS_READ) as data:
+            if data.find(marker)<0: raise ValueError("diagnostic writer absent")
     for path in app.rglob("*"):
         if path.name in {"horizon-resources.json", "level.dat", "helium-metal-test.txt"} or path.suffix == ".jar":
             raise ValueError("asset/save/config must NOT be bundled: " + path.name)
@@ -74,13 +79,13 @@ def verify(app: Path, rust: Path) -> None:
         value = plistlib.load(stream)
     if value["CFBundleExecutable"] != "Horizon" or value["MinimumOSVersion"] != "15.0":
         raise ValueError("wrong actual game bundle contract")
-    value.update(CFBundleIdentifier="dev.helium.g06ctest", CFBundleDisplayName="Helium G06C Test", HeliumNativeMetalTest=True)
+    value.update(CFBundleIdentifier="dev.helium.g06ctest", CFBundleDisplayName="Helium G06C Test", HeliumNativeMetalTest=True, HeliumMetalDiagnosticsVersion=2, CFBundleVersion="11002")
     with info.open("wb") as stream:
         plistlib.dump(value, stream)
     print("Verified actual opt-in Rust executable == bundle executable; thin arm64 device iOS15.0")
     print("Executable bytes:", binary.stat().st_size, "SHA256:", digest(binary))
     print("Five ABI v1 host exports defined; proprietary assets/saves/config absent; isolated bundle ID applied")
-    print("Configuration file absent: default OFF. Device/world runtime remains UNVERIFIED.")
+    print("Configuration file absent: isolated marker v2 AUTO-ARMS; normal apps remain OFF. Device/world runtime remains UNVERIFIED.")
 
 
 if __name__ == "__main__":

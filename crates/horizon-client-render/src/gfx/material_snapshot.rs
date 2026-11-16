@@ -14,6 +14,12 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Generation(u64);
 impl Generation {
+    /// Numeric diagnostics only; this does not construct or authorize a generation.
+    pub fn diagnostic_id(self) -> u64 {
+        self.0
+    }
+}
+impl Generation {
     fn new() -> Self {
         Self(
             NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))

@@ -10,6 +10,7 @@ on:
       - 'packaging/ios/GameInfo.plist'
       - 'tools/ci/verify-attached-ios-game.py'
       - 'tests/test_attached_ios_binary.py'
+      - 'tools/ci/MetalDiag*'
       - 'crates/horizon-client/Cargo.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -166,9 +167,7 @@ jobs:
             await github.rest.checks.create({owner:context.repo.owner,repo:context.repo.repo,head_sha:context.sha,name:'Helium production bridge evidence',status:'completed',conclusion:'neutral',output:{title:'Read individual compilation logs; not gameplay runtime proof',summary}});
 
   attached-ios-game:
-    # G06-D is not owner-ready until its full HUD/export/self-test gates exist.
-    if: github.ref_name != 'feature/helium-g06d-one-build-diagnostics'
-    needs: apple-sdk
+    needs: [apple-sdk, production-bridge, diagnostics-qualification, linux-diagnostics]
     runs-on: macos-26
     timeout-minutes: 90
     env:
@@ -178,6 +177,7 @@ jobs:
       CARGO_INCREMENTAL: '0'
       IPHONEOS_DEPLOYMENT_TARGET: '15.0'
       RUSTUP_TOOLCHAIN: '1.95.0'
+      HELIUM_DIAGNOSTIC_SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -214,7 +214,7 @@ jobs:
           python3 tools/ci/verify-attached-ios-game.py "$app" target/aarch64-apple-ios/release/horizon-client 2>&1 | tee "$RUNNER_TEMP/attached-game/verified.log"
           mkdir -p "$RUNNER_TEMP/attached-game/package/Payload"
           cp -a "$app" "$RUNNER_TEMP/attached-game/package/Payload/"
-          (cd "$RUNNER_TEMP/attached-game/package" && zip -qry ../Helium-G06C-game-unsigned.ipa Payload)
+          (cd "$RUNNER_TEMP/attached-game/package" && zip -qry ../Helium-G06D-game-unsigned.ipa Payload)
       - name: Publish actual game link evidence
         if: always()
         uses: actions/github-script@v7
@@ -229,11 +229,78 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: success()
         with:
-          name: Helium-G06C-isolated-game-unsigned
-          path: ${{ runner.temp }}/attached-game/Helium-G06C-game-unsigned.ipa
+          name: Helium-G06D-instrumented-game-unsigned
+          path: |
+            ${{ runner.temp }}/attached-game/Helium-G06D-game-unsigned.ipa
+            experiments/metal-prototype/docs/G06-D-owner.md
+            ${{ runner.temp }}/attached-game/verified.log
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: helium-g06c-game-link-logs
           path: ${{ runner.temp }}/attached-game/*.log
+
+  diagnostics-qualification:
+    runs-on: macos-26
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: '2'
+      HELIUM_DIAGNOSTIC_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Rust diagnostics and Swift C ABI report roundtrip
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/diag-evidence" "$RUNNER_TEMP/diag-session"
+          cargo +1.95.0 test --locked --manifest-path experiments/metal-prototype/Cargo.toml flight_recorder:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/diag-evidence/tests.log"
+          cargo +1.95.0 build --locked --manifest-path experiments/metal-prototype/Cargo.toml --lib
+          swiftc -import-objc-header tools/ci/MetalDiagnosticsABI.h packaging/ios/Launcher/MetalDiagnosticsModel.swift tools/ci/MetalDiagnosticE2E.swift experiments/metal-prototype/target/debug/libhelium_metal_prototype.a -framework Metal -framework QuartzCore -framework Foundation -framework CoreGraphics -framework IOSurface -o "$RUNNER_TEMP/diag-e2e"
+          HELIUM_DIAGNOSTIC_DIRECTORY="$RUNNER_TEMP/diag-session" "$RUNNER_TEMP/diag-e2e" 2>&1 | tee "$RUNNER_TEMP/diag-evidence/e2e.log"
+          cp "$RUNNER_TEMP/diag-session/Helium-Metal-Report.txt" "$RUNNER_TEMP/diag-evidence/TEST_ONLY-report.txt"
+          HELIUM_DIAGNOSTIC_DIRECTORY="$RUNNER_TEMP/diag-session" "$RUNNER_TEMP/diag-e2e" --recover 2>&1 | tee "$RUNNER_TEMP/diag-evidence/recovery.log"
+      - name: Compile actual UIKit diagnostics host (no shell substitution)
+        run: |
+          set -euo pipefail
+          command -v xcodegen >/dev/null || brew install xcodegen
+          (cd packaging/ios && xcodegen generate)
+          xcodebuild -project packaging/ios/HorizonIOS.xcodeproj -target HorizonLauncherKit -configuration Release -sdk iphoneos -arch arm64 CODE_SIGNING_ALLOWED=NO CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/diag-framework" build > "$RUNNER_TEMP/diag-evidence/UIKit.log" 2>&1 || { tail -80 "$RUNNER_TEMP/diag-evidence/UIKit.log"; exit 1; }
+      - name: Publish diagnostic qualification evidence
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs=require('fs'),path=require('path');
+            const summary=['tests.log','e2e.log','recovery.log','UIKit.log','TEST_ONLY-report.txt'].map(n=>{let p=path.join(process.env.RUNNER_TEMP,'diag-evidence',n);return '### '+n+'\n```text\n'+(fs.existsSync(p)?fs.readFileSync(p,'utf8').slice(-9000):'NOT RUN')+'\n```';}).join('\n');
+            await github.rest.checks.create({owner:context.repo.owner,repo:context.repo.repo,head_sha:context.sha,name:'Helium diagnostics E2E evidence',status:'completed',conclusion:'neutral',output:{title:'Real Swift/C/Rust/report and UIKit compile; synthetic, not physical-device evidence',summary}});
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: G06D-TEST-ONLY-diagnostics-evidence
+          path: ${{ runner.temp }}/diag-evidence/*
+
+  linux-diagnostics:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: '3'
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwayland-dev libxkbcommon-dev libx11-dev libudev-dev libasound2-dev
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Mandatory Linux regressions and formatting
+        run: |
+          set -euo pipefail
+          cargo +1.95.0 test --locked --manifest-path experiments/metal-prototype/Cargo.toml
+          cargo +1.95.0 test --locked -p horizon-metal-bridge
+          cargo +1.95.0 test --locked -p horizon-client-render --lib mesher::
+          cargo +1.95.0 test --locked -p horizon-client-render --lib gfx::material_snapshot::
+          python3 experiments/metal-prototype/tools/test_section_bridge.py
+          cargo +1.95.0 fmt --manifest-path experiments/metal-prototype/Cargo.toml --check
+          rustfmt +1.95.0 --check --edition 2024 --config skip_children=true crates/horizon-metal-bridge/src/runtime.rs crates/horizon-metal-bridge/src/lib.rs crates/horizon-client/src/game.rs crates/horizon-client-render/src/gfx/material_snapshot.rs
+          python3 tools/check_public_tree.py
+          git diff --check

@@ -20,6 +20,9 @@ use std::{
     },
     time::Instant,
 };
+fn generation_value(g: Generation) -> u64 {
+    g.diagnostic_id()
+}
 type Key = (i32, i32, i32);
 pub const SNAPSHOT_BUDGET: usize = 64 * 1024 * 1024;
 const GEOMETRY_BUDGET: usize = 2 * 1024 * 1024;
@@ -208,6 +211,7 @@ fn points_visible(view: View, points: impl IntoIterator<Item = [f32; 3]>) -> boo
     !outside.into_iter().any(|v| v)
 }
 struct Flight {
+    attempt: u64,
     geometry: Arc<Geometry>,
     source: Vec<BankSource>,
     cancel: Arc<AtomicBool>,
@@ -219,6 +223,7 @@ struct Flight {
 }
 #[cfg(target_os = "ios")]
 struct Shown {
+    attempt: u64,
     _ticket: helium_metal_prototype::attached::Ticket,
     source: Vec<BankSource>,
     key: Key,
@@ -234,6 +239,13 @@ pub struct Controller {
     sequence: u64,
     world_epoch: u64,
     finished: bool,
+    attempts: u32,
+    retry_at: Instant,
+    retry_forbidden: bool,
+    retirement_recorded: bool,
+    no_fresh_recorded: bool,
+    last_attempt: u64,
+    started: Instant,
     counters: Counters,
     last_error: Option<String>,
     window: Option<Arc<winit::window::Window>>,
@@ -293,6 +305,13 @@ impl Controller {
             sequence: 0,
             world_epoch: 0,
             finished: false,
+            attempts: 0,
+            retry_at: Instant::now(),
+            retry_forbidden: false,
+            retirement_recorded: false,
+            no_fresh_recorded: false,
+            last_attempt: 0,
+            started: Instant::now(),
             counters: Default::default(),
             last_error: None,
             window: None,
@@ -319,13 +338,16 @@ impl Controller {
         }
     }
     pub fn invalidate(&mut self, reason: &str) {
-        recorder::emit(
-            Stage::Cancelled,
-            Emitter::Game,
-            Some(Cause::reason(reason)),
-            0,
-            0,
-        );
+        let cause = Cause::reason(reason);
+        let id = self
+            .flight
+            .as_ref()
+            .map(|f| f.attempt)
+            .unwrap_or(self.last_attempt);
+        recorder::global().record(id, Stage::Cancelled, Emitter::Game, Some(cause), 0, 0);
+        if self.attempts > 0 && !cause.recoverable() {
+            self.retry_forbidden = true;
+        }
         self.candidate = None;
         self.camera = None;
         #[cfg(target_os = "ios")]
@@ -349,8 +371,45 @@ impl Controller {
         if self.displayed.as_ref().is_some_and(|d| d.key == key) {
             self.invalidate("displayed section replaced");
         }
-        if self.mode == Mode::Disabled || self.finished {
+        if self.mode == Mode::Disabled {
             return;
+        }
+        if self.finished {
+            #[cfg(target_os = "ios")]
+            if self.mode == Mode::AttachedOneSection
+                && !self.retry_forbidden
+                && self.attempts < 3
+                && Instant::now() >= self.retry_at
+                && self.flight.is_none()
+                && self.displayed.is_none()
+                && recorder::global().retry_safe(self.last_attempt)
+                && recorder::global()
+                    .first(self.last_attempt)
+                    .is_some_and(|cause| {
+                        recorder::retry_allowed(
+                            cause,
+                            self.attempts,
+                            true,
+                            true,
+                            true,
+                            self.started.elapsed(),
+                        )
+                    })
+                && helium_metal_prototype::attached::can_start()
+            {
+                self.finished = false; // ONLY this fresh accepted section can start the retry.
+                recorder::global().record(
+                    self.last_attempt,
+                    Stage::RetryWaiting,
+                    Emitter::Game,
+                    None,
+                    self.attempts as u64,
+                    0,
+                );
+            }
+            if self.finished {
+                return;
+            }
         }
         if self.mode == Mode::AttachedOneSection && self.camera.is_none() {
             self.counters.busy += 1; // wait for a genuine world camera, never a title/old-world transform
@@ -461,6 +520,14 @@ impl Controller {
             return;
         }
         #[cfg(target_os = "ios")]
+        if self
+            .displayed
+            .as_ref()
+            .is_some_and(|d| d._ticket.is_cancelled())
+        {
+            self.displayed = None;
+        }
+        #[cfg(target_os = "ios")]
         if self.displayed.as_ref().is_some_and(|d| {
             d._ticket.is_cancelled()
                 || d.source.iter().any(|s| s.check_current(renderer).is_err())
@@ -485,22 +552,34 @@ impl Controller {
                 || f.size != [renderer.config.width, renderer.config.height]
             {
                 let cause = if f.source.iter().any(|s| s.check_current(renderer).is_err()) {
-                    Cause::BankStale
+                    if f.source.first().is_some_and(|s| {
+                        s.description().identity.generation
+                            == renderer.material_state().generation()
+                    }) {
+                        Cause::MaterialChanged
+                    } else {
+                        Cause::BankStale
+                    }
                 } else if renderer.material_state().light_revision() != Ok(f.light_revision) {
                     Cause::LightmapChanged
                 } else {
                     Cause::FrameSizeChanged
                 };
-                recorder::emit(
+                recorder::global().record(
+                    f.attempt,
                     Stage::Cancelled,
                     Emitter::Game,
                     Some(cause),
-                    if cause == Cause::LightmapChanged {
+                    if cause == Cause::MaterialChanged {
+                        f.source[0].description().identity.revision
+                    } else if cause == Cause::LightmapChanged {
                         f.light_revision
                     } else {
                         0
                     },
-                    if cause == Cause::LightmapChanged {
+                    if cause == Cause::MaterialChanged {
+                        renderer.material_state().animation_revision()
+                    } else if cause == Cause::LightmapChanged {
                         renderer.material_state().light_revision().unwrap_or(0)
                     } else {
                         0
@@ -516,12 +595,22 @@ impl Controller {
                         && f.source.iter().all(|s| s.check_current(renderer).is_ok())
                         && renderer.material_state().light_revision() == Ok(f.light_revision);
                     self.finished = true;
+                    self.retry_at = Instant::now() + std::time::Duration::from_secs(2);
                     match result {
                         Ok(evidence) if valid => {
                             #[cfg(target_os = "ios")]
                             if let Some(t) = f.attached.take() {
+                                recorder::global().record(
+                                    f.attempt,
+                                    Stage::ProducerRevalidated,
+                                    Emitter::Game,
+                                    None,
+                                    0,
+                                    0,
+                                );
                                 t.publish();
                                 self.displayed = Some(Shown {
+                                    attempt: f.attempt,
                                     _ticket: t,
                                     source: f.source,
                                     key: f.geometry.key,
@@ -550,6 +639,36 @@ impl Controller {
             return;
         }
         if self.finished || frame.title {
+            #[cfg(target_os = "ios")]
+            if self.finished
+                && !self.retirement_recorded
+                && helium_metal_prototype::attached::can_start()
+            {
+                recorder::global().record(
+                    self.last_attempt,
+                    Stage::Retired,
+                    Emitter::Game,
+                    None,
+                    0,
+                    0,
+                );
+                self.retirement_recorded = true;
+            }
+            if self.finished && !self.no_fresh_recorded && Instant::now() >= self.retry_at {
+                self.no_fresh_recorded = true;
+                recorder::global().record(
+                    self.last_attempt,
+                    Stage::RetryWaiting,
+                    Emitter::Game,
+                    Some(if self.attempts >= 3 {
+                        Cause::RetryExhausted
+                    } else {
+                        Cause::NoFreshMesh
+                    }),
+                    0,
+                    0,
+                );
+            }
             return;
         }
         let Some(g) = self.candidate.take() else {
@@ -629,7 +748,59 @@ impl Controller {
         };
         let geometry = Arc::new(g);
         let cancel = Arc::new(AtomicBool::new(false));
+        let Some(attempt) = recorder::global().allocate(self.world_epoch) else {
+            self.finished = true;
+            return;
+        };
+        if self.attempts == 0 {
+            self.started = Instant::now();
+        }
+        self.attempts += 1;
+        self.last_attempt = attempt;
+        self.retirement_recorded = false;
+        self.no_fresh_recorded = false;
+        recorder::global().record(
+            attempt,
+            Stage::MeshAccepted,
+            Emitter::Game,
+            None,
+            geometry.vertices.len() as u64 / 24,
+            geometry.indices.len() as u64,
+        );
+        recorder::global().record(
+            attempt,
+            Stage::CameraReady,
+            Emitter::Game,
+            None,
+            generation_value(geometry.generation),
+            light_revision,
+        );
+        recorder::global().record(
+            attempt,
+            Stage::MeshIdentity,
+            Emitter::Game,
+            None,
+            geometry.sequence,
+            ((geometry.key.0 as u32 as u64) << 32) | (geometry.key.2 as u32 as u64),
+        );
+        recorder::global().record(
+            attempt,
+            Stage::MeshOrigin,
+            Emitter::Game,
+            None,
+            geometry.key.1 as u32 as u64,
+            geometry.origin[1] as u32 as u64,
+        );
+        recorder::global().record(
+            attempt,
+            Stage::MaterialRevision,
+            Emitter::Game,
+            None,
+            validation[0].description().identity.revision,
+            renderer.material_state().animation_revision(),
+        );
         let job = Job {
+            attempt,
             world_epoch: self.world_epoch,
             source,
             geometry: geometry.clone(),
@@ -644,13 +815,15 @@ impl Controller {
                 self.error("actual game window unavailable".into());
                 return;
             };
-            match helium_metal_prototype::attached::submit(
+            match helium_metal_prototype::attached::submit_attempt(
                 window.as_ref(),
                 cancel.clone(),
+                attempt,
                 move |layer| run_impl(job, Some(layer)),
             ) {
                 Ok((ticket, receiver)) => {
                     self.flight = Some(Flight {
+                        attempt,
                         geometry,
                         source: validation,
                         cancel,
@@ -674,6 +847,7 @@ impl Controller {
             }) {
             Ok(_) => {
                 self.flight = Some(Flight {
+                    attempt,
                     geometry,
                     source: validation,
                     cancel,
@@ -690,13 +864,23 @@ impl Controller {
 }
 impl Drop for Controller {
     fn drop(&mut self) {
-        recorder::emit(Stage::Cancelled, Emitter::Game, Some(Cause::Shutdown), 0, 0);
+        if self.flight.is_some() {
+            recorder::global().record(
+                self.last_attempt,
+                Stage::Cancelled,
+                Emitter::Game,
+                Some(Cause::Shutdown),
+                0,
+                0,
+            );
+        }
         if let Some(f) = &self.flight {
             f.cancel.store(true, Ordering::Release);
         }
     }
 }
 struct Job {
+    attempt: u64,
     world_epoch: u64,
     source: Vec<BankSource>,
     geometry: Arc<Geometry>,
@@ -767,15 +951,36 @@ fn run_impl(
         terrain::{Budget, Options, TerrainRenderer},
     };
     use std::time::Duration;
+    let event = |stage, cause, expected, observed| {
+        recorder::global().record(
+            job.attempt,
+            stage,
+            Emitter::Worker,
+            cause,
+            expected,
+            observed,
+        )
+    };
+    event(Stage::WorkerStarted, None, 0, 0);
     let deadline = Instant::now() + Duration::from_secs(30);
     let pause = || -> Result<(), String> {
         if Instant::now() >= deadline {
+            event(Stage::Cancelled, Some(Cause::GpuTimeout), 0, 0);
             return Err("native diagnostic deadline; submitted resources retire through G05 completion owners".into());
         }
         std::thread::sleep(Duration::from_millis(2));
         Ok(())
     };
-    let renderer = TerrainRenderer::new()?;
+    let renderer = TerrainRenderer::new().map_err(|e| {
+        event(Stage::Cancelled, Some(Cause::DeviceFailure), 0, 0);
+        e
+    })?;
+    event(
+        Stage::DeviceCreated,
+        None,
+        renderer.capabilities().apple_families as u64,
+        renderer.capabilities().max_buffer_bytes as u64,
+    );
     let sources: Vec<_> = job
         .source
         .into_iter()
@@ -789,21 +994,51 @@ fn run_impl(
         payload_bytes: 192 * 1024 * 1024,
         staging_bytes: 16 * 1024 * 1024,
     };
-    let mut material = renderer.create_material_set(&sources, &job.cancel, budget)?;
+    for d in &descriptions {
+        event(
+            Stage::BankLayout,
+            None,
+            d.bank as u64,
+            ((d.allocated as u64) << 32) | d.used as u64,
+        );
+    }
+    let mut material = renderer
+        .create_material_set(&sources, &job.cancel, budget)
+        .map_err(|e| {
+            event(Stage::Cancelled, Some(Cause::UploadFailed), 0, 0);
+            e
+        })?;
     for source in sources {
         let bank = source.description().bank;
-        material.bank_mut(bank)?.begin_upload(
-            &renderer,
-            source,
-            &job.cancel,
-            upload::Update::Full,
-            budget,
-        )?;
+        event(
+            Stage::UploadStarted,
+            None,
+            bank as u64,
+            descriptions.len() as u64,
+        );
+        material
+            .bank_mut(bank)?
+            .begin_upload(&renderer, source, &job.cancel, upload::Update::Full, budget)
+            .map_err(|e| {
+                event(Stage::Cancelled, Some(Cause::UploadFailed), bank as u64, 0);
+                e
+            })?;
         loop {
             match material.bank_mut(bank)?.poll_upload(&renderer, &job.cancel) {
-                upload::Poll::Completed(_) => break,
+                upload::Poll::Completed(_) => {
+                    event(
+                        Stage::BankCompleted,
+                        None,
+                        bank as u64,
+                        material.counters().upload_bytes as u64,
+                    );
+                    break;
+                }
                 upload::Poll::Pending => pause()?,
-                upload::Poll::Failed(e) => return Err(e),
+                upload::Poll::Failed(e) => {
+                    event(Stage::Cancelled, Some(Cause::UploadFailed), bank as u64, 0);
+                    return Err(e);
+                }
                 _ => return Err("missing bank upload".into()),
             }
         }
@@ -818,33 +1053,51 @@ fn run_impl(
         "Helium native bank uploads ready count={}",
         descriptions.len()
     );
+    event(Stage::BanksResident, None, descriptions.len() as u64, 0);
     let mut frames = renderer.create_frames()?;
-    frames.begin(
-        &renderer,
-        &material,
-        &job.cancel,
-        &job.geometry.mesh(),
-        &job.lightmap,
-        job.view,
-        Options {
-            width: job.size[0] as usize,
-            height: job.size[1] as usize,
-            depth: helium_metal_prototype::terrain::Depth::Reversed,
-            budget: Budget {
-                payload_bytes: 192 * 1024 * 1024,
-                target_pixels: 6 * 1024 * 1024,
+    frames
+        .begin(
+            &renderer,
+            &material,
+            &job.cancel,
+            &job.geometry.mesh(),
+            &job.lightmap,
+            job.view,
+            Options {
+                width: job.size[0] as usize,
+                height: job.size[1] as usize,
+                depth: helium_metal_prototype::terrain::Depth::Reversed,
+                budget: Budget {
+                    payload_bytes: 192 * 1024 * 1024,
+                    target_pixels: 6 * 1024 * 1024,
+                },
             },
-        },
-    )?;
+        )
+        .map_err(|e| {
+            event(Stage::Cancelled, Some(Cause::FrameFailed), 0, 0);
+            e
+        })?;
     log::info!(
         "Helium native frame submitted triangles={}",
         job.geometry.indices.len() / 3
     );
+    event(
+        Stage::DrawSubmitted,
+        None,
+        job.geometry.indices.len() as u64 / 3,
+        0,
+    );
     let mut ticket = loop {
         match frames.poll(&renderer, &material, &job.cancel) {
-            frame::Poll::Completed(t) => break t,
+            frame::Poll::Completed(t) => {
+                event(Stage::DrawCompleted, None, 0, 0);
+                break t;
+            }
             frame::Poll::Pending => pause()?,
-            frame::Poll::Failed(e) => return Err(e),
+            frame::Poll::Failed(e) => {
+                event(Stage::Cancelled, Some(Cause::FrameFailed), 0, 0);
+                return Err(e);
+            }
             _ => return Err("missing native frame".into()),
         }
     };
@@ -864,17 +1117,36 @@ fn run_impl(
     #[cfg(not(target_os = "ios"))]
     let mut display =
         renderer.detached_diagnostic_display(job.size[0] as usize, job.size[1] as usize)?;
-    let output = frames.take_completed(&renderer, &material, &job.cancel, &mut ticket)?;
-    let Some(mut presentation) = display.present(output, 192 * 1024 * 1024, &job.cancel)? else {
+    let output = frames
+        .take_completed(&renderer, &material, &job.cancel, &mut ticket)
+        .map_err(|e| {
+            event(Stage::Cancelled, Some(Cause::FrameFailed), 0, 0);
+            e
+        })?;
+    event(Stage::DrawableRequested, None, 0, 0);
+    let Some(mut presentation) = display
+        .present(output, 192 * 1024 * 1024, &job.cancel)
+        .map_err(|e| {
+            event(Stage::Cancelled, Some(Cause::PresentFailed), 0, 0);
+            e
+        })?
+    else {
+        event(Stage::Cancelled, Some(Cause::DrawableUnavailable), 0, 0);
         return Err("diagnostic CAMetalDrawable unavailable; no presentation success".into());
     };
     log::info!(
         "Helium native presentation submitted attached_generation={attachment:?}; scanout unverified"
     );
-    while !presentation.poll()? {
+    event(Stage::DrawableAcquired, None, 0, 0);
+    event(Stage::PresentSubmitted, None, 0, 0);
+    while !presentation.poll().map_err(|e| {
+        event(Stage::Cancelled, Some(Cause::PresentFailed), 0, 0);
+        e
+    })? {
         pause()?;
     }
     drop(presentation);
+    event(Stage::PresentCompleted, None, 0, 0);
     Ok(format!(
         "backend=direct-Metal world_epoch={} key={:?} origin={:?} accepted_mesh_sequence={} banks={:?} revision={} vertices={} indices={} native_upload={:?} frame={:?} presentation={:?}; attached_generation={attachment:?}; GPU command completed, scanout unverified",
         job.world_epoch,
@@ -1133,6 +1405,7 @@ mod ownership_tests {
             let (_send, receiver) = mpsc::sync_channel(1);
             let mut owner = Controller::new(Mode::OneSectionDiagnostic);
             owner.flight = Some(Flight {
+                attempt: 0,
                 geometry: geometry.clone(),
                 source: vec![source],
                 cancel: cancel.clone(),
@@ -1198,6 +1471,7 @@ mod ownership_tests {
             + geometry.vertices.capacity()
             + geometry.indices.capacity() * 4;
         let job = Job {
+            attempt: 0,
             world_epoch: 0, // handcrafted test, NOT an actual game session
             source: banks,
             geometry,

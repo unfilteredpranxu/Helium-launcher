@@ -13247,6 +13247,8 @@ impl Game<'_> {
         create: Option<&horizon_client::title::WorldOptions>,
     ) -> Result<()> {
         log::info!("Horizon checkpoint: world-open requested (path/name omitted)");
+        #[cfg(feature = "helium-direct-metal")]
+        horizon_metal_bridge::checkpoint(7);
         // openWorldLoadLevelData: an existing world whose level data does not read opens
         // RecoverWorldDataScreen instead.
         if create.is_none()
@@ -13329,6 +13331,8 @@ impl Game<'_> {
         log::info!(
             "Horizon checkpoint: selected world prepared; installing real world and streamer"
         );
+        #[cfg(feature = "helium-direct-metal")]
+        horizon_metal_bridge::checkpoint(8);
         self.reset_tutorial();
         // Another world: its generator, not the last one's Density line.
         self.debug_density.borrow_mut().clear();
@@ -17594,7 +17598,11 @@ impl Game<'_> {
                     if matches!(rendered, Ok(true)) && !horizon_ios_launcher::covered() {
                         native.frame(renderer, &frame);
                     } else {
-                        native.invalidate("production frame unavailable");
+                        native.invalidate(if horizon_ios_launcher::covered() {
+                            "launcher covered"
+                        } else {
+                            "production frame unavailable"
+                        });
                     }
                 }
                 rendered
@@ -18739,6 +18747,10 @@ impl ApplicationHandler for Game<'_> {
             }
         }
         self.window = Some(window);
+        #[cfg(feature = "helium-direct-metal")]
+        if let Some(w) = &self.window {
+            horizon_metal_bridge::diagnostic_window(w);
+        }
         self.ime_allowed = false;
         self.ime_area = None;
         self.apply_settings();
@@ -22636,6 +22648,8 @@ fn build_renderer(
         shader_pack.hdr_float,
     ))?;
     log::info!("Horizon checkpoint: wgpu world resource producer initialized");
+    #[cfg(feature = "helium-direct-metal")]
+    horizon_metal_bridge::checkpoint(9);
     renderer.hud.sprite_animations = atlas
         .sprite_animations
         .iter()
@@ -23175,6 +23189,10 @@ impl Loading {
         horizon_client::telemetry::note_display(&window);
         if horizon_ios_launcher::waiting() {
             self.window = Some(window);
+            #[cfg(feature = "helium-direct-metal")]
+            if let Some(w) = &self.window {
+                horizon_metal_bridge::diagnostic_window(w);
+            }
             horizon_ios_launcher::present();
             return;
         }
@@ -23233,6 +23251,10 @@ impl Loading {
         }
         horizon_client::hud::GUI_SCALE.store(self.settings.gui_scale, Ordering::Relaxed);
         self.window = Some(window);
+        #[cfg(feature = "helium-direct-metal")]
+        if let Some(w) = &self.window {
+            horizon_metal_bridge::diagnostic_window(w);
+        }
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, mut event: WindowEvent) {
         if self.window.as_ref().is_none_or(|w| w.id() != id) {
@@ -23430,6 +23452,8 @@ impl Loading {
     }
     fn finish(&mut self, loaded: Loaded) -> Result<Option<split::Split<'static>>> {
         log::info!("Horizon checkpoint: prepared resources loaded; starting game renderer handoff");
+        #[cfg(feature = "helium-direct-metal")]
+        horizon_metal_bridge::checkpoint(3);
         let handoff_at = Instant::now();
         let mut options = self.options.take().ok_or("loading already finished")?;
         options.resources = loaded.root.clone();
@@ -23569,6 +23593,12 @@ impl App {
         }
     }
     fn memory_warning_here(&mut self) {
+        #[cfg(feature = "helium-direct-metal")]
+        if let App::Ready(game) = self {
+            if let Some(native) = game.host.direct_metal.as_mut() {
+                native.invalidate("native memory pressure");
+            }
+        }
         match self {
             App::Loading(loading) => loading.on_memory_warning(),
             App::Ready(game) => game.host.on_memory_warning(Instant::now()),

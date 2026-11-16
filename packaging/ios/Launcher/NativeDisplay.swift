@@ -16,31 +16,29 @@ public func nativeDisplayABI() -> UInt32 { 1 }
 // Test-only bundle marker AND a strict <=64-byte sandbox file. Default is OFF.
 @_cdecl("horizon_native_display_mode")
 public func nativeDisplayMode() -> Int32 {
-    guard Bundle.main.object(forInfoDictionaryKey: "HeliumNativeMetalTest") as? Bool == true else { return 0 }
-    let path = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("helium-metal-test.txt")
-    guard FileManager.default.fileExists(atPath: path.path) else { return 0 }
-    guard let attrs = try? FileManager.default.attributesOfItem(atPath: path.path),
-          let size = attrs[.size] as? NSNumber, size.intValue <= 64,
-          let file = try? FileHandle(forReadingFrom: path) else { return -1 }
-    defer { try? file.close() }
-    guard let data = try? file.read(upToCount: 65), data.count <= 64,
-          let value = String(data: data, encoding: .utf8) else { return -1 }
-    switch value { case "off", "off\n": return 0
-    case "attached-one-section", "attached-one-section\n": return 2
-    default: NSLog("Helium native configuration invalid; disabled"); return -1 }
+    let path=FileManager.default.urls(for:.documentDirectory,in:.userDomainMask)[0].appendingPathComponent("helium-metal-test.txt")
+    var data:Data?=nil
+    if FileManager.default.fileExists(atPath:path.path) {
+        guard let file=try? FileHandle(forReadingFrom:path) else {setMetalDebugMode("INVALID");return -1}
+        data=try? file.read(upToCount:65);try? file.close()
+        if data==nil {setMetalDebugMode("INVALID");return -1}
+    }
+    let result=MetalDiagnosticModel.mode(bundle:Bundle.main.bundleIdentifier ?? "",marker:Bundle.main.object(forInfoDictionaryKey:"HeliumMetalDiagnosticsVersion") as? Int,legacy:Bundle.main.object(forInfoDictionaryKey:"HeliumNativeMetalTest") as? Bool == true,file:data)
+    setMetalDebugMode(result.1);diagnosticEvent(0,2,result.0 < 0 ? 39 : 0,0,UInt64(max(result.0,0)))
+    return result.0
 }
 
 private final class NativeMetalView: UIView {
     override class var layerClass: AnyClass { CAMetalLayer.self }
-    var invalid: (() -> Void)?
+    var invalid: ((UInt32,UInt64,UInt64) -> Void)?
     var initialPixels = CGSize.zero
     override func layoutSubviews() {
         super.layoutSubviews()
         let scale = window?.screen.scale ?? 0
         let size = CGSize(width: (bounds.width*scale).rounded(), height: (bounds.height*scale).rounded())
-        if size != initialPixels { invalid?() } // cancel, NEVER mutate a pending drawable layout
+        if size != initialPixels { invalid?(10,MetalDiagnosticModel.pixels(Double(initialPixels.width),Double(initialPixels.height)),MetalDiagnosticModel.pixels(Double(size.width),Double(size.height))) } // cancel, NEVER mutate a pending drawable layout
     }
-    override func didMoveToWindow() { super.didMoveToWindow(); if window == nil { invalid?() } }
+    override func didMoveToWindow() { super.didMoveToWindow(); if window == nil { invalid?(11,0,0) } }
 }
 private final class NativeSession {
     let id: UInt64
@@ -55,41 +53,43 @@ private final class NativeSession {
         self.id=id; self.parent=parent; self.window=parent.window; self.cancel=cancel; self.ready=ready
         view=NativeMetalView(frame: parent.bounds)
     }
-    func valid() -> Bool {
-        guard ProcessInfo.processInfo.systemUptime - started < 35, let parent = parent, let window = window, parent.window === window,
-              view.superview === parent, !window.isHidden, window.isKeyWindow, !parent.isHidden, UIApplication.shared.applicationState == .active,
-              window.rootViewController?.presentedViewController == nil else { return false }
-        return CGSize(width:(parent.bounds.width*window.screen.scale).rounded(),height:(parent.bounds.height*window.screen.scale).rounded()) == view.initialPixels
+    func invalidCause() -> UInt32 {
+        let size=parent.map {p in CGSize(width:(p.bounds.width*(window?.screen.scale ?? 0)).rounded(),height:(p.bounds.height*(window?.screen.scale ?? 0)).rounded())}
+        return MetalDiagnosticModel.invalidHost(age:ProcessInfo.processInfo.systemUptime-started,parent:parent != nil,window:window != nil,attached:parent?.window === window && view.superview === parent,hidden:window?.isHidden != false || parent?.isHidden != false,key:window?.isKeyWindow == true,active:UIApplication.shared.applicationState == .active,modal:window?.rootViewController?.presentedViewController != nil,size:size==view.initialPixels)
     }
     deinit { timer?.invalidate() }
 }
-func cancelAllNativeTargets() { for id in Array(nativeTargets.keys) { cancelNative(id) } }
-private func cancelNative(_ id: UInt64) {
+func cancelAllNativeTargets(_ cause:UInt32=13) { diagnosticEvent(0,cause==13 ? 5 : 30,cause);for id in Array(nativeTargets.keys) { cancelNative(id,cause) } }
+func nativeDisplayIsIdle()->Bool {nativeTargets.isEmpty}
+private func cancelNative(_ id: UInt64,_ cause:UInt32=16,_ expected:UInt64=0,_ observed:UInt64=0) {
+    diagnosticEvent(id,cause==20 ? 29 : 30,cause,expected,observed)
     guard let target=nativeTargets.removeValue(forKey:id) else { return }
     target.timer?.invalidate(); target.cancel(id); target.view.invalid=nil; target.view.removeFromSuperview()
+    diagnosticEvent(id,29,0,UInt64(cause),0)
     LauncherLog.write("native session closed \(id); wgpu fallback visible")
 }
 @_cdecl("horizon_native_display_request")
 public func nativeDisplayRequest(_ id: UInt64, _ pointer: UnsafeMutableRawPointer?, _ work: NativeWork?, _ cancel: NativeCancel?, _ ready: NativeReady?) -> Bool {
-    guard Thread.isMainThread, nativeTargets.isEmpty, let pointer=pointer, let work=work, let cancel=cancel, let ready=ready,
-          let parent=Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? UIView,
-          let window=parent.window, !window.isHidden, window.isKeyWindow, !parent.isHidden, window.rootViewController?.presentedViewController == nil,
-          UIApplication.shared.applicationState == .active else {
-        LauncherLog.write("native attach unavailable: idle host and live, visible, key game view without modal required")
-        return false
-    }
+    guard Thread.isMainThread, nativeTargets.isEmpty, let pointer=pointer, let work=work, let cancel=cancel, let ready=ready else {diagnosticEvent(id,30,38);return false}
+    guard let parent=Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? UIView else {diagnosticEvent(id,30,21);return false}
+    guard let window=parent.window else {diagnosticEvent(id,30,22);return false}
+    let hostCause=MetalDiagnosticModel.invalidHost(age:0,parent:true,window:true,attached:true,hidden:window.isHidden || parent.isHidden,key:window.isKeyWindow,active:UIApplication.shared.applicationState == .active,modal:window.rootViewController?.presentedViewController != nil,size:true)
+    guard hostCause==0 else {diagnosticEvent(id,30,hostCause);return false}
     let pixels=CGSize(width:(parent.bounds.width*window.screen.scale).rounded(),height:(parent.bounds.height*window.screen.scale).rounded())
     guard pixels.width>0, pixels.height>0, pixels.width<=4096, pixels.height<=4096, pixels.width*pixels.height*12 <= 64*1024*1024 else {
+        diagnosticEvent(id,30,10,0,MetalDiagnosticModel.pixels(Double(pixels.width),Double(pixels.height)))
         LauncherLog.write("native attach rejected: physical dimensions \(pixels), policy 1..4096 and <=64MiB three-drawable reservation")
         return false
     }
     guard MTLCreateSystemDefaultDevice() != nil else {
+        diagnosticEvent(id,30,28)
         LauncherLog.write("native attach rejected: no system Metal device")
         return false
     }
     // UIKit lifecycle notifications execute on main; no session is retained by observer.
     if !nativeObserving { nativeObserving=true
-        NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object:nil, queue:.main) { _ in cancelAllNativeTargets() }
+        NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object:nil, queue:.main) { _ in cancelAllNativeTargets(14) }
+        NotificationCenter.default.addObserver(forName:UIApplication.didReceiveMemoryWarningNotification,object:nil,queue:.main){_ in cancelAllNativeTargets(34)}
     }
     let target=NativeSession(id,parent,cancel,ready)
     let view=target.view; let metal=view.layer as! CAMetalLayer
@@ -102,12 +102,14 @@ public func nativeDisplayRequest(_ id: UInt64, _ pointer: UnsafeMutableRawPointe
     label.text=NSLocalizedString("Native diagnostic snapshot · 5 seconds · wgpu producer active",comment:"Native diagnostic")
     label.textColor = .yellow; label.backgroundColor = .black; label.numberOfLines=2; label.font = .systemFont(ofSize:12)
     view.addSubview(label)
-    nativeTargets[id]=target; view.invalid={ cancelNative(id) }; parent.addSubview(view)
+    nativeTargets[id]=target; view.invalid={ cause,old,new in cancelNative(id,cause,old,new) }; parent.addSubview(view)
+    diagnosticEvent(id,14,0,UInt64(pixels.width),UInt64(pixels.height));liftMetalHUD()
     target.timer=Timer.scheduledTimer(withTimeInterval:0.1,repeats:true){[weak target] _ in
-        guard let target=target else {return}; if !target.valid() {cancelNative(id)}
+        guard let target=target else {return}; let cause=target.invalidCause();if cause != 0 {cancelNative(id,cause)}
     }
     LauncherLog.write("native layer attached generation=\(id) size=\(pixels); transparent until validated")
-    Thread.detachNewThread { // strongly retains the separate layer; UIKit view stays main-owned
+    Thread.detachNewThread {
+        diagnosticEvent(id,15) // strongly retains the separate layer; UIKit view stays main-owned
         autoreleasepool { withExtendedLifetime(metal) { work(id,Unmanaged.passUnretained(metal).toOpaque()) } }
     }
     return true
@@ -115,10 +117,12 @@ public func nativeDisplayRequest(_ id: UInt64, _ pointer: UnsafeMutableRawPointe
 @_cdecl("horizon_native_display_publish")
 public func nativeDisplayPublish(_ id:UInt64) {
     DispatchQueue.main.async {
-        guard let target=nativeTargets[id], target.valid(), target.ready(id) else {cancelNative(id);return}
+        guard let target=nativeTargets[id] else {diagnosticEvent(id,30,16);return}
+        let cause=target.invalidCause();guard cause==0, target.ready(id) else {cancelNative(id,cause==0 ? 16 : cause);return}
         target.view.alpha=1
+        diagnosticEvent(id,28)
         LauncherLog.write("native captured frame revealed generation=\(id); scanout unverified")
-        DispatchQueue.main.asyncAfter(deadline:.now()+5){cancelNative(id)}
+        DispatchQueue.main.asyncAfter(deadline:.now()+5){cancelNative(id,20)}
     }
 }
 @_cdecl("horizon_native_display_cancel")
