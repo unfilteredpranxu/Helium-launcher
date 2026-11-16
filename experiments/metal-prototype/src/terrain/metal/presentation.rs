@@ -86,7 +86,7 @@ impl TerrainRenderer {
             pipeline,
             size,
             used: false,
-            progress: display::Progress::default(),
+            progress: display::Progress::created(),
         })
     }
 }
@@ -237,6 +237,18 @@ impl<S: Source> Presentation<'_, S> {
             return Err("presentation receipt already consumed".into());
         }
         let size = self.display.layer.drawableSize();
+        let resized =
+            size.width != self.display.size.0 as f64 || size.height != self.display.size.1 as f64;
+        if resized && !self.invalid {
+            self.display.progress.counters.resizes += 1;
+        }
+        let valid_space = self
+            .display
+            .layer
+            .colorspace()
+            .and_then(|s| objc2_core_graphics::CGColorSpace::name(Some(&s)))
+            .is_some_and(|name| &*name == unsafe { objc2_core_graphics::kCGColorSpaceLinearSRGB });
+        self.invalid |= !valid_space;
         self.invalid |= self.display.layer.pixelFormat() != MTLPixelFormat::BGRA8Unorm
             || self.display.layer.device().as_deref()
                 != Some(&*self.output.presentation_renderer().device)

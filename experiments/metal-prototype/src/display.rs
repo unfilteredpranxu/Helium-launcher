@@ -63,6 +63,9 @@ pub struct Counters {
     pub skipped: u64,
     pub polls: u64,
     pub invalidated: u64,
+    pub resizes: u64,
+    pub recreations: u64,
+    pub diagnostic_readback_bytes: u64,
     pub current_payload: usize,
     pub peak_payload: usize,
 }
@@ -78,6 +81,15 @@ pub(crate) struct Progress {
     allow(dead_code)
 )]
 impl Progress {
+    pub fn created() -> Self {
+        Self {
+            counters: Counters {
+                recreations: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
     pub fn begin(&mut self, payload: usize) -> Result<(), String> {
         if self.submitted {
             self.counters.skipped += 1;
