@@ -181,6 +181,9 @@ impl<S: Source> Material<S> {
             blit.endEncoding();
             self.record.advance(Phase::Prepared, Phase::Encoded)?;
             command.commit();
+            if self.counters.submitted_operations != 0 {
+                self.counters.reused_resources = self.counters.reused_resources.saturating_add(1);
+            }
             self.counters.submitted_operations =
                 self.counters.submitted_operations.saturating_add(1);
             let submitted = self.record.advance(Phase::Encoded, Phase::Submitted);
@@ -209,10 +212,6 @@ impl<S: Source> Material<S> {
         self.counters.staging_capacity = 0;
         match result {
             Ok(ticket) => {
-                if self.source.is_some() {
-                    self.counters.reused_resources =
-                        self.counters.reused_resources.saturating_add(1);
-                }
                 self.counters.source_retained = source.retained_bytes();
                 self.source = Some(Arc::new(source));
                 self.description = d;

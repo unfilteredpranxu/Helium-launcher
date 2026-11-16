@@ -203,11 +203,23 @@ fn native_one_slot_nonblocking_upload_and_cleanup() {
             )
             .is_err()
     );
+    let recovery_expected = recovery.pixels().to_vec();
     material
         .begin_upload(&renderer, recovery, &a, Update::Full, budget())
         .unwrap();
     completed(&mut material, &renderer, &a);
     retired(&renderer);
+
+    assert_eq!(
+        material
+            .readback_for_validation(&renderer, &a, budget())
+            .unwrap(),
+        recovery_expected
+    );
+    assert_eq!(material.counters().submitted_operations, 4);
+    assert_eq!(material.counters().completed_uploads, 3);
+    assert_eq!(material.counters().reused_resources, 3); // includes the revoked write and full repair
+    assert_eq!(material.counters().failed_operations, 1);
 
     // Release while submitted: never frees in-flight source/texture or resurrects.
     let (mut release_source, _) = fixture();

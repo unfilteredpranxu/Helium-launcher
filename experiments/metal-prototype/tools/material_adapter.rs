@@ -394,6 +394,8 @@ mod upload_source_tests {
             ticket: state.ticket().unwrap(),
             bank: 0,
         };
+        fn requires_send_sync_static<T: Send + Sync + 'static>(_: &T) {}
+        requires_send_sync_static(&source); // G05-B completion lease bound, no authority captured
         let d = source.description();
         assert_eq!(d.identity.generation, state.generation());
         assert_eq!(d.identity.revision, state.animation_revision());

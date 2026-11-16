@@ -106,7 +106,7 @@ impl<S: Source + Send + Sync + 'static> Material<S> {
             let keepalive = move |_command: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
                 // Retain all CPU owners/permit until this terminal callback ends.
                 // No pointer dereference, no self access, no completion assertion.
-                let _ = &retained;
+                let _sources = (&retained.owners.source, &retained.owners.previous);
             };
             fn require_send_sync_static<T: Send + Sync + 'static>(_: &T) {}
             require_send_sync_static(&keepalive);
@@ -221,10 +221,6 @@ impl<S: Source + Send + Sync + 'static> Material<S> {
         };
         match result {
             Ok(ticket) => {
-                if pending.lease.owners.previous.is_some() {
-                    self.counters.reused_resources =
-                        self.counters.reused_resources.saturating_add(1);
-                }
                 self.source = Some(pending.lease.owners.source.clone());
                 self.description = pending.description;
                 self.counters.source_retained = self.source.as_ref().unwrap().retained_bytes();
