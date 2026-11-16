@@ -5,6 +5,10 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+mod memory;
+pub(crate) mod refresh;
+use memory::{Budget, Charge, Payload};
+pub use refresh::{Counters, Phase, Ticket};
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,12 +21,12 @@ impl Generation {
         )
     }
 }
-/// Immutable historical data. Only State::current authorizes use as current.
-/// Arc clones retain bytes for in-flight consumers without copying banks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PixelFormat {
     Rgba8Unorm,
 }
+/// Immutable CPU target content. State::current checks generation AND revision;
+/// it makes no GPU completion claim. Arc clones retain historical data safely.
 /// Each bank is layer-major, with full mip chains in descending size per layer.
 pub struct Snapshot {
     generation: Generation,
@@ -30,13 +34,16 @@ pub struct Snapshot {
     sprites: u32,
     size: u32,
     banks: Vec<Bank>,
+    revision: u64,
+    _metadata: Charge,
     retained_bytes: usize,
 }
+#[derive(Clone)]
 pub struct Bank {
     used: u32,
     allocated: u32,
     levels: u32,
-    pixels: Vec<u8>,
+    pixels: Arc<Payload>,
 }
 impl Bank {
     pub fn used(&self) -> u32 {
@@ -49,10 +56,13 @@ impl Bank {
         self.levels
     }
     pub fn pixels(&self) -> &[u8] {
-        &self.pixels
+        &self.pixels.bytes
     }
 }
 impl Snapshot {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
     pub fn format(&self) -> PixelFormat {
         PixelFormat::Rgba8Unorm
     }
@@ -85,6 +95,11 @@ pub struct State {
     light_revision: u64,
     animation_revision: u64,
     light_ready: bool,
+    budget: Option<Arc<Budget>>,
+    refresh_limit: usize,
+    frames: Option<refresh::Frames>,
+    counters: Counters,
+    phase: Phase,
 }
 impl Default for State {
     fn default() -> Self {
@@ -100,6 +115,11 @@ impl State {
             light_revision: 0,
             animation_revision: 0,
             light_ready: false,
+            budget: None,
+            refresh_limit: 0,
+            frames: None,
+            counters: Counters::default(),
+            phase: Phase::Unavailable,
         }
     }
     pub fn generation(&self) -> Generation {
@@ -108,7 +128,7 @@ impl State {
     pub fn snapshot(&self) -> Result<&Arc<Snapshot>, &'static str> {
         self.snapshot.as_ref().ok_or(self.unavailable)
     }
-    /// A current view borrows the producer as well as the retained bytes.
+    /// A current CPU target view borrows the producer as well as the retained bytes.
     /// ```compile_fail
     /// use horizon_client_render::gfx::material_snapshot::{State, Snapshot};
     /// fn invalid(state: &mut State, old: &Snapshot) {
@@ -122,6 +142,9 @@ impl State {
             return Err("obsolete renderer/resource generation");
         }
         self.snapshot()?;
+        if snapshot.revision != self.animation_revision {
+            return Err("superseded material revision");
+        }
         Ok(snapshot)
     }
     pub fn animation_revision(&self) -> u64 {
@@ -150,17 +173,18 @@ impl State {
                 .animation_revision
                 .checked_add(1)
                 .expect("animation revision exhausted");
-            self.snapshot = None;
-            self.unavailable = "CPU snapshot stale after animation upload; refresh required";
+            if self.snapshot.is_some() {
+                self.fail("CPU snapshot stale after animation upload; refresh required");
+            }
         }
     }
     pub fn release(&mut self) {
-        self.snapshot = None;
-        self.unavailable = "snapshot released";
+        self.fail("snapshot released");
+        self.phase = Phase::Released;
     }
 }
 
-fn chain(size: u32, levels: u32) -> Result<usize, &'static str> {
+pub(in crate::gfx) fn chain(size: u32, levels: u32) -> Result<usize, &'static str> {
     if !size.is_power_of_two() || levels != size.ilog2() + 1 {
         return Err("invalid dimensions or incomplete mip chain");
     }
@@ -196,9 +220,28 @@ impl PreparedTextures {
             state.unavailable = "prepared source dimensions/count disagree with upload";
             return state;
         }
-        match self.capture_checked(size, layers, gl, state.generation) {
-            Ok(snapshot) => state.snapshot = Some(Arc::new(snapshot)),
-            Err(error) => state.unavailable = error,
+        let budget = Budget::new(self.snapshot_budget);
+        state.budget = Some(budget.clone());
+        state.refresh_limit = self.snapshot_budget;
+        match self.capture_checked(size, layers, gl, state.generation, &budget) {
+            Ok(snapshot) => {
+                state.snapshot = Some(Arc::new(snapshot));
+                state.phase = Phase::InitialCpu;
+                state.counters.copied_bytes = state
+                    .snapshot
+                    .as_ref()
+                    .unwrap()
+                    .banks
+                    .iter()
+                    .map(|b| b.pixels.bytes.len() as u64)
+                    .sum();
+            }
+            Err(error) => {
+                if error.contains("budget") {
+                    state.counters.failed_budget_checks += 1;
+                }
+                state.unavailable = error;
+            }
         }
         state
     }
@@ -208,6 +251,7 @@ impl PreparedTextures {
         layers: u32,
         gl: bool,
         generation: Generation,
+        budget: &Arc<Budget>,
     ) -> Result<Snapshot, &'static str> {
         if self.pbr.is_some() {
             return Err("PBR snapshot unsupported");
@@ -247,10 +291,14 @@ impl PreparedTextures {
         if bytes > self.snapshot_budget || bytes > isize::MAX as usize {
             return Err("snapshot budget exceeded");
         }
+        let metadata = budget.charge(self.sprites.len() * size_of::<Bank>())?;
         let mut banks = Vec::new();
         banks
             .try_reserve_exact(self.sprites.len())
             .map_err(|_| "bank metadata allocation failed")?;
+        if banks.capacity() != self.sprites.len() {
+            return Err("unexpected metadata capacity");
+        }
         let mut retained = banks
             .capacity()
             .checked_mul(size_of::<Bank>())
@@ -261,22 +309,16 @@ impl PreparedTextures {
             let length = chain(size, *levels)?
                 .checked_mul(allocated as usize)
                 .ok_or("bank size overflow")?;
-            let mut copy = Vec::new();
-            copy.try_reserve_exact(length)
-                .map_err(|_| "snapshot allocation failed")?;
+            let mut copy = Payload::zeroed(budget, length)?;
             retained = retained
-                .checked_add(copy.capacity())
+                .checked_add(copy.bytes.capacity())
                 .ok_or("retained size overflow")?;
-            if retained > self.snapshot_budget {
-                return Err("snapshot capacity budget exceeded");
-            }
-            copy.extend_from_slice(pixels);
-            copy.resize(length, 0); // exact production padding policy
+            copy.bytes[..pixels.len()].copy_from_slice(pixels);
             banks.push(Bank {
                 used,
                 allocated,
                 levels: *levels,
-                pixels: copy,
+                pixels: Arc::new(copy),
             });
         }
         Ok(Snapshot {
@@ -286,6 +328,8 @@ impl PreparedTextures {
             size,
             banks,
             retained_bytes: retained,
+            revision: 0,
+            _metadata: metadata,
         })
     }
 }

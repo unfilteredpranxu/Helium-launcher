@@ -95,23 +95,30 @@ mod tests {
     }
 }
 
+/// Additive binding revision: CPU target snapshots with per-animation epochs.
+pub const BINDING_VERSION: u32 = 2;
+
 /// One experimental namespace bound to one actual renderer generation. A new
 /// binding cannot make an old production snapshot current.
 pub struct Binding {
     generation: horizon_client_render::gfx::material_snapshot::Generation,
     epoch: Epoch,
+    revision: u64,
 }
 impl Binding {
     pub fn new(renderer: &Renderer) -> Result<Self, String> {
         Ok(Self {
             generation: renderer.material_state().generation(),
             epoch: Epoch::new()?,
+            revision: renderer.material_state().animation_revision(),
         })
     }
+    /// CPU target content for the encoded animation revision. This never claims
+    /// GPU submission/completion. Historical tickets must be checked via State.
     /// Validated synchronous consumption; both renderer and experimental epoch
     /// remain borrowed. No bank pixel copies or heap descriptor allocation.
     pub fn consume<R>(
-        &self,
+        &mut self,
         renderer: &Renderer,
         limits: material::Limits,
         consume: impl FnOnce(&material::Resources<'_>) -> R,
@@ -128,7 +135,7 @@ impl Binding {
         )
     }
     fn consume_state<R>(
-        &self,
+        &mut self,
         state: &horizon_client_render::gfx::material_snapshot::State,
         pixels: &[u8; 1024],
         provenance: Provenance,
@@ -141,6 +148,10 @@ impl Binding {
         let snapshot = state
             .current(state.snapshot().map_err(str::to_owned)?)
             .map_err(str::to_owned)?;
+        if snapshot.revision() != self.revision {
+            self.epoch.invalidate()?;
+            self.revision = snapshot.revision();
+        }
         let revision = state.light_revision().map_err(str::to_owned)?;
         let light = Lightmap {
             pixels,
@@ -244,9 +255,10 @@ mod snapshot_tests {
             },
         )
         .unwrap();
-        let binding = Binding {
+        let mut binding = Binding {
             generation: state.generation(),
             epoch,
+            revision: state.animation_revision(),
         };
         assert!(
             binding

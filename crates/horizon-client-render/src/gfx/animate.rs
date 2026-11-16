@@ -80,6 +80,7 @@ impl SpriteAnimator {
     /// `textures` are the sprite arrays, `split` layers each, `size` pixels
     /// wide; `animations` hold their frames at that size. `compute`: whether
     /// the device says it runs compute shaders writing storage textures.
+    #[cfg(test)]
     pub fn new(
         device: &wgpu::Device,
         animations: &[SpriteAnimation],
@@ -88,6 +89,21 @@ impl SpriteAnimator {
         textures: &[wgpu::Texture],
         split: u32,
         compute: bool,
+    ) -> Self {
+        Self::new_observed(
+            device, animations, size, settings, textures, split, compute, None,
+        )
+    }
+
+    pub fn new_observed(
+        device: &wgpu::Device,
+        animations: &[SpriteAnimation],
+        size: u32,
+        settings: &[Settings],
+        textures: &[wgpu::Texture],
+        split: u32,
+        compute: bool,
+        observer: Option<&mut super::material_snapshot::State>,
     ) -> Self {
         let pipeline = if compute { pipeline(device) } else { None };
         let limits = device.limits();
@@ -178,7 +194,7 @@ impl SpriteAnimator {
                 is_animated,
             };
         };
-        let frames: Vec<_> = frames
+        let gpu_frames: Vec<_> = frames
             .iter()
             .map(|data| {
                 device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -188,6 +204,10 @@ impl SpriteAnimator {
                 })
             })
             .collect();
+        if let Some(observer) = observer {
+            observer.retain_frames(frames);
+        }
+        let frames = gpu_frames;
         let align = u64::from(limits.min_storage_buffer_offset_alignment);
         let mut offsets = Vec::with_capacity(counts.len());
         let mut total = 0;
@@ -293,16 +313,20 @@ impl SpriteAnimator {
     /// Show every sprite's frame at `tick`, rewriting only the sprites whose
     /// frame or mix changed (`SpriteContents.AnimationState.tick`), skipping
     /// sprites not present in `active` when provided.
-    pub fn animate(
+    pub fn animate_observed(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         uploads: &mut Uploads,
         tick: u64,
         active: Option<&[u64]>,
         timing: Option<&mut super::pack_timing::PassTiming>,
+        observer: Option<&mut super::material_snapshot::State>,
     ) {
         if self.collect(tick, active) == 0 {
             return;
+        }
+        if let Some(observer) = observer {
+            self.refresh_observer(observer);
         }
         let (jobs, pipeline) = match &self.writer {
             Writer::Gpu { jobs, pipeline } => (jobs, pipeline),
@@ -357,6 +381,34 @@ impl SpriteAnimator {
             }
             group.jobs.clear();
         }
+    }
+
+    fn refresh_observer(&self, observer: &mut super::material_snapshot::State) {
+        let retained = observer.take_frames();
+        let frames = match &self.writer {
+            Writer::Cpu { frames, .. } => Some(frames.as_slice()),
+            Writer::Gpu { .. } => retained.as_ref().map(|f| f.data.as_slice()),
+        };
+        if let Some(frames) = frames {
+            observer.refresh(self.groups.iter().flat_map(|group| {
+                group
+                    .jobs
+                    .as_chunks::<JOB_BYTES>()
+                    .0
+                    .iter()
+                    .map(move |bytes| {
+                        let words = bytes.as_chunks::<4>().0;
+                        super::material_snapshot::refresh::Job {
+                            bank: group.array,
+                            words: std::array::from_fn(|i| u32::from_le_bytes(words[i])),
+                            frames: frames.get(group.buffer).map_or(&[], Vec::as_slice),
+                        }
+                    })
+            }));
+        } else {
+            observer.animated(self.changed());
+        }
+        observer.restore_frames(retained);
     }
 
     /// Queue a job for every sprite whose blend at `tick` differs from what
@@ -436,29 +488,87 @@ fn pipeline_here(device: &wgpu::Device) -> Option<(wgpu::ComputePipeline, wgpu::
 
 /// `animate.wgsl` on the CPU: one `width` wide level of a job
 /// (`[layer, current, next, millis, edge]`) from `frames`' chains.
-fn mix_level(frames: &[u8], [_, current, next, millis, edge]: [u32; 5], width: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity((width * width * 4) as usize);
-    for y in 0..width {
-        for x in 0..width {
+fn mix_level(frames: &[u8], job: [u32; 5], width: u32) -> Vec<u8> {
+    validate_mix(frames, job, width.max(job[4])).expect("validated production animation job");
+    let length = level_bytes(width).expect("validated production mip size");
+    let mut out = Vec::with_capacity(length);
+    for pixel in mixed_pixels(frames, job, width) {
+        out.extend_from_slice(&pixel);
+    }
+    out
+}
+
+/// Validate once before a refresh mutates any snapshot. Source offsets are WORDS.
+pub(super) fn validate_mix(frames: &[u8], job: [u32; 5], size: u32) -> Result<(), &'static str> {
+    let [_, current, next, millis, edge] = job;
+    if !size.is_power_of_two() || !edge.is_power_of_two() || edge > size || millis > 1000 {
+        return Err("invalid animation edge/size/interpolation");
+    }
+    let chain = super::material_snapshot::chain(edge, edge.ilog2() + 1)?;
+    for offset in [current, next] {
+        let end = (offset as usize)
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(chain))
+            .ok_or("animation source offset overflow")?;
+        if end > frames.len() {
+            return Err("missing animation source mip chain");
+        }
+    }
+    Ok(())
+}
+/// Shared exact integer mixer for both fallback uploads and observed refresh.
+/// Writes into caller storage; no temporary mip Vec on the observed path.
+pub(super) fn mix_level_into(
+    frames: &[u8],
+    job: [u32; 5],
+    width: u32,
+    out: &mut [u8],
+) -> Result<(), &'static str> {
+    let edge = job[4];
+    // width can be below the source edge for smaller mip levels.
+    validate_mix(frames, job, width.max(edge))?;
+    if !width.is_power_of_two() || out.len() != level_bytes(width)? {
+        return Err("invalid animation destination mip");
+    }
+    for (pixel, value) in out
+        .chunks_exact_mut(4)
+        .zip(mixed_pixels(frames, job, width))
+    {
+        pixel.copy_from_slice(&value);
+    }
+    Ok(())
+}
+
+fn level_bytes(width: u32) -> Result<usize, &'static str> {
+    (width as usize)
+        .checked_mul(width as usize)
+        .and_then(|n| n.checked_mul(4))
+        .filter(|&n| n <= isize::MAX as usize)
+        .ok_or("animation output overflow")
+}
+
+fn mixed_pixels(frames: &[u8], job: [u32; 5], width: u32) -> impl Iterator<Item = [u8; 4]> + '_ {
+    let [_, current, next, millis, edge] = job;
+    let (edge, width) = (edge as usize, width as usize);
+    (0..width).flat_map(move |y| {
+        (0..width).map(move |x| {
             let texel = if width >= edge {
                 let scale = width / edge;
                 y / scale * edge + x / scale
             } else {
                 4 * (edge * edge - width * width) / 3 + y * width + x
             };
-            let at = |chain: u32| ((chain + texel) * 4) as usize;
+            let at = |offset: u32| (offset as usize + texel) * 4;
             let a = &frames[at(current)..at(current) + 4];
             if millis == 0 {
-                out.extend_from_slice(a);
-                continue;
+                return a.try_into().unwrap();
             }
             let b = &frames[at(next)..at(next) + 4];
-            out.extend(a.iter().zip(b).map(|(&a, &b)| {
-                ((u32::from(a) * (1000 - millis) + u32::from(b) * millis + 500) / 1000) as u8
-            }));
-        }
-    }
-    out
+            std::array::from_fn(|c| {
+                ((u32::from(a[c]) * (1000 - millis) + u32::from(b[c]) * millis + 500) / 1000) as u8
+            })
+        })
+    })
 }
 
 /// The mip chain a frame's layer is made of, and its first level's edge.
@@ -800,17 +910,35 @@ mod tests {
 
     #[test]
     fn gpu_layers_match_the_cpu_chains_every_tick() {
-        layers_match_the_cpu_chains_every_tick(true);
+        layers_match_the_cpu_chains_every_tick(true, false);
     }
 
     /// Without compute shaders (OpenGL before 4.3): the same layers.
     #[test]
     fn copied_layers_match_the_cpu_chains_every_tick() {
-        layers_match_the_cpu_chains_every_tick(false);
+        layers_match_the_cpu_chains_every_tick(false, false);
     }
 
-    fn layers_match_the_cpu_chains_every_tick(compute: bool) {
-        let Some((device, queue)) = device() else {
+    #[test]
+    #[ignore = "opt-in real GPU readback; requires a compute-capable adapter (Apple Metal for Apple parity)"]
+    fn observed_snapshots_match_gpu_animation_jobs_every_tick() {
+        layers_match_the_cpu_chains_every_tick(true, true);
+    }
+
+    fn layers_match_the_cpu_chains_every_tick(compute: bool, observe: bool) {
+        let selected = if observe {
+            let instance = crate::gfx::test_gpu::instance();
+            let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
+                .expect("GPU parity requested but no adapter available");
+            eprintln!("G04-C parity adapter: {:?}", adapter.get_info());
+            Some(
+                pollster::block_on(adapter.request_device(&Default::default()))
+                    .expect("GPU parity requested but device unavailable"),
+            )
+        } else {
+            device()
+        };
+        let Some((device, queue)) = selected else {
             return;
         };
         let size = 32;
@@ -857,14 +985,45 @@ mod tests {
                 })
             })
             .collect();
-        let mut animator =
-            SpriteAnimator::new(&device, &animations, size, &mips, &textures, split, compute);
+        let mut observation = crate::gfx::PreparedTextures::with_split(
+            &vec![255; size as usize * size as usize * 4 * 6],
+            size,
+            6,
+            &mips,
+            (&[255; 16], 2),
+            split,
+        )
+        .retain_material_snapshot(8 << 20)
+        .capture_materials(size, 6, false);
+        let mut animator = SpriteAnimator::new_observed(
+            &device,
+            &animations,
+            size,
+            &mips,
+            &textures,
+            split,
+            compute,
+            observe.then_some(&mut observation),
+        );
+        if observe {
+            assert!(
+                matches!(animator.writer, Writer::Gpu { .. }),
+                "compute writer required"
+            );
+        }
         let mut uploads = Uploads::new(&device);
         let mut writes = Vec::new();
         for tick in [0, 0, 1, 2, 3, 4, 7, 7, 12, 30] {
             let mut encoder = device.create_command_encoder(&Default::default());
             let shown: Vec<_> = animator.sprites.iter().map(|s| s.shown).collect();
-            animator.animate(&mut encoder, &mut uploads, tick, None, None);
+            animator.animate_observed(
+                &mut encoder,
+                &mut uploads,
+                tick,
+                None,
+                None,
+                observe.then_some(&mut observation),
+            );
             writes.push(
                 animator
                     .sprites
@@ -887,6 +1046,19 @@ mod tests {
                     &queue,
                     &textures[(animation.layer / split) as usize],
                 );
+                if observe {
+                    let snapshot = observation
+                        .current(observation.snapshot().unwrap())
+                        .unwrap();
+                    let bank = &snapshot.banks()[(animation.layer / split) as usize];
+                    let stride = crate::gfx::material_snapshot::chain(size, bank.levels()).unwrap();
+                    let start = (animation.layer % split) as usize * stride;
+                    assert_eq!(
+                        &bank.pixels()[start..start + stride],
+                        layers[(animation.layer % split) as usize]
+                    );
+                    assert!(observation.gpu_current().is_err()); // even this test's readback isn't a runtime completion hook
+                }
                 assert_eq!(
                     layers[(animation.layer % split) as usize],
                     reference(current, next, blend.millis, edge, size),
@@ -995,3 +1167,7 @@ mod tests {
         assert_eq!(animator.changed, vec![1, 3, 5]);
     }
 }
+
+#[cfg(test)]
+#[path = "animate/refresh_tests.rs"]
+mod refresh_tests;

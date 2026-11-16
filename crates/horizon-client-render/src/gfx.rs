@@ -3276,7 +3276,7 @@ impl Renderer {
         let gl = adapter.get_info().backend == wgpu::Backend::Gl;
         // Keep every colour layer's companion, split by the same device limit. Native
         // material stages read the first array; terrain packs stitch all of them.
-        let material_state = prepared.capture_materials(sprite_size, layers, gl);
+        let mut material_state = prepared.capture_materials(sprite_size, layers, gl);
         let pbr_maps = prepared
             .pbr
             .map(|(normals, specular, levels, map_layers, size)| {
@@ -3359,7 +3359,7 @@ impl Renderer {
             .filter(|a| a.has_materials())
             .cloned()
             .collect();
-        let animations = animate::SpriteAnimator::new(
+        let animations = animate::SpriteAnimator::new_observed(
             &device,
             animations,
             sprite_size,
@@ -3367,6 +3367,7 @@ impl Renderer {
             &sprite_textures,
             split,
             animate::SpriteAnimator::compute(&adapter, &device),
+            Some(&mut material_state),
         );
         let active_layer_words = animations.active_layer_words();
         let sprite_unused = device
@@ -7370,6 +7371,9 @@ impl Renderer {
     pub fn changed_material_layers(&self) -> &[u32] {
         self.animations.changed()
     }
+    pub fn set_material_refresh_limit(&mut self, bytes: usize) {
+        self.material_state.set_refresh_limit(bytes);
+    }
     pub fn release_material_snapshot(&mut self) {
         self.material_state.release();
     }
@@ -7491,14 +7495,14 @@ impl Renderer {
     }
     fn animate(&mut self, encoder: &mut wgpu::CommandEncoder, tick: u64, cull_inactive: bool) {
         let active = cull_inactive.then_some(&self.active_animated_layers[..]);
-        self.animations.animate(
+        self.animations.animate_observed(
             encoder,
             &mut self.uploads,
             tick,
             active,
             self.own_timing.as_mut(),
+            Some(&mut self.material_state),
         );
-        self.material_state.animated(self.animations.changed());
         if let Some(arrays) = &self.pbr_maps {
             for animation in &self.material_animations {
                 if !self.animations.changed().contains(&animation.layer) {
@@ -11367,6 +11371,7 @@ impl Renderer {
             };
             match self.queue.submit_later(job) {
                 Ok(()) => {
+                    self.material_state.queued();
                     self.deferred = Some(offscreen);
                     // The frame's waits for the previous one on the submit thread.
                     self.last_wait += self.queue.take_waited();
@@ -11387,6 +11392,7 @@ impl Renderer {
             self.first_frame = FirstFrame::Drawn;
         }
         let submission = crate::spans::time("submit", || self.queue.submit([commands]));
+        self.material_state.submitted();
         if let Some(read) = after.or_else(|| self.after_submit()) {
             read();
         }

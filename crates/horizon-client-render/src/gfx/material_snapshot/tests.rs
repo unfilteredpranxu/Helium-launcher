@@ -136,3 +136,80 @@ fn light_revision_tracks_pixels_not_frames() {
     state.observe_lightmap(&pixels, &changed);
     assert_eq!(state.light_revision(), Ok(2));
 }
+
+#[test]
+fn malformed_refresh_jobs_never_authorize_partial_updates() {
+    use refresh::Job;
+    let frames = [255; 20]; // handcrafted two-level frame
+    for jobs in [
+        vec![Job {
+            bank: 2,
+            words: [0, 0, 0, 0, 2],
+            frames: &frames,
+        }],
+        vec![Job {
+            bank: 0,
+            words: [2, 0, 0, 0, 2],
+            frames: &frames,
+        }],
+        vec![Job {
+            bank: 0,
+            words: [0, 0, 0, 1001, 2],
+            frames: &frames,
+        }],
+        vec![Job {
+            bank: 0,
+            words: [0, u32::MAX, 0, 0, 2],
+            frames: &frames,
+        }],
+        vec![Job {
+            bank: 0,
+            words: [0, 0, 0, 0, 2],
+            frames: &[],
+        }],
+        vec![
+            Job {
+                bank: 0,
+                words: [0, 0, 0, 0, 2],
+                frames: &frames
+            };
+            2
+        ],
+        vec![],
+    ] {
+        let mut state = prepared(3, 2).capture_materials(2, 3, true);
+        let old = state.snapshot().unwrap().clone();
+        state.refresh(jobs.iter().copied());
+        assert!(state.snapshot().is_err());
+        assert!(state.current(&old).is_err());
+        assert_eq!(state.counters().regenerated_bytes, 0);
+        assert_eq!(old.banks()[0].pixels()[0], 0);
+    }
+}
+#[test]
+fn source_frame_retention_is_released_and_never_exceeds_budget() {
+    let mut state = prepared(3, 2).capture_materials(2, 3, false);
+    state.retain_frames(vec![vec![255; 40]]);
+    assert!(state.counters().source_frame_capacity >= 40);
+    let owner = state.snapshot().unwrap().clone();
+    state.release();
+    assert_eq!(state.phase(), Phase::Released);
+    let revision = state.animation_revision();
+    state.animated(&[1]);
+    assert_eq!(state.animation_revision(), revision + 1);
+    assert_eq!(state.phase(), Phase::Released);
+    assert_eq!(state.counters().source_frame_capacity, 0);
+    assert!(state.current(&owner).is_err());
+    drop(owner);
+    assert_eq!(state.counters().retained_capacity, 0);
+}
+
+#[test]
+fn historical_payloads_can_drop_on_another_thread() {
+    let mut state = prepared(3, 2).capture_materials(2, 3, false);
+    let retained = state.snapshot().unwrap().clone();
+    state.release();
+    assert!(state.counters().retained_capacity > 0);
+    std::thread::spawn(move || drop(retained)).join().unwrap();
+    assert_eq!(state.counters().retained_capacity, 0);
+}
