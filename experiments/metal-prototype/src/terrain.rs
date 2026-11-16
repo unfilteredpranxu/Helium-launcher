@@ -251,6 +251,31 @@ pub(crate) fn resource_layout(
     options: Options,
     caps: &Capabilities,
 ) -> Result<ResourceLayout, String> {
+    resource_layout_mode(
+        mesh,
+        extent,
+        texture_bytes,
+        upload_atlas,
+        true,
+        lightmap,
+        view,
+        options,
+        caps,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resource_layout_mode(
+    mesh: &Mesh<'_>,
+    extent: (usize, usize, usize),
+    texture_bytes: usize,
+    upload_atlas: bool,
+    readback: bool,
+    lightmap: &[u8],
+    view: View,
+    options: Options,
+    caps: &Capabilities,
+) -> Result<ResourceLayout, String> {
     let (width, height, layers) = extent;
     if !caps.baseline() || caps.sample_counts & (1 << 1) == 0 {
         return Err("unrecognized Metal baseline; no inferred capabilities".into());
@@ -292,7 +317,11 @@ pub(crate) fn resource_layout(
         .checked_add(256 * 16)
         .ok_or("staging overflow")?;
     let readback_row = aligned_row(options.width)?;
-    let readback_bytes = product(&[readback_row, options.height])?;
+    let readback_bytes = if readback {
+        product(&[readback_row, options.height])?
+    } else {
+        0
+    };
     let index_bytes = product(&[mesh.indices.len(), 4])?;
     for size in [
         mesh.vertices.len(),
@@ -315,7 +344,7 @@ pub(crate) fn resource_layout(
         product(&[pixels, 8])?,
         80,
         staging_bytes,
-        product(&[pixels, 4])?,
+        if readback { product(&[pixels, 4])? } else { 0 },
     ]
     .into_iter()
     .try_fold(0usize, |a, b| {

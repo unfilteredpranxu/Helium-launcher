@@ -78,6 +78,27 @@ impl TerrainRenderer {
     }
 }
 impl<S: Source> Material<S> {
+    /// Narrow internal bridge: only exact completed, live bank-zero residency.
+    pub(super) fn resident(
+        &self,
+        renderer: &TerrainRenderer,
+        authority: &S::Authority,
+    ) -> Result<(crate::upload::Stamp<S::Generation>, Arc<S>, Texture), String> {
+        if self.pending.is_some() || self.device_id != renderer.upload_device {
+            return Err("pending upload or wrong/recreated material device".into());
+        }
+        let stamp = self.record.residency()?;
+        let source = self.source.as_ref().ok_or("material source released")?;
+        source.check_current(authority)?;
+        if source.description() != self.description || self.description.bank != 0 {
+            return Err("changed metadata or unsupported nonzero bank; no sprite remapping".into());
+        }
+        Ok((
+            stamp,
+            source.clone(),
+            self.texture.as_ref().ok_or("material released")?.clone(),
+        ))
+    }
     pub fn phase(&self) -> Phase {
         self.record.phase()
     }
@@ -266,6 +287,7 @@ impl<S: Source> Material<S> {
         if self.pending.is_some() {
             return Err("material upload pending; readback unavailable".into());
         }
+        let _permit = renderer.upload_slot.acquire()?;
         let source = self
             .source
             .as_deref()
@@ -364,6 +386,7 @@ impl TerrainRenderer {
         if material.pending.is_some() {
             return Err("material upload pending; drawing unavailable".into());
         }
+        let _permit = self.upload_slot.acquire()?;
         let source = material
             .source
             .as_deref()

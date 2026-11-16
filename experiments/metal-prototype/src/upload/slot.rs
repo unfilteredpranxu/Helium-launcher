@@ -1,4 +1,4 @@
-//! One process-wide native upload permit, retained through terminal cleanup.
+//! One process-wide native upload/draw permit, retained through terminal cleanup.
 //! No GPU objects, waits, polling loops or receipt publication in this module.
 use super::Ticket;
 use std::sync::{
@@ -18,12 +18,15 @@ pub struct Retention {
     pub busy: bool,
     pub texture: usize,
     pub staging: usize,
+    /// Other GPU frame payload, excluding material texture/staging/source.
+    pub frame_payload: usize,
     pub sources: usize,
 }
 pub(crate) struct Slot {
     busy: AtomicBool,
     texture: AtomicUsize,
     staging: AtomicUsize,
+    frame_payload: AtomicUsize,
     sources: AtomicUsize,
 }
 pub(crate) struct Permit {
@@ -35,6 +38,7 @@ impl Slot {
             busy: AtomicBool::new(false),
             texture: AtomicUsize::new(0),
             staging: AtomicUsize::new(0),
+            frame_payload: AtomicUsize::new(0),
             sources: AtomicUsize::new(0),
         })
     }
@@ -49,7 +53,7 @@ impl Slot {
     pub fn acquire(self: &Arc<Self>) -> Result<Permit, String> {
         self.busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| "native upload slot busy (pending work or terminal cleanup)")?;
+            .map_err(|_| "native GPU slot busy (pending upload/draw or terminal cleanup)")?;
         Ok(Permit { slot: self.clone() })
     }
     /// Diagnostic gauges, not a transactional cross-thread memory snapshot.
@@ -58,11 +62,16 @@ impl Slot {
             busy: self.busy(),
             texture: self.texture.load(Ordering::Relaxed),
             staging: self.staging.load(Ordering::Relaxed),
+            frame_payload: self.frame_payload.load(Ordering::Relaxed),
             sources: self.sources.load(Ordering::Relaxed),
         }
     }
 }
 impl Permit {
+    #[cfg(any(target_os = "macos", target_os = "ios", test))]
+    pub fn account_frame(&self, bytes: usize) {
+        self.slot.frame_payload.store(bytes, Ordering::Relaxed);
+    }
     pub fn account(&self, texture: usize, staging: usize, sources: usize) {
         self.slot.texture.store(texture, Ordering::Relaxed);
         self.slot.staging.store(staging, Ordering::Relaxed);
@@ -73,6 +82,7 @@ impl Drop for Permit {
     fn drop(&mut self) {
         self.slot.texture.store(0, Ordering::Relaxed);
         self.slot.staging.store(0, Ordering::Relaxed);
+        self.slot.frame_payload.store(0, Ordering::Relaxed);
         self.slot.sources.store(0, Ordering::Relaxed);
         self.slot.busy.store(false, Ordering::Release);
     }

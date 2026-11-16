@@ -9,6 +9,7 @@ use objc2_foundation::NSString;
 use objc2_metal::*;
 use std::{ffi::c_void, ptr::NonNull};
 
+pub(crate) mod frames;
 pub(crate) mod material_upload;
 
 type Device = ProtocolObject<dyn MTLDevice>;
@@ -285,6 +286,71 @@ impl TerrainRenderer {
             &staging, layout.atlas_staging, 256, 4096, MTLSize { width:16,height:16,depth:1 }, &lm, 0, 0, MTLOrigin { x:0,y:0,z:0 });
         }
         blit.endEncoding();
+        self.encode_terrain(
+            &command,
+            &vertices,
+            &indices,
+            &uniforms,
+            &lm,
+            &sprites,
+            &color,
+            &depth,
+            mesh.indices.len(),
+            options,
+        )?;
+        let blit = command
+            .blitCommandEncoder()
+            .ok_or("readback encoder allocation failed")?;
+        // SAFETY: full stored color image fits the checked readback allocation.
+        unsafe {
+            blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage(
+            &color, 0, 0, MTLOrigin{x:0,y:0,z:0}, MTLSize{width:options.width,height:options.height,depth:1}, &readback, 0, layout.readback_row, layout.readback_bytes);
+        }
+        blit.endEncoding();
+        command.commit();
+        command.waitUntilCompleted();
+        if command.status() != MTLCommandBufferStatus::Completed {
+            return Err(format!(
+                "terrain command failed: {:?}, {:?}",
+                command.status(),
+                command.error()
+            ));
+        }
+        // SAFETY: Shared storage is CPU-visible after completion on both memory
+        // architectures. Only initialized pixel prefixes are read, never row
+        // padding. All ranges were checked; owners/pool remain live during copy.
+        let rgba = unsafe {
+            copy_readback(
+                readback.contents().as_ptr().cast(),
+                options.width,
+                options.height,
+                layout.readback_row,
+            )
+        };
+        let start = command.GPUStartTime();
+        let end = command.GPUEndTime();
+        Ok(Image {
+            rgba,
+            gpu_seconds: (start > 0. && end > start && end.is_finite()).then_some(end - start),
+        })
+    }
+}
+
+impl TerrainRenderer {
+    #[allow(clippy::too_many_arguments)]
+    fn encode_terrain(
+        &self,
+        command: &ProtocolObject<dyn MTLCommandBuffer>,
+        vertices: &Buffer,
+        indices: &Buffer,
+        uniforms: &Buffer,
+        lm: &Texture,
+        sprites: &Texture,
+        color: &Texture,
+        depth: &Texture,
+        index_count: usize,
+        options: Options,
+    ) -> Result<(), String> {
         let pass = MTLRenderPassDescriptor::new();
         // SAFETY: supported color attachment zero.
         let a = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
@@ -333,48 +399,14 @@ impl TerrainRenderer {
             encoder.setFragmentTexture_atIndex(Some(&sprites), 0);
             encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
                 MTLPrimitiveType::Triangle,
-                mesh.indices.len(),
+                index_count,
                 MTLIndexType::UInt32,
                 &indices,
                 0,
             );
         }
         encoder.endEncoding();
-        let blit = command
-            .blitCommandEncoder()
-            .ok_or("readback encoder allocation failed")?;
-        // SAFETY: full stored color image fits the checked readback allocation.
-        unsafe {
-            blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage(
-            &color, 0, 0, MTLOrigin{x:0,y:0,z:0}, MTLSize{width:options.width,height:options.height,depth:1}, &readback, 0, layout.readback_row, layout.readback_bytes);
-        }
-        blit.endEncoding();
-        command.commit();
-        command.waitUntilCompleted();
-        if command.status() != MTLCommandBufferStatus::Completed {
-            return Err(format!(
-                "terrain command failed: {:?}, {:?}",
-                command.status(),
-                command.error()
-            ));
-        }
-        // SAFETY: Shared storage is CPU-visible after completion on both memory
-        // architectures. Only initialized pixel prefixes are read, never row
-        // padding. All ranges were checked; owners/pool remain live during copy.
-        let rgba = unsafe {
-            copy_readback(
-                readback.contents().as_ptr().cast(),
-                options.width,
-                options.height,
-                layout.readback_row,
-            )
-        };
-        let start = command.GPUStartTime();
-        let end = command.GPUEndTime();
-        Ok(Image {
-            rgba,
-            gpu_seconds: (start > 0. && end > start && end.is_finite()).then_some(end - start),
-        })
+        Ok(())
     }
 }
 

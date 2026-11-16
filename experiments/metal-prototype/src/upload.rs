@@ -13,7 +13,7 @@ use std::{
     allow(dead_code)
 )]
 mod slot;
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "macos", target_os = "ios", test))]
 pub(crate) use slot::{Ownership, Slot};
 pub use slot::{Poll, Retention};
 pub const VERSION: u32 = 1;
@@ -383,6 +383,22 @@ impl<G: Copy> Ticket<G> {
     not(any(target_os = "macos", target_os = "ios", test)),
     allow(dead_code)
 )]
+/// Private reusable proof of an exact completed upload, never a public success flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "ios", test)),
+    allow(dead_code)
+)]
+pub(crate) struct Stamp<G> {
+    pub identity: Identity<G>,
+    pub device: Id,
+    pub owner: Id,
+    operation: Id,
+}
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "ios", test)),
+    allow(dead_code)
+)]
 pub(crate) struct Record<G> {
     ticket: Ticket<G>,
 }
@@ -391,6 +407,17 @@ pub(crate) struct Record<G> {
     allow(dead_code)
 )]
 impl<G: Copy + Eq> Record<G> {
+    pub(crate) fn residency(&self) -> Result<Stamp<G>, String> {
+        if self.phase() != Phase::Completed {
+            return Err("no successful completed residency".into());
+        }
+        Ok(Stamp {
+            identity: self.ticket.identity,
+            device: self.ticket.device,
+            owner: self.ticket.owner,
+            operation: self.ticket.operation,
+        })
+    }
     pub(crate) fn prepared(identity: Identity<G>, device: Id, owner: Id) -> Result<Self, String> {
         Ok(Self {
             ticket: Ticket {
@@ -512,7 +539,7 @@ impl Counters {
     }
 }
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(all(test, any(target_os = "macos", target_os = "ios")))]
 mod async_native_tests;

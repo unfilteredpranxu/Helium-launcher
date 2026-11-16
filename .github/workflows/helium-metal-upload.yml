@@ -1,7 +1,7 @@
 name: Helium Metal Upload Validation
 on:
   push:
-    branches: [feature/helium-g05-metal-upload, feature/helium-g05-async-upload]
+    branches: [feature/helium-g05-metal-upload, feature/helium-g05-async-upload, feature/helium-g05-async-draw]
     paths:
       - 'experiments/metal-prototype/src/**'
       - 'experiments/metal-prototype/tools/**'
