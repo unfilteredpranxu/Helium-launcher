@@ -448,6 +448,9 @@ impl<S: Source> CompletedFrame<'_, S> {
         let mut rgba = Vec::new();
         rgba.try_reserve_exact(tight)
             .map_err(|_| "diagnostic CPU allocation failed")?;
+        if rgba.capacity() != tight {
+            return Err("unexpected diagnostic CPU capacity".into());
+        }
         autoreleasepool(|_| {
             let buffer = self
                 .renderer

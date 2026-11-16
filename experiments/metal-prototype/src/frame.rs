@@ -34,6 +34,7 @@ pub struct Counters {
 }
 /// No readback/CPU image allocation is included in normal frame preparation.
 /// Conservative peak includes both CPU and Metal lightmap staging (4096 each).
+#[allow(clippy::too_many_arguments)]
 pub fn validate<G: Copy + Eq + std::fmt::Debug>(
     mesh: &Mesh<'_>,
     description: Description<G>,
@@ -58,7 +59,9 @@ pub fn validate<G: Copy + Eq + std::fmt::Debug>(
             .checked_sub(1)
             .ok_or("empty resident bank")?,
     )?;
-    if description.used > description.allocated
+    if description.used != description.sprites.min(description.split)
+        || source_bytes < texture_bytes
+        || description.used > description.allocated
         || description.allocated as usize > terrain::TEXTURE_LAYER_CEILING
         || description.size == 0
         || !description.size.is_power_of_two()

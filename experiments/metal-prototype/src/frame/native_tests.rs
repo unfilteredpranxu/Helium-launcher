@@ -134,16 +134,14 @@ fn native_nonblocking_resident_frames_match_original_oracle_and_retire() {
             depth,
             ..Options::default()
         };
-        f.begin(
-            &r,
-            &m,
-            &a,
-            &chart.mesh(),
-            &chart.lightmap,
-            validation::fixture_view(),
-            options,
-        )
-        .unwrap();
+        let mut view = validation::fixture_view();
+        // Same z'=w-z convention used by the existing G02 forward-depth oracle.
+        if depth == Depth::Forward {
+            view.clip_from_relative[2][2] = -1.;
+            view.clip_from_relative[3][2] = 1.;
+        }
+        f.begin(&r, &m, &a, &chart.mesh(), &chart.lightmap, view, options)
+            .unwrap();
         assert_eq!(f.phase(), Some(upload::Phase::Submitted));
         assert_eq!(
             f.counters().diagnostic_readback_bytes,
@@ -155,29 +153,13 @@ fn native_nonblocking_resident_frames_match_original_oracle_and_retire() {
         );
         assert!(r.upload_retention().busy);
         assert!(
-            f.begin(
-                &r,
-                &m,
-                &a,
-                &chart.mesh(),
-                &chart.lightmap,
-                validation::fixture_view(),
-                options
-            )
-            .is_err()
+            f.begin(&r, &m, &a, &chart.mesh(), &chart.lightmap, view, options)
+                .is_err()
         );
         let mut another = r.create_frames::<Fixture>().unwrap();
         assert!(
             another
-                .begin(
-                    &r,
-                    &m,
-                    &a,
-                    &chart.mesh(),
-                    &chart.lightmap,
-                    validation::fixture_view(),
-                    options
-                )
+                .begin(&r, &m, &a, &chart.mesh(), &chart.lightmap, view, options)
                 .is_err()
         );
         let mut next = source.clone();
@@ -188,15 +170,8 @@ fn native_nonblocking_resident_frames_match_original_oracle_and_retire() {
         );
         assert!(m.readback_for_validation(&r, &a, budget()).is_err());
         assert!(
-            r.render_material(
-                &m,
-                &a,
-                &chart.mesh(),
-                &chart.lightmap,
-                validation::fixture_view(),
-                options
-            )
-            .is_err()
+            r.render_material(&m, &a, &chart.mesh(), &chart.lightmap, view, options)
+                .is_err()
         );
         let mut receipt = terminal(&mut f, &r, &m, &a, true).unwrap();
         assert!(matches!(f.poll(&r, &m, &a), Poll::Idle));
