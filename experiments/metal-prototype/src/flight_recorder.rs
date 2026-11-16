@@ -152,7 +152,8 @@ impl Recorder {
         }
     }
     pub fn persistent(path: PathBuf) -> io::Result<Self> {
-        fs::create_dir_all(&path)?;
+        // Directory creation/opening belongs to Store::append on the writer,
+        // never the gameplay/UIKit caller that initializes this recorder.
         let (send, recv) = mpsc::sync_channel::<Event>(64);
         std::thread::Builder::new()
             .name("helium-flight-writer".into())
