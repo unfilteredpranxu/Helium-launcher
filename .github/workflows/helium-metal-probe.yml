@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/helium-g01-metal-prototype
+      - build/helium-g05d-ipad-probe
     paths:
       - 'experiments/metal-prototype/**'
       - '.github/workflows/helium-metal-probe.yml'
