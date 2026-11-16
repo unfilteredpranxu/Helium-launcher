@@ -120,6 +120,24 @@ impl Geometry {
         }
     }
 }
+fn bank_zero_layers(
+    snapshot: &horizon_client_render::gfx::material_snapshot::Snapshot,
+) -> Result<usize, String> {
+    let bank = snapshot
+        .banks()
+        .first()
+        .ok_or("production snapshot has no bank zero")?;
+    if bank.allocated() > 256 {
+        return Err(format!(
+            "actual bank 0 allocated={} used={} split={} sprites={} exceeds unchanged G05 256-slice policy",
+            bank.allocated(),
+            bank.used(),
+            snapshot.split(),
+            snapshot.sprites()
+        ));
+    }
+    Ok(bank.used() as usize)
+}
 fn section_origin(key: Key, min_y: i32) -> Result<[i32; 3], String> {
     Ok([
         key.0.checked_mul(16).ok_or("section X overflow")?,
@@ -254,7 +272,7 @@ impl Controller {
                     mesh,
                     state.generation(),
                     self.sequence,
-                    snapshot.sprites() as usize,
+                    bank_zero_layers(snapshot)?,
                 )
             });
         self.counters.preparation_us += start.elapsed().as_micros();
@@ -789,5 +807,25 @@ mod ownership_tests {
         eprintln!(
             "G06 native worker with HANDCRAFTED production structs and production mip preparation, synthetic camera/lightmap; NOT game-runtime evidence: {report}"
         );
+    }
+}
+
+#[cfg(test)]
+mod bank_tests {
+    use super::*;
+    #[test]
+    fn real_prepared_metadata_rejects_512_before_geometry_retention() {
+        use horizon_client_render::gfx::PreparedTextures;
+        let pixels = vec![255; 512 * 4];
+        let p = PreparedTextures::with_split(&pixels, 1, 512, &[], (&[255; 4], 1), 512)
+            .retain_material_snapshot(1 << 20);
+        let s = p.capture_materials(1, 512, false);
+        let error = bank_zero_layers(s.snapshot().unwrap()).unwrap_err();
+        assert!(error.contains("allocated=512"));
+        assert!(error.contains("256-slice"));
+        let p = PreparedTextures::with_split(&pixels[..256 * 4], 1, 256, &[], (&[255; 4], 1), 256)
+            .retain_material_snapshot(1 << 20);
+        let s = p.capture_materials(1, 256, false);
+        assert_eq!(bank_zero_layers(s.snapshot().unwrap()).unwrap(), 256);
     }
 }
