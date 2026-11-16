@@ -10,3 +10,6 @@ horizon-client-render = { path = "../horizon-client-render", default-features = 
 helium-metal-prototype = { path = "../../experiments/metal-prototype" }
 bytemuck = "1.24"
 log = "0.4"
+
+[dev-dependencies]
+horizon-core = { path = "../horizon-core" }

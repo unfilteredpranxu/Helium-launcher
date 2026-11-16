@@ -1762,6 +1762,7 @@ dependencies = [
  "bytemuck",
  "helium-metal-prototype",
  "horizon-client-render",
+ "horizon-core",
  "log",
 ]
 

@@ -406,6 +406,7 @@ impl Controller {
                     source: validation,
                     cancel,
                     light_revision,
+                    size: [renderer.config.width, renderer.config.height],
                     receiver,
                 })
             }
