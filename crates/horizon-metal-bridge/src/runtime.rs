@@ -817,13 +817,13 @@ mod bank_tests {
     fn real_prepared_metadata_rejects_512_before_geometry_retention() {
         use horizon_client_render::gfx::PreparedTextures;
         let pixels = vec![255; 512 * 4];
-        let p = PreparedTextures::with_split(&pixels, 1, 512, &[], (&[255; 4], 1), 512)
+        let p = PreparedTextures::new(&pixels, 1, 512, &[], (&[255; 4], 1))
             .retain_material_snapshot(1 << 20);
         let s = p.capture_materials(1, 512, false);
         let error = bank_zero_layers(s.snapshot().unwrap()).unwrap_err();
         assert!(error.contains("allocated=512"));
         assert!(error.contains("256-slice"));
-        let p = PreparedTextures::with_split(&pixels[..256 * 4], 1, 256, &[], (&[255; 4], 1), 256)
+        let p = PreparedTextures::new(&pixels[..256 * 4], 1, 256, &[], (&[255; 4], 1))
             .retain_material_snapshot(1 << 20);
         let s = p.capture_materials(1, 256, false);
         assert_eq!(bank_zero_layers(s.snapshot().unwrap()).unwrap(), 256);
