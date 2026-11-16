@@ -583,21 +583,22 @@ fn native_512_banks_sample_high_slices_without_global_aliases() {
         s.description.bank = bank;
         s.description.used = if bank == 2 { 3 } else { 512 };
         s.description.allocated = if bank == 2 { 4 } else { 512 };
-        s.description.size = 1;
-        s.description.levels = 1;
-        s.pixels = Arc::new(
-            (0..s.description.allocated)
-                .flat_map(|local| {
-                    let id = bank * 512 + local;
-                    [
-                        (id % 251) as u8,
-                        ((id / 251) * 37) as u8,
-                        (255 - id % 251) as u8,
-                        if id == 1026 { 0 } else { 255 },
-                    ]
-                })
-                .collect(),
-        );
+        s.description.size = 2;
+        s.description.levels = 2;
+        let mut pixels = Vec::with_capacity(s.description.allocated as usize * 20);
+        for local in 0..s.description.allocated {
+            let id = bank * 512 + local;
+            let rgba = [
+                (id % 251) as u8,
+                ((id / 251) * 37) as u8,
+                (255 - id % 251) as u8,
+                if id == 1026 { 0 } else { 255 },
+            ];
+            for _ in 0..5 {
+                pixels.extend_from_slice(&rgba);
+            } // 2x2 then 1x1, exact full chain
+        }
+        s.pixels = Arc::new(pixels);
         sources.push(s);
     }
     let mut group = r.create_material_set(&sources, &a, budget()).unwrap();
@@ -769,7 +770,7 @@ fn native_512_banks_sample_high_slices_without_global_aliases() {
     }
     assert_eq!(group.bank_mut(0).unwrap().counters().completed_uploads, 1);
     assert_eq!(group.bank_mut(2).unwrap().counters().completed_uploads, 1);
-    assert_eq!(group.bank_mut(1).unwrap().counters().upload_bytes, 2052);
+    assert_eq!(group.bank_mut(1).unwrap().counters().upload_bytes, 10260);
     frames
         .begin(
             &r,
@@ -829,4 +830,48 @@ fn native_512_banks_sample_high_slices_without_global_aliases() {
     eprintln!(
         "G06-B real GPU 512 arrays, slices 0/255/256/511, 3 banks, partial bank last-used, full image, opaque/cutout and released set passed"
     );
+}
+#[test]
+fn v2_device_memory_mips_and_legacy_policy_are_checked() {
+    let (mut s, a) = fixture();
+    s.description.version = BANKED_VERSION;
+    let mut c = caps();
+    c.apple_families = 0;
+    c.common_families = 2;
+    assert!(Plan::prepare(&s, &a, None, Update::Full, &c, budget()).is_err());
+    assert!(
+        Plan::prepare(
+            &s,
+            &a,
+            None,
+            Update::Full,
+            &caps(),
+            Budget {
+                payload_bytes: 1,
+                staging_bytes: 1
+            }
+        )
+        .is_err()
+    );
+    s.description.levels = 1;
+    assert!(Plan::prepare(&s, &a, None, Update::Full, &caps(), budget()).is_err());
+    let (s, _) = fixture();
+    let mut d = s.description;
+    d.version = BANKED_VERSION;
+    d.split = 512;
+    d.sprites = 1027;
+    d.used = 512;
+    d.allocated = 512;
+    let mut ds = vec![d];
+    for bad in [0, 513] {
+        let mut b = d;
+        b.used = bad;
+        assert!(crate::banks::validate(&[b]).is_err());
+    }
+    for i in 1..9 {
+        let mut b = d;
+        b.bank = i;
+        ds.push(b);
+    }
+    assert!(crate::banks::validate(&ds).is_err());
 }
