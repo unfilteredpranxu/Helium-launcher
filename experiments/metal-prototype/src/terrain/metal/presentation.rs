@@ -142,6 +142,7 @@ impl Display {
     ) -> Result<Option<Presentation<'a, S>>, String> {
         use std::sync::atomic::Ordering;
         if objc2_foundation::NSThread::isMainThread_class() || self.used {
+            self.progress.counters.skipped = self.progress.counters.skipped.saturating_add(1);
             return Err("main-thread or repeated presentation rejected".into());
         }
         let renderer = output.presentation_renderer();
@@ -211,6 +212,7 @@ impl Display {
             display: self,
             command,
             _drawable: drawable,
+            _lease: lease,
             cancelled,
             terminal: false,
             invalid: false,
@@ -224,6 +226,7 @@ pub struct Presentation<'a, S: Source> {
     display: &'a mut Display,
     command: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     _drawable: Retained<ProtocolObject<dyn CAMetalDrawable>>,
+    _lease: Arc<KeepAlive<S>>,
     cancelled: &'a std::sync::atomic::AtomicBool,
     terminal: bool,
     invalid: bool,
