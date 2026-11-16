@@ -620,6 +620,26 @@ fn native_512_banks_sample_high_slices_without_global_aliases() {
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
+    // A farther bank-one backdrop must remain behind every foreground bank,
+    // independent of triangle order, and show through the cutout stripe.
+    let base = vertices.len() as u32;
+    for pos in [
+        [-1., -1., 0.25],
+        [1., -1., 0.25],
+        [1., 1., 0.25],
+        [-1., 1., 0.25],
+    ] {
+        vertices.push(TerrainVertex {
+            pos,
+            uv: [0; 2],
+            layer: OPAQUE_LAYER | 513,
+            light: 0,
+            color: 0x91ffffff,
+        });
+    }
+    let mut ordered = vec![base, base + 1, base + 2, base, base + 2, base + 3];
+    ordered.extend_from_slice(&indices);
+    indices = ordered;
     let mut frames = r.create_frames().unwrap();
     let light = [255u8; 1024];
     let options = Options {
@@ -663,6 +683,7 @@ fn native_512_banks_sample_high_slices_without_global_aliases() {
     }
     for opaque in [false, true] {
         if opaque {
+            indices = indices.chunks_exact(3).rev().flatten().copied().collect();
             for v in &mut vertices[20..] {
                 v.layer |= OPAQUE_LAYER;
             }
@@ -695,10 +716,12 @@ fn native_512_banks_sample_high_slices_without_global_aliases() {
             .unwrap();
         for y in 0..16 {
             for x in 0..96 {
-                let id = ids[x / 16] as u32;
-                let expected = if x >= 80 && !opaque {
-                    [0, 0, 0, 255]
+                let id = if x >= 80 && !opaque {
+                    513
                 } else {
+                    ids[x / 16] as u32
+                };
+                let expected = {
                     [
                         (id % 251) as u8,
                         ((id / 251) * 37) as u8,
