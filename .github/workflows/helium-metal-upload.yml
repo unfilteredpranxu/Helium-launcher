@@ -56,9 +56,9 @@ jobs:
             xcodebuild -downloadComponent MetalToolchain
           fi
           {
-            xcrun --sdk iphoneos metal -std=ios-metal2.0 -c \
+            xcrun --sdk iphoneos metal -target air64-apple-ios15.0 -std=ios-metal2.0 -c \
               experiments/metal-prototype/src/terrain.metal -o "$RUNNER_TEMP/helium-upload/g01.air"
-            xcrun --sdk iphoneos metal -std=ios-metal2.0 -c \
+            xcrun --sdk iphoneos metal -target air64-apple-ios15.0 -std=ios-metal2.0 -c \
               experiments/metal-prototype/src/terrain/terrain24.metal -o "$RUNNER_TEMP/helium-upload/g02.air"
           } 2>&1 | tee "$RUNNER_TEMP/helium-upload/msl.log"
       - name: Probe native Metal upload, readback and resident G02 oracle
