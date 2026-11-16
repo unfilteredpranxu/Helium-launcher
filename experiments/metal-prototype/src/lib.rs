@@ -3,6 +3,7 @@
 mod scene;
 pub use scene::{Mesh, Vertex, fixture, fixture_camera};
 
+pub mod material;
 pub mod section;
 pub mod terrain;
 

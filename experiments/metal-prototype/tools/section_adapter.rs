@@ -58,3 +58,6 @@ pub fn expanded_solid<'v, 'i>(
 #[cfg(test)]
 #[path = "section_adapter_tests.rs"]
 mod tests;
+
+#[path = "material_adapter.rs"]
+pub mod material_adapter;
