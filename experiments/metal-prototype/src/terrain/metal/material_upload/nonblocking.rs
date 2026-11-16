@@ -148,11 +148,7 @@ impl<S: Source + Send + Sync + 'static> Material<S> {
         self.counters.staging_peak = self.counters.staging_peak.max(staging_bytes);
         self.counters.source_peak = self.counters.source_peak.max(source_bytes);
         self.pending.as_ref().unwrap().command.commit();
-        self.counters.submitted_operations = self.counters.submitted_operations.saturating_add(1);
-        self.counters.upload_bytes = self
-            .counters
-            .upload_bytes
-            .saturating_add(upload_bytes as u64);
+        self.counters.committed(upload_bytes);
         // Even a protocol error here retains the submitted operation until actual
         // terminal observation/callback cleanup; never discard it on an Err path.
         self.record

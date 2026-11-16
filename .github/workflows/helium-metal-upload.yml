@@ -67,7 +67,6 @@ jobs:
           } 2>&1 | tee "$RUNNER_TEMP/helium-upload/msl.log"
       - name: Probe native Metal uploads and original G01/G02 GPU regressions
         id: gpu
-        continue-on-error: true
         run: |
           set -euo pipefail
           cargo +1.95.0 test --locked --manifest-path experiments/metal-prototype/Cargo.toml \

@@ -181,16 +181,8 @@ impl<S: Source> Material<S> {
             blit.endEncoding();
             self.record.advance(Phase::Prepared, Phase::Encoded)?;
             command.commit();
-            if self.counters.submitted_operations != 0 {
-                self.counters.reused_resources = self.counters.reused_resources.saturating_add(1);
-            }
-            self.counters.submitted_operations =
-                self.counters.submitted_operations.saturating_add(1);
+            self.counters.committed(plan.upload_bytes());
             let submitted = self.record.advance(Phase::Encoded, Phase::Submitted);
-            self.counters.upload_bytes = self
-                .counters
-                .upload_bytes
-                .saturating_add(plan.upload_bytes() as u64);
             command.waitUntilCompleted();
             submitted?;
             let status = command.status();

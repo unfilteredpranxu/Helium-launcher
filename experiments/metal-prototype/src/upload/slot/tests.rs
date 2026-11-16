@@ -182,3 +182,37 @@ fn no_receipt_without_submission_and_budget_rejections_do_not_leak_permits() {
     assert!(!slot.busy());
     assert!(slot.acquire().is_ok());
 }
+
+#[test]
+fn committed_counters_count_reuse_even_after_failure_and_full_repair() {
+    let mut counters = crate::upload::Counters::default();
+    counters.committed(60);
+    assert_eq!(
+        (
+            counters.submitted_operations,
+            counters.reused_resources,
+            counters.upload_bytes
+        ),
+        (1, 0, 60)
+    );
+    counters.committed(20);
+    assert_eq!(
+        (
+            counters.submitted_operations,
+            counters.reused_resources,
+            counters.upload_bytes
+        ),
+        (2, 1, 80)
+    );
+    counters.failed_operations += 1; // model failed prior command; residency invalid
+    counters.committed(60);
+    assert_eq!(
+        (
+            counters.submitted_operations,
+            counters.reused_resources,
+            counters.upload_bytes
+        ),
+        (3, 2, 140)
+    );
+    assert_eq!(counters.completed_uploads, 0); // commits/counters NEVER create completion
+}

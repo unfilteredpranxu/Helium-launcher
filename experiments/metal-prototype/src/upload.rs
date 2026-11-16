@@ -498,6 +498,19 @@ pub struct Counters {
     pub staging_capacity: usize,
     pub source_retained: usize,
 }
+impl Counters {
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "ios", test)),
+        allow(dead_code)
+    )]
+    pub(crate) fn committed(&mut self, bytes: usize) {
+        if self.submitted_operations != 0 {
+            self.reused_resources = self.reused_resources.saturating_add(1);
+        }
+        self.submitted_operations = self.submitted_operations.saturating_add(1);
+        self.upload_bytes = self.upload_bytes.saturating_add(bytes as u64);
+    }
+}
 #[cfg(test)]
 mod tests;
 
