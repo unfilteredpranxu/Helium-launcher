@@ -922,7 +922,7 @@ impl Controller {
 }
 impl Drop for Controller {
     fn drop(&mut self) {
-        if self.flight.is_some() {
+        if self.last_attempt != 0 {
             recorder::global().record(
                 self.last_attempt,
                 Stage::Cancelled,

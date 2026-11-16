@@ -19,9 +19,9 @@ public func nativeDisplayMode() -> Int32 {
     let path=FileManager.default.urls(for:.documentDirectory,in:.userDomainMask)[0].appendingPathComponent("helium-metal-test.txt")
     var data:Data?=nil
     if FileManager.default.fileExists(atPath:path.path) {
-        guard let file=try? FileHandle(forReadingFrom:path) else {setMetalDebugMode("INVALID");return -1}
+        guard let file=try? FileHandle(forReadingFrom:path) else {setMetalDebugMode("INVALID");diagnosticEvent(0,2,39);return -1}
         data=try? file.read(upToCount:65);try? file.close()
-        if data==nil {setMetalDebugMode("INVALID");return -1}
+        if data==nil {setMetalDebugMode("INVALID");diagnosticEvent(0,2,39);return -1}
     }
     let result=MetalDiagnosticModel.mode(bundle:Bundle.main.bundleIdentifier ?? "",marker:Bundle.main.object(forInfoDictionaryKey:"HeliumMetalDiagnosticsVersion") as? Int,legacy:Bundle.main.object(forInfoDictionaryKey:"HeliumNativeMetalTest") as? Bool == true,file:data)
     setMetalDebugMode(result.1);diagnosticEvent(0,2,result.0 < 0 ? 39 : 0,0,UInt64(max(result.0,0)))
@@ -62,7 +62,13 @@ private final class NativeSession {
 func cancelAllNativeTargets(_ cause:UInt32=13) { diagnosticEvent(0,cause==13 ? 5 : 30,cause);for id in Array(nativeTargets.keys) { cancelNative(id,cause) } }
 func nativeDisplayIsIdle()->Bool {nativeTargets.isEmpty}
 private func cancelNative(_ id: UInt64,_ cause:UInt32=16,_ expected:UInt64=0,_ observed:UInt64=0) {
-    diagnosticEvent(id,cause==20 ? 29 : 30,cause,expected,observed)
+    var old=expected;var new=observed
+    if old==0 && new==0, let target=nativeTargets[id] {
+        if cause==15 {old=35000;new=UInt64(max(0,(ProcessInfo.processInfo.systemUptime-target.started)*1000))}
+        else if cause==10 {old=MetalDiagnosticModel.pixels(Double(target.view.initialPixels.width),Double(target.view.initialPixels.height));if let parent=target.parent {new=MetalDiagnosticModel.pixels(Double((parent.bounds.width*(target.window?.screen.scale ?? 0)).rounded()),Double((parent.bounds.height*(target.window?.screen.scale ?? 0)).rounded()))}}
+        else if [UInt32(11),12,13,14,21,22,23].contains(cause) {old=1}
+    }
+    diagnosticEvent(id,cause==20 ? 29 : 30,cause,old,new)
     guard let target=nativeTargets.removeValue(forKey:id) else { return }
     target.timer?.invalidate(); target.cancel(id); target.view.invalid=nil; target.view.removeFromSuperview()
     diagnosticEvent(id,29,0,UInt64(cause),0)

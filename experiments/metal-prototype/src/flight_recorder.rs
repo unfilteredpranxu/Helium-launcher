@@ -522,7 +522,7 @@ impl Recorder {
             *w
         };
         let ended = s.ended.contains(&id);
-        if id != 0 && stage == Stage::Removed && !ended {
+        if id != 0 && matches!(stage, Stage::Removed | Stage::Retired) && !ended {
             s.ended.push(id);
         }
         if s.events.back().is_some_and(|e| {
