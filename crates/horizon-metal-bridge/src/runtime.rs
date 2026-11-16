@@ -26,22 +26,36 @@ const GEOMETRY_BUDGET: usize = 2 * 1024 * 1024;
 pub enum Mode {
     Disabled,
     OneSectionDiagnostic,
+    AttachedOneSection,
 }
 impl Mode {
     pub fn parse(value: Option<&str>) -> Result<Self, String> {
         match value {
             None | Some("") | Some("off") => Ok(Self::Disabled),
             Some("one-section") => Ok(Self::OneSectionDiagnostic),
+            Some("attached-one-section") => Ok(Self::AttachedOneSection),
             Some(v) => Err(format!(
-                "unsupported HELIUM_DIRECT_METAL={v}; use one-section or off"
+                "unsupported HELIUM_DIRECT_METAL={v}; use one-section, attached-one-section or off"
             )),
         }
     }
 }
+fn selected_mode() -> Result<Mode, String> {
+    if let Ok(value) = std::env::var("HELIUM_DIRECT_METAL") {
+        return Mode::parse(Some(&value));
+    }
+    #[cfg(target_os = "ios")]
+    return match helium_metal_prototype::attached::device_test_mode()? {
+        0 => Ok(Mode::Disabled),
+        2 => Ok(Mode::AttachedOneSection),
+        _ => Err("invalid test-only sandbox configuration".into()),
+    };
+    #[cfg(not(target_os = "ios"))]
+    Ok(Mode::Disabled)
+}
 pub fn enabled() -> bool {
     cfg!(any(target_os = "macos", target_os = "ios"))
-        && Mode::parse(std::env::var("HELIUM_DIRECT_METAL").ok().as_deref())
-            == Ok(Mode::OneSectionDiagnostic)
+        && selected_mode().is_ok_and(|m| m != Mode::Disabled)
 }
 #[derive(Default, Debug)]
 struct Counters {
@@ -154,6 +168,43 @@ fn camera_view(origin: [i32; 3], camera: [f64; 3], clip: [[f32; 4]; 4]) -> Resul
         clip_from_relative: clip,
     })
 }
+/// Conservative section AABB/frustum intersection in Metal's 0..w depth space.
+/// Column-major actual game clip transform; does not claim occlusion visibility.
+fn section_visible(view: View) -> bool {
+    let mut outside = [true; 6];
+    for x in [0., 16.] {
+        for y in [0., 16.] {
+            for z in [0., 16.] {
+                let p = [
+                    x + view.origin[0],
+                    y + view.origin[1],
+                    z + view.origin[2],
+                    1.,
+                ];
+                let c: [f32; 4] = std::array::from_fn(|r| {
+                    (0..4).map(|i| view.clip_from_relative[i][r] * p[i]).sum()
+                });
+                if !c.iter().all(|n| n.is_finite()) {
+                    return false;
+                }
+                for (i, distance) in [
+                    c[0] + c[3],
+                    c[3] - c[0],
+                    c[1] + c[3],
+                    c[3] - c[1],
+                    c[2],
+                    c[3] - c[2],
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    outside[i] &= distance < 0.;
+                }
+            }
+        }
+    }
+    !outside.into_iter().any(|n| n)
+}
 struct Flight {
     geometry: Arc<Geometry>,
     source: Vec<BankSource>,
@@ -161,9 +212,19 @@ struct Flight {
     light_revision: u64,
     size: [u32; 2],
     receiver: Receiver<Result<String, String>>,
+    #[cfg(target_os = "ios")]
+    attached: Option<helium_metal_prototype::attached::Ticket>,
+}
+#[cfg(target_os = "ios")]
+struct Shown {
+    _ticket: helium_metal_prototype::attached::Ticket,
+    source: Vec<BankSource>,
+    key: Key,
+    light_revision: u64,
+    size: [u32; 2],
 }
 /// One candidate and one worker, never a world mirror or mesh queue. This mode
-/// produces an UNATTACHED diagnostic drawable; wgpu remains the visible backend.
+/// keeps wgpu as producer/fallback. Attached mode uses a distinct UIKit child layer.
 pub struct Controller {
     mode: Mode,
     candidate: Option<Geometry>,
@@ -172,10 +233,14 @@ pub struct Controller {
     finished: bool,
     counters: Counters,
     last_error: Option<String>,
+    window: Option<Arc<winit::window::Window>>,
+    camera: Option<([f64; 3], [[f32; 4]; 4])>,
+    #[cfg(target_os = "ios")]
+    displayed: Option<Shown>,
 }
 impl Controller {
     pub fn from_environment() -> Option<Self> {
-        let mode = match Mode::parse(std::env::var("HELIUM_DIRECT_METAL").ok().as_deref()) {
+        let mode = match selected_mode() {
             Ok(m) => m,
             Err(e) => {
                 log::warn!("Helium Direct Metal: {e}; wgpu retained");
@@ -189,9 +254,11 @@ impl Controller {
             log::warn!("Helium Direct Metal requires Apple; wgpu retained");
             return None;
         }
-        log::info!(
-            "Helium Direct Metal one-section diagnostic armed; visible backend remains wgpu"
-        );
+        if mode == Mode::AttachedOneSection && !cfg!(target_os = "ios") {
+            log::warn!("attached-one-section requires the actual iOS game host; wgpu retained");
+            return None;
+        }
+        log::info!("Helium Direct Metal selected={mode:?}; wgpu producer/fallback retained");
         Some(Self::new(mode))
     }
     fn new(mode: Mode) -> Self {
@@ -203,7 +270,14 @@ impl Controller {
             finished: false,
             counters: Default::default(),
             last_error: None,
+            window: None,
+            camera: None,
+            #[cfg(target_os = "ios")]
+            displayed: None,
         }
+    }
+    pub fn set_window(&mut self, window: Option<Arc<winit::window::Window>>) {
+        self.window = window;
     }
     fn error(&mut self, error: String) {
         self.counters.rejected += 1;
@@ -214,8 +288,16 @@ impl Controller {
     }
     pub fn invalidate(&mut self, reason: &str) {
         self.candidate = None;
+        #[cfg(target_os = "ios")]
+        {
+            self.displayed = None;
+        }
         if let Some(f) = &self.flight {
             f.cancel.store(true, Ordering::Release);
+            #[cfg(target_os = "ios")]
+            if let Some(t) = &f.attached {
+                t.cancel();
+            }
         }
         self.counters.invalidated += 1;
         log::debug!("Helium Direct Metal revoked: {reason}");
@@ -223,6 +305,10 @@ impl Controller {
     /// Called ONLY for accepted Streaming::update results before their storage is
     /// returned to Streaming::free. Streamer has already rejected stale job seqs.
     pub fn section(&mut self, renderer: &Renderer, key: Key, min_y: i32, mesh: &SectionMesh) {
+        #[cfg(target_os = "ios")]
+        if self.displayed.as_ref().is_some_and(|d| d.key == key) {
+            self.invalidate("displayed section replaced");
+        }
         if self.mode == Mode::Disabled || self.finished {
             return;
         }
@@ -240,6 +326,15 @@ impl Controller {
         if self.flight.is_some() {
             self.counters.busy += 1;
             return;
+        }
+        if let Some((camera, clip)) = self.camera {
+            let visible = section_origin(key, min_y)
+                .and_then(|o| camera_view(o, camera, clip))
+                .is_ok_and(|v| section_visible(v));
+            if !visible {
+                self.counters.rejected += 1;
+                return;
+            }
         }
         if self.candidate.as_ref().is_some_and(|c| c.key != key) {
             self.counters.busy += 1;
@@ -269,6 +364,15 @@ impl Controller {
         self.counters.preparation_us += start.elapsed().as_micros();
         match result {
             Ok(Some(g)) => {
+                if self.counters.accepted == 0 {
+                    log::info!(
+                        "Helium native checkpoint: accepted actual Streaming::update SectionMesh key={:?} sequence={} vertices={} indices={}",
+                        g.key,
+                        g.sequence,
+                        g.vertices.len() / 24,
+                        g.indices.len()
+                    );
+                }
                 self.counters.accepted += 1;
                 self.counters.vertices = g.vertices.len() / 24;
                 self.counters.indices = g.indices.len();
@@ -280,6 +384,14 @@ impl Controller {
     }
     pub fn remove_columns(&mut self, columns: impl Iterator<Item = (i32, i32)>) {
         for key in columns {
+            #[cfg(target_os = "ios")]
+            if self
+                .displayed
+                .as_ref()
+                .is_some_and(|d| (d.key.0, d.key.2) == key)
+            {
+                self.invalidate("displayed column unloaded");
+            }
             if self
                 .candidate
                 .as_ref()
@@ -304,6 +416,22 @@ impl Controller {
         if self.mode == Mode::Disabled {
             return;
         }
+        #[cfg(target_os = "ios")]
+        if self.displayed.as_ref().is_some_and(|d| {
+            d.source.iter().any(|s| s.check_current(renderer).is_err())
+                || renderer.material_state().light_revision() != Ok(d.light_revision)
+                || d.size != [renderer.config.width, renderer.config.height]
+        }) {
+            self.invalidate("displayed producer state changed");
+        }
+        self.camera = Some((
+            frame.camera.to_array(),
+            renderer
+                .views(frame)
+                .primary()
+                .view_proj(frame.bob * frame.spin)
+                .to_cols_array_2d(),
+        ));
         if let Some(f) = &self.flight {
             if f.source.iter().any(|s| s.check_current(renderer).is_err())
                 || renderer.material_state().light_revision() != Ok(f.light_revision)
@@ -313,16 +441,30 @@ impl Controller {
             }
             match f.receiver.try_recv() {
                 Ok(result) => {
-                    let f = self.flight.take().unwrap();
+                    #[allow(unused_mut)]
+                    let mut f = self.flight.take().unwrap();
                     let valid = !f.cancel.load(Ordering::Acquire)
                         && f.source.iter().all(|s| s.check_current(renderer).is_ok())
                         && renderer.material_state().light_revision() == Ok(f.light_revision);
                     self.finished = true;
                     match result {
-                        Ok(evidence) if valid => log::info!(
-                            "Helium Direct Metal CATEGORY D handoff completed: {evidence}; {:?}; visible backend=wgpu, scanout NOT established",
-                            self.counters
-                        ),
+                        Ok(evidence) if valid => {
+                            #[cfg(target_os = "ios")]
+                            if let Some(t) = f.attached.take() {
+                                t.publish();
+                                self.displayed = Some(Shown {
+                                    _ticket: t,
+                                    source: f.source,
+                                    key: f.geometry.key,
+                                    light_revision: f.light_revision,
+                                    size: f.size,
+                                });
+                            }
+                            log::info!(
+                                "Helium Direct Metal CATEGORY D handoff completed: {evidence}; {:?}; scanout NOT established",
+                                self.counters
+                            );
+                        }
                         Ok(_) => self.error(
                             "completed historical worker revoked by live producer/mesh".into(),
                         ),
@@ -384,6 +526,19 @@ impl Controller {
                 .view_proj(frame.bob * frame.spin)
                 .to_cols_array_2d();
             let view = camera_view(g.origin, frame.camera.to_array(), clip)?;
+            if !section_visible(view) {
+                return Err("candidate outside current camera frustum; waiting for visible accepted section".into());
+            }
+            log::info!(
+                "Helium native source accepted key={:?} sequence={} generation={:?} light_revision={} camera={:?} size={}x{}",
+                g.key,
+                g.sequence,
+                g.generation,
+                light_revision,
+                frame.camera,
+                renderer.config.width,
+                renderer.config.height
+            );
             Ok((
                 source,
                 validation,
@@ -401,7 +556,6 @@ impl Controller {
         };
         let geometry = Arc::new(g);
         let cancel = Arc::new(AtomicBool::new(false));
-        let (sender, receiver) = mpsc::sync_channel(1);
         let job = Job {
             source,
             geometry: geometry.clone(),
@@ -410,6 +564,33 @@ impl Controller {
             view,
             size: [renderer.config.width, renderer.config.height],
         };
+        #[cfg(target_os = "ios")]
+        if self.mode == Mode::AttachedOneSection {
+            let Some(window) = &self.window else {
+                self.error("actual game window unavailable".into());
+                return;
+            };
+            match helium_metal_prototype::attached::submit(
+                window.as_ref(),
+                cancel.clone(),
+                move |layer| run_impl(job, Some(layer)),
+            ) {
+                Ok((ticket, receiver)) => {
+                    self.flight = Some(Flight {
+                        geometry,
+                        source: validation,
+                        cancel,
+                        light_revision,
+                        size: [renderer.config.width, renderer.config.height],
+                        receiver,
+                        attached: Some(ticket),
+                    })
+                }
+                Err(e) => self.error(e),
+            }
+            return;
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
         match std::thread::Builder::new()
             .name("helium-real-section-metal".into())
             .spawn(move || {
@@ -425,6 +606,8 @@ impl Controller {
                     light_revision,
                     size: [renderer.config.width, renderer.config.height],
                     receiver,
+                    #[cfg(target_os = "ios")]
+                    attached: None,
                 })
             }
             Err(e) => self.error(format!("native worker launch failed: {e}")),
@@ -492,6 +675,17 @@ fn run(_job: Job) -> Result<String, String> {
 }
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn run(job: Job) -> Result<String, String> {
+    run_impl(
+        job,
+        #[cfg(target_os = "ios")]
+        None,
+    )
+}
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn run_impl(
+    job: Job,
+    #[cfg(target_os = "ios")] attached: Option<helium_metal_prototype::attached::Layer>,
+) -> Result<String, String> {
     use helium_metal_prototype::{
         frame,
         terrain::{Budget, Options, TerrainRenderer},
@@ -544,6 +738,10 @@ fn run(job: Job) -> Result<String, String> {
     while renderer.upload_retention().busy {
         pause()?;
     }
+    log::info!(
+        "Helium native bank uploads ready count={}",
+        descriptions.len()
+    );
     let mut frames = renderer.create_frames()?;
     frames.begin(
         &renderer,
@@ -562,6 +760,10 @@ fn run(job: Job) -> Result<String, String> {
             },
         },
     )?;
+    log::info!(
+        "Helium native frame submitted triangles={}",
+        job.geometry.indices.len() / 3
+    );
     let mut ticket = loop {
         match frames.poll(&renderer, &material, &job.cancel) {
             frame::Poll::Completed(t) => break t,
@@ -573,18 +775,32 @@ fn run(job: Job) -> Result<String, String> {
     while renderer.upload_retention().busy {
         pause()?;
     }
+    log::info!("Helium native GPU frame completed");
+    #[cfg(target_os = "ios")]
+    let attachment = attached.as_ref().map(|l| l.generation());
+    #[cfg(not(target_os = "ios"))]
+    let attachment: Option<u64> = None;
+    #[cfg(target_os = "ios")]
+    let mut display = match attached {
+        Some(layer) => layer.display(&renderer)?,
+        None => renderer.detached_diagnostic_display(job.size[0] as usize, job.size[1] as usize)?,
+    };
+    #[cfg(not(target_os = "ios"))]
     let mut display =
         renderer.detached_diagnostic_display(job.size[0] as usize, job.size[1] as usize)?;
     let output = frames.take_completed(&renderer, &material, &job.cancel, &mut ticket)?;
     let Some(mut presentation) = display.present(output, 192 * 1024 * 1024, &job.cancel)? else {
         return Err("diagnostic CAMetalDrawable unavailable; no presentation success".into());
     };
+    log::info!(
+        "Helium native presentation submitted attached_generation={attachment:?}; scanout unverified"
+    );
     while !presentation.poll()? {
         pause()?;
     }
     drop(presentation);
     Ok(format!(
-        "backend=direct-Metal key={:?} origin={:?} accepted_mesh_sequence={} banks={:?} revision={} vertices={} indices={} native_upload={:?} frame={:?} presentation={:?}; UNATTACHED drawable",
+        "backend=direct-Metal key={:?} origin={:?} accepted_mesh_sequence={} banks={:?} revision={} vertices={} indices={} native_upload={:?} frame={:?} presentation={:?}; attached_generation={attachment:?}; GPU command completed, scanout unverified",
         job.geometry.key,
         job.geometry.origin,
         job.geometry.sequence,
@@ -644,6 +860,39 @@ mod tests {
         let c = Controller::new(Mode::Disabled);
         assert!(c.candidate.is_none() && c.flight.is_none());
         assert_eq!(c.counters.accepted, 0);
+    }
+    #[test]
+    fn attached_selection_is_explicit_and_strict() {
+        assert_eq!(
+            Mode::parse(Some("attached-one-section")).unwrap(),
+            Mode::AttachedOneSection
+        );
+        for bad in [
+            "attached",
+            "Attached-one-section",
+            "attached-one-section\n",
+            " one-section",
+        ] {
+            assert!(Mode::parse(Some(bad)).is_err());
+        }
+    }
+    #[test]
+    fn handcrafted_frustum_boundaries_use_column_major_metal_depth() {
+        let clip = [
+            [1., 0., 0., 0.],
+            [0., 1., 0., 0.],
+            [0., 0., 1., 0.],
+            [0., 0., 0., 1.],
+        ];
+        let v = |origin| View {
+            origin,
+            clip_from_relative: clip,
+        };
+        assert!(section_visible(v([0.; 3]))); // crosses clip planes
+        assert!(!section_visible(v([2., 0., 0.])));
+        assert!(!section_visible(v([0., 0., -17.])));
+        assert!(!section_visible(v([0., 0., 2.])));
+        assert!(!section_visible(v([f32::NAN, 0., 0.])));
     }
     #[test]
     fn handoff_preserves_all_bytes_and_large_global_ids() {
@@ -779,6 +1028,8 @@ mod ownership_tests {
                 light_revision: 1,
                 size: [256, 256],
                 receiver,
+                #[cfg(target_os = "ios")]
+                attached: None,
             });
             if reason == "shutdown" {
                 drop(owner)

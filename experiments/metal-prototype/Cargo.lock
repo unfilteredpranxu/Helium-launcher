@@ -32,12 +32,20 @@ name = "helium-metal-prototype"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "libc",
  "objc2",
  "objc2-core-graphics",
  "objc2-foundation",
  "objc2-metal",
  "objc2-quartz-core",
+ "raw-window-handle",
 ]
+
+[[package]]
+name = "libc"
+version = "0.2.190"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "objc2"
@@ -124,3 +132,9 @@ dependencies = [
  "objc2-foundation",
  "objc2-metal",
 ]
+
+[[package]]
+name = "raw-window-handle"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"

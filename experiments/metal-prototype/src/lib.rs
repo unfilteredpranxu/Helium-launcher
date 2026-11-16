@@ -121,3 +121,9 @@ mod apple_tests {
         super::smoke_test().expect("Metal offscreen terrain smoke test");
     }
 }
+
+#[cfg(target_os = "ios")]
+pub mod attached;
+
+#[cfg(any(target_os = "ios", test))]
+mod attached_protocol;

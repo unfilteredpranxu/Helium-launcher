@@ -10,6 +10,7 @@ private var presentationPending = false
 /// being set up.
 @_cdecl("horizon_launcher_present")
 public func horizonLauncherPresent(_ submit: HorizonSubmit?) -> Bool {
+    cancelAllNativeTargets()
     Bridge.submit = submit
     Theme.registerFonts()
     let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"

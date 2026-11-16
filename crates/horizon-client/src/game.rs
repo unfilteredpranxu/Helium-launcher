@@ -13246,6 +13246,7 @@ impl Game<'_> {
         creative: bool,
         create: Option<&horizon_client::title::WorldOptions>,
     ) -> Result<()> {
+        log::info!("Horizon checkpoint: world-open requested (path/name omitted)");
         // openWorldLoadLevelData: an existing world whose level data does not read opens
         // RecoverWorldDataScreen instead.
         if create.is_none()
@@ -13325,6 +13326,9 @@ impl Game<'_> {
     }
 
     fn finish_open_world(&mut self, prepared: world_loading::PreparedWorld) -> Result<()> {
+        log::info!(
+            "Horizon checkpoint: selected world prepared; installing real world and streamer"
+        );
         self.reset_tutorial();
         // Another world: its generator, not the last one's Density line.
         self.debug_density.borrow_mut().clear();
@@ -17586,7 +17590,8 @@ impl Game<'_> {
                 let rendered = horizon_client::spans::time("renderer", || renderer.render(&frame));
                 #[cfg(feature = "helium-direct-metal")]
                 if let Some(native) = self.direct_metal.as_mut() {
-                    if matches!(rendered, Ok(true)) {
+                    native.set_window(self.window.clone());
+                    if matches!(rendered, Ok(true)) && !horizon_ios_launcher::covered() {
                         native.frame(renderer, &frame);
                     } else {
                         native.invalidate("production frame unavailable");
@@ -22627,6 +22632,7 @@ fn build_renderer(
         shader_pack.linear,
         shader_pack.hdr_float,
     ))?;
+    log::info!("Horizon checkpoint: wgpu world resource producer initialized");
     renderer.hud.sprite_animations = atlas
         .sprite_animations
         .iter()

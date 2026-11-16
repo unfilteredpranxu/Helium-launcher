@@ -1,10 +1,13 @@
 name: Helium Metal Upload Validation
 on:
   push:
-    branches: [feature/helium-g05-metal-upload, feature/helium-g05-async-upload, feature/helium-g05-async-draw, feature/helium-g05-metal-presentation, feature/helium-g06-real-world-metal, feature/helium-g06-production-banks]
+    branches: [feature/helium-g05-metal-upload, feature/helium-g05-async-upload, feature/helium-g05-async-draw, feature/helium-g05-metal-presentation, feature/helium-g06-real-world-metal, feature/helium-g06-production-banks, feature/helium-g06-attached-game]
     paths:
       - 'crates/horizon-metal-bridge/**'
       - 'crates/horizon-client/src/game.rs'
+      - 'packaging/ios/Launcher/**'
+      - 'packaging/ios/project.yml'
+      - 'packaging/ios/GameInfo.plist'
       - 'crates/horizon-client/Cargo.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -159,3 +162,79 @@ jobs:
               return '### '+n+'\n```text\n'+(fs.existsSync(p)?fs.readFileSync(p,'utf8').slice(-10000):'NOT RUN')+'\n```';
             }).join('\n');
             await github.rest.checks.create({owner:context.repo.owner,repo:context.repo.repo,head_sha:context.sha,name:'Helium production bridge evidence',status:'completed',conclusion:'neutral',output:{title:'Read individual compilation logs; not gameplay runtime proof',summary}});
+
+  attached-ios-game:
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+      CARGO_PROFILE_RELEASE_LTO: 'false'
+      CARGO_INCREMENTAL: '0'
+      IPHONEOS_DEPLOYMENT_TARGET: '15.0'
+      RUSTUP_TOOLCHAIN: '1.95.0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup target add --toolchain 1.95.0 aarch64-apple-ios
+          mkdir -p "$RUNNER_TEMP/attached-game"
+          xcodebuild -version | tee "$RUNNER_TEMP/attached-game/apple.log"
+          xcrun --sdk iphoneos --show-sdk-version | tee -a "$RUNNER_TEMP/attached-game/apple.log"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: helium-g06c-ios
+      - name: Check default game and prove disabled dependency isolation
+        run: |
+          set -euo pipefail
+          cargo +1.95.0 check --locked -p horizon-client --no-default-features 2>&1 | tee "$RUNNER_TEMP/attached-game/default.log"
+          cargo +1.95.0 tree --locked -p horizon-client --no-default-features --target aarch64-apple-ios > "$RUNNER_TEMP/attached-game/default-tree.log"
+          if rg 'horizon-metal-bridge|helium-metal-prototype' "$RUNNER_TEMP/attached-game/default-tree.log"; then exit 1; fi
+      - name: Actually link the opt-in arm64 Rust GAME executable
+        run: |
+          set -euo pipefail
+          cargo +1.95.0 build --release --locked --target aarch64-apple-ios -p horizon-client --no-default-features --features audio,helium-direct-metal 2>&1 | tee "$RUNNER_TEMP/attached-game/rust-link.log"
+      - name: Compile and link the actual UIKit launcher and game bundle
+        run: |
+          set -euo pipefail
+          command -v xcodegen >/dev/null || brew install xcodegen
+          (cd packaging/ios && xcodegen generate)
+          HORIZON_GAME_PREBUILT=1 xcodebuild -project packaging/ios/HorizonIOS.xcodeproj -target HorizonGame -configuration Release -sdk iphoneos -arch arm64 CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= CODE_SIGNING_REQUIRED=NO DEBUG_INFORMATION_FORMAT=dwarf CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/attached-game/build" build > "$RUNNER_TEMP/attached-game/xcode.log" 2>&1 || { tail -80 "$RUNNER_TEMP/attached-game/xcode.log"; exit 1; }
+          app="$RUNNER_TEMP/attached-game/build/HorizonGame.app"
+          cmp target/aarch64-apple-ios/release/horizon-client "$app/Horizon"
+          file "$app/Horizon" | tee "$RUNNER_TEMP/attached-game/verified.log"
+          otool -l "$app/Horizon" | rg -A6 'LC_BUILD_VERSION|LC_VERSION_MIN_IPHONEOS' | tee -a "$RUNNER_TEMP/attached-game/verified.log"
+          nm -g "$app/Frameworks/HorizonLauncherKit.framework/HorizonLauncherKit" | rg '_horizon_native_display_(mode|request|publish|cancel)' | tee -a "$RUNNER_TEMP/attached-game/verified.log"
+          test "$(nm -g "$app/Frameworks/HorizonLauncherKit.framework/HorizonLauncherKit" | rg -c '_horizon_native_display_(mode|request|publish|cancel)')" -eq 4
+          # Only this isolated TEST artifact permits the sandbox opt-in. Default stays off.
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier dev.helium.g06ctest' "$app/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName Helium G06C Test' "$app/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Add :HeliumNativeMetalTest bool true' "$app/Info.plist"
+          test -z "$(find "$app" -name horizon-resources.json -o -name helium-metal-test.txt -o -name level.dat)"
+          mkdir -p "$RUNNER_TEMP/attached-game/package/Payload"
+          cp -a "$app" "$RUNNER_TEMP/attached-game/package/Payload/"
+          (cd "$RUNNER_TEMP/attached-game/package" && zip -qry ../Helium-G06C-game-unsigned.ipa Payload)
+      - name: Publish actual game link evidence
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs=require('fs'),path=require('path');
+            const summary=['apple.log','default.log','rust-link.log','xcode.log','verified.log'].map(n=>{
+              const p=path.join(process.env.RUNNER_TEMP,'attached-game',n);
+              return '### '+n+'\n```text\n'+(fs.existsSync(p)?fs.readFileSync(p,'utf8').slice(-7500):'NOT RUN')+'\n```';
+            }).join('\n');
+            await github.rest.checks.create({owner:context.repo.owner,repo:context.repo.repo,head_sha:context.sha,name:'Helium attached GAME link evidence',status:'completed',conclusion:'neutral',output:{title:'Actual game link and Swift symbols; NOT device/world runtime evidence',summary}});
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: Helium-G06C-isolated-game-unsigned
+          path: ${{ runner.temp }}/attached-game/Helium-G06C-game-unsigned.ipa
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: helium-g06c-game-link-logs
+          path: ${{ runner.temp }}/attached-game/*.log
