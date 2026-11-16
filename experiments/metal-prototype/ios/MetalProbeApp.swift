@@ -80,6 +80,8 @@ struct ProbeView: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Helium Direct Metal Test").font(.title).bold()
                 Text("Standalone 256 × 256 indexed terrain and depth probe")
+                Text("G05-D — Native SDR display (GPU completion is not scanout)")
+                NativeDisplayProbe().frame(height: 320)
                 Group {
                     Picker("Renderer", selection: Binding(
                         get: { model.selectedMode }, set: { model.select($0) }

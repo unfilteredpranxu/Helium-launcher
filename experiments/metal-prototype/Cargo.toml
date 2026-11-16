@@ -17,11 +17,13 @@ crate-type = ["rlib", "staticlib"]
 objc2 = "=0.6.5"
 # Typed, owned completion block for source keepalive only; no Metal objects are moved.
 block2 = "=0.6.2"
-objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSString", "NSError"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSString", "NSError", "NSThread"] }
 objc2-metal = { version = "=0.3.2", default-features = false, features = [
     "std", "block2", "objc2-core-foundation", "MTLAllocation", "MTLArgument", "MTLDevice",
     "MTLCommandQueue", "MTLCommandBuffer", "MTLCommandEncoder", "MTLBuffer",
     "MTLBlitCommandEncoder", "MTLDepthStencil", "MTLLibrary", "MTLPixelFormat",
     "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline",
-    "MTLResource", "MTLTexture", "MTLTypes",
+    "MTLDrawable", "MTLResource", "MTLTexture", "MTLTypes",
 ] }
+
+objc2-quartz-core = { version = "=0.3.2", default-features = false, features = ["std", "CALayer", "CAMediaTiming", "CAMetalLayer", "objc2-metal", "objc2-core-foundation"] }

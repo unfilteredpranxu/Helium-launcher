@@ -46,7 +46,23 @@ int32_t helium_metal_smoke_test_rgba(uint8_t *rgba_out, size_t rgba_capacity,
 // Does not change the original G01 entry or select a production renderer.
 int32_t helium_metal_terrain_test_rgba(uint8_t *rgba_out, size_t rgba_capacity,
                                      char *message_out, size_t message_capacity);
+// G05-D ABI v1: one bounded diagnostic display request. Handles are monotonic,
+// never pointers. Create/status/cancel/release are thread-safe. Status:
+// -1 stale, 1 initializing, 2 submitted, 3 GPU completed (NOT scanout),
+// 4 no drawable, 5 failed/revoked. Run exactly once on a dedicated worker.
+// layer must be a LIVE CAMetalLayer during run; Rust retains it synchronously.
+// Configure same default Metal device, BGRA8Unorm, linear-sRGB, SDR, physical
+// drawableSize and allowsNextDrawableTimeout=true. Do not mutate its configuration
+// during run; cancel/recreate for resize/suspension. run can wait for drawable and
+// driver retirement; it MUST NOT execute on the UI thread. No CPU image readback.
+uint64_t helium_display_create(void);
+int32_t helium_display_status(uint64_t handle);
+void helium_display_cancel(uint64_t handle);
+void helium_display_release(uint64_t handle);
+int32_t helium_display_run(uint64_t handle, void *layer);
+
 #ifdef __cplusplus
 }
 #endif
 #endif
+

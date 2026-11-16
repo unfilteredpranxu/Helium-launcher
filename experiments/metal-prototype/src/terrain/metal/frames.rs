@@ -207,7 +207,7 @@ impl<S: Source + Send + Sync + 'static> Frames<S> {
                         1,
                         false,
                         MTLPixelFormat::RGBA8Unorm,
-                        MTLTextureUsage::RenderTarget,
+                        MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead,
                     )?,
                     depth: texture(
                         &renderer.device,
@@ -415,6 +415,25 @@ impl<S: Source + Send + Sync + 'static> Frames<S> {
             }
         }
         result
+    }
+}
+impl<S: Source> CompletedFrame<'_, S> {
+    pub(super) fn presentation_source(&self) -> Result<(Texture, Arc<S>, usize), String> {
+        self.frames
+            .authorized(self.renderer, self.material, self.authority)?;
+        Ok((
+            self.frames.targets.as_ref().unwrap().color.clone(),
+            self.frames.source.as_ref().unwrap().clone(),
+            self.frames.counters.allocated_payload,
+        ))
+    }
+    pub(super) fn presentation_renderer(&self) -> &TerrainRenderer {
+        self.renderer
+    }
+    pub(super) fn presentation_current(&self) -> Result<(), String> {
+        self.frames
+            .authorized(self.renderer, self.material, self.authority)
+            .map(|_| ())
     }
 }
 impl<S: Source> CompletedFrame<'_, S> {

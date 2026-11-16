@@ -24,6 +24,7 @@ targets:
     sources:
       - path: MetalProbeApp.swift
       - path: ProbeRunner.swift
+      - path: DisplayProbe.swift
     preBuildScripts:
       - name: Build experimental Rust static library
         shell: /bin/bash
@@ -37,6 +38,7 @@ targets:
       - sdk: CoreFoundation.framework
       - sdk: CoreGraphics.framework
       - sdk: Metal.framework
+      - sdk: QuartzCore.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.helium.metalprobe

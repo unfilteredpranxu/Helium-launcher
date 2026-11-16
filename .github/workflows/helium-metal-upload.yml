@@ -1,9 +1,11 @@
 name: Helium Metal Upload Validation
 on:
   push:
-    branches: [feature/helium-g05-metal-upload, feature/helium-g05-async-upload, feature/helium-g05-async-draw]
+    branches: [feature/helium-g05-metal-upload, feature/helium-g05-async-upload, feature/helium-g05-async-draw, feature/helium-g05-metal-presentation]
     paths:
       - 'experiments/metal-prototype/src/**'
+      - 'experiments/metal-prototype/ios/**'
+      - 'experiments/metal-prototype/helium_metal_prototype.h'
       - 'experiments/metal-prototype/tools/**'
       - 'experiments/metal-prototype/examples/**'
       - 'experiments/metal-prototype/Cargo.toml'
@@ -65,6 +67,13 @@ jobs:
             xcrun --sdk iphoneos metal -target air64-apple-ios15.0 -std=ios-metal2.0 -c \
               experiments/metal-prototype/src/terrain/terrain24.metal -o "$RUNNER_TEMP/helium-upload/g02.air"
           } 2>&1 | tee "$RUNNER_TEMP/helium-upload/msl.log"
+      - name: Compile presentation shader and unsigned probe host
+        run: |
+          set -euo pipefail
+          xcrun --sdk iphoneos metal -target air64-apple-ios15.0 -std=ios-metal2.0 -c experiments/metal-prototype/src/terrain/metal/presentation.metal -o "$RUNNER_TEMP/helium-upload/display.air"
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          (cd experiments/metal-prototype/ios && xcodegen generate)
+          xcodebuild -project experiments/metal-prototype/ios/HeliumMetalProbe.xcodeproj -scheme HeliumMetalProbe -configuration Release -sdk iphoneos -derivedDataPath "$RUNNER_TEMP/helium-probe-build" CODE_SIGNING_ALLOWED=NO build > "$RUNNER_TEMP/helium-upload/swift-host.log" 2>&1
       - name: Probe native Metal uploads and original G01/G02 GPU regressions
         id: gpu
         run: |
@@ -89,7 +98,7 @@ jobs:
           script: |
             const fs = require('fs');
             const path = require('path');
-            const names = ['toolchain.log', 'macos-tests.log', 'ios-check.log', 'msl.log', 'native-runtime.log'];
+            const names = ['toolchain.log', 'macos-tests.log', 'ios-check.log', 'msl.log', 'swift-host.log', 'native-runtime.log'];
             const sections = names.map(name => {
               const file = path.join(process.env.RUNNER_TEMP, 'helium-upload', name);
               const data = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : 'NOT RUN / no log';

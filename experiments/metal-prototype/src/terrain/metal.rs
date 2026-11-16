@@ -11,6 +11,7 @@ use std::{ffi::c_void, ptr::NonNull};
 
 pub(crate) mod frames;
 pub(crate) mod material_upload;
+pub(crate) mod presentation;
 
 type Device = ProtocolObject<dyn MTLDevice>;
 type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
