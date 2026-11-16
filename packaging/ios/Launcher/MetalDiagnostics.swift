@@ -25,7 +25,7 @@ public func installMetalDiagnostics(_ version:UInt32,_ event:MetalDiagnosticEven
 @_cdecl("horizon_diag_hud_v2")
 public func attachMetalHUD(_ pointer:UnsafeMutableRawPointer?) {
     guard Thread.isMainThread, eventFunction != nil, let pointer=pointer,
-          let parent=Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? UIView else {return}
+          let parent=Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? UIView else {diagnosticEvent(0,30,37);return}
     if debugParent === parent, debugHUD != nil {return}
     debugTimer?.invalidate();debugHUD?.removeFromSuperview();debugParent=parent
     let label=UILabel();label.font = .monospacedSystemFont(ofSize:11,weight:.medium)

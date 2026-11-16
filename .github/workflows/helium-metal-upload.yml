@@ -272,7 +272,7 @@ jobs:
         with:
           script: |
             const fs=require('fs'),path=require('path');
-            const summary=['tests.log','e2e.log','recovery.log','UIKit.log','TEST_ONLY-report.txt'].map(n=>{let p=path.join(process.env.RUNNER_TEMP,'diag-evidence',n);return '### '+n+'\n```text\n'+(fs.existsSync(p)?fs.readFileSync(p,'utf8').slice(-9000):'NOT RUN')+'\n```';}).join('\n');
+            const summary=['tests.log','e2e.log','recovery.log','UIKit.log','TEST_ONLY-report.txt'].map(n=>{let p=path.join(process.env.RUNNER_TEMP,'diag-evidence',n);return '### '+n+'\n```text\n'+(fs.existsSync(p)?(n==='TEST_ONLY-report.txt'?fs.readFileSync(p,'utf8').slice(0,22000):fs.readFileSync(p,'utf8').slice(-7000)):'NOT RUN')+'\n```';}).join('\n');
             await github.rest.checks.create({owner:context.repo.owner,repo:context.repo.repo,head_sha:context.sha,name:'Helium diagnostics E2E evidence',status:'completed',conclusion:'neutral',output:{title:'Real Swift/C/Rust/report and UIKit compile; synthetic, not physical-device evidence',summary}});
       - uses: actions/upload-artifact@v4
         if: always()
@@ -298,6 +298,8 @@ jobs:
           cargo +1.95.0 test --locked --manifest-path experiments/metal-prototype/Cargo.toml
           cargo +1.95.0 test --locked -p horizon-metal-bridge
           cargo +1.95.0 test --locked -p horizon-client-render --lib mesher::
+          cargo +1.95.0 test --locked -p horizon-client-render --lib gfx::animate:: -- --test-threads=2
+          cargo +1.95.0 test --locked -p horizon-client-render --lib mipmap::
           cargo +1.95.0 test --locked -p horizon-client-render --lib gfx::material_snapshot::
           python3 experiments/metal-prototype/tools/test_section_bridge.py
           cargo +1.95.0 fmt --manifest-path experiments/metal-prototype/Cargo.toml --check

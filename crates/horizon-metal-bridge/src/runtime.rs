@@ -1081,6 +1081,12 @@ fn run_impl(
                 event(Stage::Cancelled, Some(Cause::UploadFailed), bank as u64, 0);
                 e
             })?;
+        event(
+            Stage::UploadSubmitted,
+            None,
+            bank as u64,
+            material.counters().upload_bytes,
+        );
         loop {
             match material.bank_mut(bank)?.poll_upload(&renderer, &job.cancel) {
                 upload::Poll::Completed(_) => {
@@ -1111,7 +1117,18 @@ fn run_impl(
         "Helium native bank uploads ready count={}",
         descriptions.len()
     );
-    event(Stage::BanksResident, None, descriptions.len() as u64, 0);
+    event(
+        Stage::BanksResident,
+        None,
+        descriptions.len() as u64,
+        material.counters().texture_payload as u64,
+    );
+    event(
+        Stage::MemoryCounters,
+        None,
+        material.counters().staging_peak as u64,
+        material.counters().source_peak as u64,
+    );
     let mut frames = renderer.create_frames()?;
     frames
         .begin(
@@ -1148,7 +1165,12 @@ fn run_impl(
     let mut ticket = loop {
         match frames.poll(&renderer, &material, &job.cancel) {
             frame::Poll::Completed(t) => {
-                event(Stage::DrawCompleted, None, 0, 0);
+                event(
+                    Stage::DrawCompleted,
+                    None,
+                    frames.counters().allocated_payload as u64,
+                    frames.counters().peak_payload as u64,
+                );
                 break t;
             }
             frame::Poll::Pending => pause()?,

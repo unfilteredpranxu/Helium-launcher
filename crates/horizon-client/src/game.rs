@@ -23192,6 +23192,7 @@ impl Loading {
             #[cfg(feature = "helium-direct-metal")]
             if let Some(w) = &self.window {
                 horizon_metal_bridge::diagnostic_window(w);
+                horizon_metal_bridge::checkpoint(4);
             }
             horizon_ios_launcher::present();
             return;

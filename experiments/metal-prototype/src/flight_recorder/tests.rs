@@ -331,3 +331,46 @@ fn actual_disk_full_is_degraded_without_false_acknowledgement() {
             .contains("write_errors_total=")
     );
 }
+
+#[test]
+fn possible_inflight_state_only_changes_at_submission_terminal_or_retirement() {
+    let r = Recorder::memory();
+    r.begin(1);
+    r.record(1, Stage::UploadStarted, Emitter::Worker, None, 0, 1);
+    assert_eq!(r.status()[28], 0);
+    r.record(1, Stage::UploadSubmitted, Emitter::Worker, None, 0, 4);
+    r.record(
+        1,
+        Stage::Cancelled,
+        Emitter::Swift,
+        Some(Cause::ViewDetached),
+        0,
+        0,
+    );
+    assert!(r.snapshot().last().unwrap().gpu_inflight);
+    assert_eq!(r.status()[28], 1);
+    r.record(1, Stage::Retired, Emitter::Game, None, 0, 0);
+    assert_eq!(r.status()[28], 0);
+    r.begin(2);
+    r.record(2, Stage::UiRevealed, Emitter::Swift, None, 0, 0);
+    r.record(
+        2,
+        Stage::Removed,
+        Emitter::Swift,
+        Some(Cause::SnapshotExpired),
+        0,
+        0,
+    );
+    for n in 0..600 {
+        r.record(0, Stage::SelfTest, Emitter::Recorder, None, n, 0);
+    }
+    r.record(
+        2,
+        Stage::Cancelled,
+        Emitter::Swift,
+        Some(Cause::TicketCancelled),
+        0,
+        0,
+    );
+    assert_eq!(r.first(2), None);
+}

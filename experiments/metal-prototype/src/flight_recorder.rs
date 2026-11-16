@@ -180,6 +180,8 @@ pub enum Stage {
     BankLayout = 38,
     DeviceMetadata = 39,
     TextureLayout = 40,
+    UploadSubmitted = 41,
+    MemoryCounters = 42,
 }
 impl Stage {
     pub fn from_code(n: u32) -> Option<Self> {
@@ -224,6 +226,8 @@ impl Stage {
             38 => Self::BankLayout,
             39 => Self::DeviceMetadata,
             40 => Self::TextureLayout,
+            41 => Self::UploadSubmitted,
+            42 => Self::MemoryCounters,
             _ => return None,
         })
     }
@@ -264,11 +268,12 @@ pub struct Event {
     pub observed: u64,
     pub test_only: bool,
     pub last_confirmed: u32,
+    pub gpu_inflight: bool,
 }
 impl Event {
     pub fn json(&self) -> String {
         format!(
-            "{{\"schema_version\":2,\"boot_id\":{},\"event_seq\":{},\"attempt_id\":{},\"world_epoch\":{},\"monotonic_ns\":{},\"stage_code\":{},\"stage\":\"{:?}\",\"emitter_code\":{},\"emitter\":\"{:?}\",\"cause_code\":{},\"cause\":\"{:?}\",\"first\":{},\"expected\":{},\"observed\":{},\"test_only\":{},\"last_confirmed_stage\":{}}}\n",
+            "{{\"schema_version\":2,\"boot_id\":{},\"event_seq\":{},\"attempt_id\":{},\"world_epoch\":{},\"monotonic_ns\":{},\"stage_code\":{},\"stage\":\"{:?}\",\"emitter_code\":{},\"emitter\":\"{:?}\",\"cause_code\":{},\"cause\":\"{:?}\",\"first\":{},\"expected\":{},\"observed\":{},\"test_only\":{},\"last_confirmed_stage\":{},\"gpu_inflight\":{}}}\n",
             self.boot,
             self.seq,
             self.attempt,
@@ -284,7 +289,8 @@ impl Event {
             self.expected,
             self.observed,
             self.test_only,
-            self.last_confirmed
+            self.last_confirmed,
+            self.gpu_inflight
         )
     }
     fn parse(line: &str) -> Option<Self> {
@@ -320,6 +326,7 @@ impl Event {
             observed: n(line, "observed")?,
             test_only: line.contains("\"test_only\":true"),
             last_confirmed: u32::try_from(n(line, "last_confirmed_stage").unwrap_or(0)).ok()?,
+            gpu_inflight: line.contains("\"gpu_inflight\":true"),
         })
     }
 }
@@ -337,6 +344,8 @@ struct State {
     torn: u64,
     write_errors: u64,
     blocked: Vec<u64>,
+    pending: Vec<(u64, bool)>,
+    ended: Vec<u64>,
 }
 pub struct Recorder {
     state: Arc<Mutex<State>>,
@@ -367,6 +376,8 @@ impl Recorder {
                 torn: 0,
                 write_errors: 0,
                 blocked: Vec::with_capacity(3),
+                pending: Vec::with_capacity(3),
+                ended: Vec::with_capacity(3),
             })),
             start: Instant::now(),
             ack: Arc::new(AtomicU64::new(0)),
@@ -437,6 +448,7 @@ impl Recorder {
             return false;
         }
         s.attempts.push((id, world));
+        s.pending.push((id, false));
         s.fields[0] = 0;
         s.fields[1] = 0;
         s.fields[8] = 0;
@@ -500,10 +512,10 @@ impl Recorder {
             };
             *w
         };
-        let ended = s
-            .events
-            .iter()
-            .any(|e| e.attempt == id && e.stage == Stage::Removed);
+        let ended = s.ended.contains(&id);
+        if id != 0 && stage == Stage::Removed && !ended {
+            s.ended.push(id);
+        }
         if s.events.back().is_some_and(|e| {
             e.attempt == id
                 && e.stage == stage
@@ -582,6 +594,24 @@ impl Recorder {
                 }
             })
             .unwrap_or(0);
+        if let Some((_, pending)) = s.pending.iter_mut().find(|p| p.0 == id) {
+            if matches!(
+                stage,
+                Stage::UploadSubmitted | Stage::DrawSubmitted | Stage::PresentSubmitted
+            ) {
+                *pending = true;
+            }
+            if matches!(
+                stage,
+                Stage::BankCompleted
+                    | Stage::DrawCompleted
+                    | Stage::PresentCompleted
+                    | Stage::Retired
+            ) {
+                *pending = false;
+            }
+        }
+        let gpu_inflight = s.pending.iter().any(|p| p.0 == id && p.1);
         let e = Event {
             boot: s.boot,
             seq,
@@ -596,6 +626,7 @@ impl Recorder {
             observed,
             test_only: self.test_only,
             last_confirmed,
+            gpu_inflight,
         };
         if id == 0 || s.attempts.last().is_some_and(|a| a.0 == id) {
             match stage {
@@ -698,7 +729,7 @@ impl Recorder {
             s.fields[9],
             s.fields[10],
             s.write_errors,
-            s.fields[12],
+            u64::from(s.pending.iter().any(|p| p.0 == id && p.1)),
             s.fields[13],
             s.fields[14],
             s.fields[15],
@@ -793,9 +824,19 @@ impl Store {
             report.push_str(&format!("Attempt {} FIRST CAUSE {:?} emitter={:?} last confirmed stage before cancel retained in timeline\n",e.attempt,e.cause,e.emitter));
             let last = Stage::from_code(e.last_confirmed);
             report.push_str(&format!("Last confirmed stage at first cause: {last:?}\n"));
+            report.push_str(&format!(
+                "Possible GPU work pending at first cause: {}\n",
+                e.gpu_inflight
+            ));
             report.push_str(&e.json());
         }
         report.push_str("PREVIOUS BOOT (normalized allowlisted fields only):\n");
+        for e in s.previous.iter().filter(|e| e.first) {
+            report.push_str(&format!(
+                "Previous boot {} attempt {} FIRST CAUSE {:?} emitter={:?} seq={}\n",
+                e.boot, e.attempt, e.cause, e.emitter, e.seq
+            ));
+        }
         for e in s.previous.iter().rev().take(80).rev() {
             report.push_str(&e.json());
         }
@@ -834,6 +875,8 @@ impl Store {
             torn: 0,
             write_errors: 0,
             blocked: vec![],
+            pending: vec![],
+            ended: vec![],
         };
         self.write_snapshot(&s)
     }
