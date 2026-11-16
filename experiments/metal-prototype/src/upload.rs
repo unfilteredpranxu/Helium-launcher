@@ -112,14 +112,19 @@ impl CopyRegion {
         Ok(())
     }
 }
-pub struct Plan {
+pub struct Plan<G> {
+    description: Description<G>,
     regions: Vec<CopyRegion>,
     staging_bytes: usize,
     texture_bytes: usize,
     upload_bytes: usize,
     peak_payload: usize,
+    source_bytes: usize,
 }
-impl Plan {
+impl<G: Copy + Eq + Debug> Plan<G> {
+    pub fn description(&self) -> Description<G> {
+        self.description
+    }
     pub fn staging_bytes(&self) -> usize {
         self.staging_bytes
     }
@@ -129,13 +134,16 @@ impl Plan {
     pub fn upload_bytes(&self) -> usize {
         self.upload_bytes
     }
+    pub fn source_bytes(&self) -> usize {
+        self.source_bytes
+    }
     pub fn peak_payload(&self) -> usize {
         self.peak_payload
     }
     pub fn regions(&self) -> &[CopyRegion] {
         &self.regions
     }
-    pub fn prepare<S: Source>(
+    pub fn prepare<S: Source<Generation = G>>(
         source: &S,
         authority: &S::Authority,
         previous: Option<&S>,
@@ -179,7 +187,8 @@ impl Plan {
         }
         let stride = material::chain_bytes(d.size, d.levels, 1)?;
         let texture_bytes = material::chain_bytes(d.size, d.levels, d.allocated)?;
-        if source.pixels().len() != texture_bytes || source.retained_bytes() < texture_bytes {
+        let retained = source.retained_bytes();
+        if source.pixels().len() != texture_bytes || retained < texture_bytes {
             return Err("missing bank pixels or retained ownership accounting".into());
         }
         let (first, count) = match update {
@@ -225,13 +234,15 @@ impl Plan {
         {
             return Err("staging budget/device buffer limit exceeded".into());
         }
+        let source_bytes = retained
+            .checked_add(previous.map_or(0, Source::retained_bytes))
+            .ok_or("retained source overflow")?;
         let peak_payload = [
             texture_bytes,
             staging,
             staging,
             metadata_bytes,
-            source.retained_bytes(),
-            previous.map_or(0, Source::retained_bytes),
+            source_bytes,
         ]
         .into_iter()
         .try_fold(0usize, |a, b| {
@@ -275,6 +286,8 @@ impl Plan {
             }
         }
         Ok(Self {
+            description: d,
+            source_bytes,
             regions,
             staging_bytes: staging,
             texture_bytes,

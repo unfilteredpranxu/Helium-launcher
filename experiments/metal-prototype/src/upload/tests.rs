@@ -470,3 +470,31 @@ fn native_material_upload_readback_updates_and_resident_render() {
             .is_err()
     );
 }
+
+#[test]
+fn immutable_plan_and_exact_256_slice_policy_boundary() {
+    let (mut source, a) = fixture();
+    let original = Plan::prepare(&source, &a, None, Update::Full, &caps(), budget()).unwrap();
+    source.description.size = u32::MAX;
+    assert_eq!(original.description().size, 2); // later reads cannot change GPU allocation dimensions
+    assert!(original.stage(&[]).is_err());
+    source.description.size = 1;
+    source.description.levels = 1;
+    source.description.used = 256;
+    source.description.allocated = 256;
+    source.description.split = 256;
+    source.description.sprites = 256;
+    source.pixels = Arc::new(vec![255; 1024]);
+    let plan = Plan::prepare(&source, &a, None, Update::Full, &caps(), budget()).unwrap();
+    assert_eq!(plan.regions().last().unwrap().slice, 255);
+    assert_eq!(plan.description().slice(255).unwrap(), 255);
+    source.description.used = 512;
+    source.description.allocated = 512;
+    source.description.split = 512;
+    source.description.sprites = 512;
+    assert!(
+        Plan::prepare(&source, &a, None, Update::Full, &caps(), budget())
+            .unwrap_err_string()
+            .contains("G02")
+    );
+}

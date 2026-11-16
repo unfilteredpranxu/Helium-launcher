@@ -8,6 +8,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  checks: write
 jobs:
   apple-sdk:
     runs-on: macos-26
@@ -77,6 +78,27 @@ jobs:
           echo "Native Metal runtime step: $GPU_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
           echo "Only a successful runtime test proves this runner executed Metal; SDK compilation alone does not." >> "$GITHUB_STEP_SUMMARY"
           echo "No app, IPA, signing, or packaging is performed." >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish readable evidence through the Checks API
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          GPU_OUTCOME: ${{ steps.gpu.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const names = ['toolchain.log', 'macos-tests.log', 'ios-check.log', 'msl.log', 'native-runtime.log'];
+            const sections = names.map(name => {
+              const file = path.join(process.env.RUNNER_TEMP, 'helium-upload', name);
+              const data = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : 'NOT RUN / no log';
+              return '### ' + name + '\n\n```text\n' + data.slice(-8500) + '\n```';
+            });
+            await github.rest.checks.create({
+              owner: context.repo.owner, repo: context.repo.repo, head_sha: context.sha,
+              name: 'Helium upload evidence', status: 'completed', conclusion: 'neutral',
+              output: { title: 'Observed native-runtime step: ' + process.env.GPU_OUTCOME,
+                summary: sections.join('\n\n') }
+            });
       - uses: actions/upload-artifact@v4
         if: always()
         with:

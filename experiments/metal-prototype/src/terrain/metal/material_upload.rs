@@ -31,7 +31,7 @@ impl TerrainRenderer {
             &self.capabilities,
             budget,
         )?;
-        let description = source.description();
+        let description = plan.description();
         autoreleasepool(|_| {
             let desc = MTLTextureDescriptor::new();
             desc.setTextureType(MTLTextureType::Type2DArray);
@@ -97,7 +97,15 @@ impl<S: Source> Material<S> {
         if self.device_id != renderer.upload_device || self.texture.is_none() {
             return Err("released material or recreated/wrong Metal device owner".into());
         }
-        let d = source.description();
+        let plan = Plan::prepare(
+            &source,
+            authority,
+            self.source.as_ref(),
+            update,
+            &renderer.capabilities,
+            budget,
+        )?;
+        let d = plan.description();
         let mut expected = self.description;
         expected.identity.revision = d.identity.revision;
         if expected != d
@@ -108,23 +116,10 @@ impl<S: Source> Material<S> {
         {
             return Err("incompatible generation/layout or stale upload revision".into());
         }
-        let plan = Plan::prepare(
-            &source,
-            authority,
-            self.source.as_ref(),
-            update,
-            &renderer.capabilities,
-            budget,
-        )?;
         self.record = Record::prepared(d.identity, self.device_id, self.owner)?;
         self.counters.pending = 1;
         self.counters.staging_peak = self.counters.staging_peak.max(plan.staging_bytes());
-        self.counters.source_peak = self.counters.source_peak.max(
-            source
-                .retained_bytes()
-                .checked_add(self.source.as_ref().map_or(0, Source::retained_bytes))
-                .ok_or("source accounting overflow")?,
-        );
+        self.counters.source_peak = self.counters.source_peak.max(plan.source_bytes());
         let texture = self.texture.as_ref().unwrap().clone();
         let result = autoreleasepool(|_| {
             let bytes = plan.stage(source.pixels())?;
@@ -215,9 +210,12 @@ impl<S: Source> Material<S> {
         if self.texture.is_none() {
             return Err("material released".into());
         }
+        if source.description() != self.description {
+            return Err("resident source metadata changed".into());
+        }
         self.record.consume(
             ticket,
-            source.description().identity,
+            self.description.identity,
             renderer.upload_device,
             self.owner,
         )
@@ -247,6 +245,9 @@ impl<S: Source> Material<S> {
             &renderer.capabilities,
             budget,
         )?;
+        if plan.description() != self.description {
+            return Err("resident source metadata changed".into());
+        }
         autoreleasepool(|_| {
             let texture = self.texture.as_ref().ok_or("released texture")?;
             let buffer = renderer
@@ -331,7 +332,10 @@ impl TerrainRenderer {
         if material.device_id != self.upload_device || material.record.phase() != Phase::Completed {
             return Err("wrong device or incomplete material upload".into());
         }
-        let d = source.description();
+        let d = material.description;
+        if source.description() != d {
+            return Err("resident source metadata changed".into());
+        }
         if d.bank != 0 {
             return Err("G02 global-ID shader can draw only resident bank zero; no sprite remapping performed".into());
         }
