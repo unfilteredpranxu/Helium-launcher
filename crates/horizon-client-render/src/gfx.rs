@@ -48,6 +48,7 @@ mod entity_outline;
 mod fluid;
 #[cfg(test)]
 mod inter_stage_tests;
+pub mod material_snapshot;
 mod terrain_model;
 #[cfg(test)]
 pub(crate) mod test_gpu;
@@ -1059,6 +1060,7 @@ impl SolidPipeline {
 }
 
 pub struct Renderer {
+    material_state: material_snapshot::State,
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
     /// The window's swapchain; `None` when rendering offscreen (`--offscreen`). Shared
@@ -1725,6 +1727,9 @@ fn terrain_group(
 /// CPU texture uploads prepared by the resource worker. Consumed by renderer
 /// construction so the temporary mip chains are released after GPU upload.
 pub struct PreparedTextures {
+    snapshot_size: u32,
+    snapshot_layers: u32,
+    snapshot_budget: usize,
     sprites: Vec<(Vec<u8>, u32)>,
     /// The sprite layers per array `sprites` is cut by.
     split: u32,
@@ -1782,6 +1787,9 @@ impl PreparedTextures {
     ) -> Self {
         let layer_bytes = (size * size * 4) as usize;
         Self {
+            snapshot_budget: 0,
+            snapshot_size: size,
+            snapshot_layers: layers,
             sprites: (0..layers.div_ceil(split).max(1))
                 .map(|array| {
                     let first = array * split;
@@ -3268,6 +3276,7 @@ impl Renderer {
         let gl = adapter.get_info().backend == wgpu::Backend::Gl;
         // Keep every colour layer's companion, split by the same device limit. Native
         // material stages read the first array; terrain packs stitch all of them.
+        let material_state = prepared.capture_materials(sprite_size, layers, gl);
         let pbr_maps = prepared
             .pbr
             .map(|(normals, specular, levels, map_layers, size)| {
@@ -4899,6 +4908,7 @@ impl Renderer {
             section_copy_bytes: 0,
             shrink_gate: ShrinkGate::default(),
             lightmap_uploaded: false,
+            material_state,
             sprite_minimum_size,
             sprite_native: sprite_mips.iter().map(|s| s.native_size).collect(),
             mipmap_option: 4,
@@ -7340,6 +7350,29 @@ impl Renderer {
             &self.emission_stats.view,
         );
     }
+    /// Restrict experimental consumption to ordinary SDR terrain resources.
+    pub fn validate_material_snapshot_mode(&self) -> std::result::Result<(), &'static str> {
+        if self.hdr.is_some()
+            || self.native.is_some()
+            || self.pack_post.is_some()
+            || self.pack_loading.is_some()
+            || self.pbr_maps.is_some()
+        {
+            return Err("HDR, shader-pack or PBR material snapshot consumption unsupported");
+        }
+        Ok(())
+    }
+    /// Scoped observation; renderer mutation cannot race this borrow.
+    pub fn material_state(&self) -> &material_snapshot::State {
+        &self.material_state
+    }
+    /// Global sprite identities written by the last CPU or GPU animation pass.
+    pub fn changed_material_layers(&self) -> &[u32] {
+        self.animations.changed()
+    }
+    pub fn release_material_snapshot(&mut self) {
+        self.material_state.release();
+    }
     /// Block sprite layers per array on this device: a sprite's array is its layer over it, its
     /// layer in that array the rest (`block_sprites::Lookup`).
     pub fn sprite_split(&self) -> u32 {
@@ -7451,6 +7484,8 @@ impl Renderer {
             16,
             &pixels,
         );
+        self.material_state
+            .observe_lightmap(&self.lightmap_pixels, &pixels);
         self.lightmap_pixels = pixels;
         self.lightmap_uploaded = true;
     }
@@ -7463,6 +7498,7 @@ impl Renderer {
             active,
             self.own_timing.as_mut(),
         );
+        self.material_state.animated(self.animations.changed());
         if let Some(arrays) = &self.pbr_maps {
             for animation in &self.material_animations {
                 if !self.animations.changed().contains(&animation.layer) {

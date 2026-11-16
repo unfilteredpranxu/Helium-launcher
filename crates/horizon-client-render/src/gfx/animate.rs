@@ -903,6 +903,47 @@ mod tests {
     }
 
     #[test]
+    fn material_lifecycle_uses_actual_collected_global_ids_without_a_gpu() {
+        // Handcrafted animation, actual collect/job encoding. No fake GPU result.
+        let animation = crate::sprites::test_frames(
+            257,
+            vec![vec![255; 16], vec![128; 16]],
+            r#"{"frametime":2}"#,
+        );
+        let mut animator = SpriteAnimator {
+            sprites: vec![Sprite {
+                animation,
+                shown: None,
+                layer: 1,
+                frames: vec![0, 4],
+                edge: 2,
+                group: 0,
+            }],
+            groups: vec![Group {
+                offset: 0,
+                levels: vec![],
+                jobs: vec![],
+                array: 1,
+                buffer: 0,
+            }],
+            writer: Writer::Cpu {
+                frames: vec![],
+                textures: vec![],
+            },
+            size: 2,
+            changed: vec![],
+            is_animated: vec![],
+        };
+        assert_eq!(animator.collect(0, None), 1);
+        assert_eq!(animator.changed(), &[257]);
+        assert_eq!(animator.collect(0, None), 0);
+        assert!(animator.changed().is_empty());
+        assert_eq!(animator.collect(2, Some(&[])), 0);
+        assert_eq!(animator.collect(2, None), 1);
+        assert_eq!(animator.changed(), &[257]);
+    }
+
+    #[test]
     fn inactive_sprites_are_skipped_by_collect() {
         let Some((device, _)) = device() else {
             return;

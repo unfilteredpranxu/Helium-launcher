@@ -94,3 +94,175 @@ mod tests {
         assert!(source(&sprites, &epoch, 1028).is_err());
     }
 }
+
+/// One experimental namespace bound to one actual renderer generation. A new
+/// binding cannot make an old production snapshot current.
+pub struct Binding {
+    generation: horizon_client_render::gfx::material_snapshot::Generation,
+    epoch: Epoch,
+}
+impl Binding {
+    pub fn new(renderer: &Renderer) -> Result<Self, String> {
+        Ok(Self {
+            generation: renderer.material_state().generation(),
+            epoch: Epoch::new()?,
+        })
+    }
+    /// Validated synchronous consumption; both renderer and experimental epoch
+    /// remain borrowed. No bank pixel copies or heap descriptor allocation.
+    pub fn consume<R>(
+        &self,
+        renderer: &Renderer,
+        limits: material::Limits,
+        consume: impl FnOnce(&material::Resources<'_>) -> R,
+    ) -> Result<R, String> {
+        renderer
+            .validate_material_snapshot_mode()
+            .map_err(str::to_owned)?;
+        self.consume_state(
+            renderer.material_state(),
+            &renderer.lightmap_pixels,
+            Provenance::ProductionGenerated,
+            limits,
+            consume,
+        )
+    }
+    fn consume_state<R>(
+        &self,
+        state: &horizon_client_render::gfx::material_snapshot::State,
+        pixels: &[u8; 1024],
+        provenance: Provenance,
+        limits: material::Limits,
+        consume: impl FnOnce(&material::Resources<'_>) -> R,
+    ) -> Result<R, String> {
+        if state.generation() != self.generation {
+            return Err("obsolete production binding".into());
+        }
+        let snapshot = state
+            .current(state.snapshot().map_err(str::to_owned)?)
+            .map_err(str::to_owned)?;
+        let revision = state.light_revision().map_err(str::to_owned)?;
+        let light = Lightmap {
+            pixels,
+            provenance,
+            stamp: self.epoch.stamp(),
+            revision,
+        };
+        translate(snapshot, &self.epoch, light, limits, consume)
+    }
+}
+fn translate<R>(
+    snapshot: &horizon_client_render::gfx::material_snapshot::Snapshot,
+    epoch: &Epoch,
+    light: Lightmap<'_>,
+    limits: material::Limits,
+    consume: impl FnOnce(&material::Resources<'_>) -> R,
+) -> Result<R, String> {
+    let first = snapshot.banks().first().ok_or("missing production banks")?;
+    fn descriptor<'a>(
+        bank: &'a horizon_client_render::gfx::material_snapshot::Bank,
+        size: u32,
+        stamp: material::Stamp,
+    ) -> material::Bank<'a> {
+        material::Bank {
+            pixels: bank.pixels(),
+            size,
+            layers: bank.used(),
+            allocated_layers: bank.allocated(),
+            levels: bank.levels(),
+            format: material::Format::Rgba8Unorm,
+            stamp,
+        }
+    }
+    let mut banks = [descriptor(first, snapshot.size(), epoch.stamp()); 8];
+    for (target, bank) in banks.iter_mut().zip(snapshot.banks()) {
+        *target = descriptor(bank, snapshot.size(), epoch.stamp());
+    }
+    let resources = material::Resources::new(
+        material::Input {
+            version: material::VERSION,
+            epoch,
+            split: snapshot.split(),
+            sprites: snapshot.sprites(),
+            required_levels: first.levels(),
+            banks: &banks[..snapshot.banks().len()],
+            lightmap: light,
+            source: helium_metal_prototype::section::Format::BakedSectionSolid,
+            hdr_or_pbr: false,
+        },
+        limits,
+    )?;
+    Ok(consume(&resources))
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    #[test]
+    fn production_mips_flow_into_g04_with_labeled_fixture_light() {
+        let prepared = horizon_client_render::gfx::PreparedTextures::new(
+            &[255; 16],
+            2,
+            1,
+            &[],
+            (&[255; 16], 2),
+        )
+        .retain_material_snapshot(4096);
+        let state = prepared.capture_materials(2, 1, false);
+        let snapshot = state.current(state.snapshot().unwrap()).unwrap();
+        let epoch = Epoch::new().unwrap();
+        let pixels = [255; 1024];
+        let light = Lightmap {
+            pixels: &pixels,
+            provenance: Provenance::SyntheticFixture,
+            stamp: epoch.stamp(),
+            revision: 1,
+        };
+        translate(
+            snapshot,
+            &epoch,
+            light,
+            material::Limits {
+                max_dimension: 2,
+                max_array_layers: 2048,
+                payload_bytes: 1044,
+            },
+            |resources| {
+                assert_eq!(resources.sprite(0).unwrap(), (0, 0));
+                assert_eq!(
+                    resources.bank(0).unwrap().pixels,
+                    snapshot.banks()[0].pixels()
+                );
+                assert_eq!(
+                    resources.bank(0).unwrap().pixels.as_ptr(),
+                    snapshot.banks()[0].pixels().as_ptr()
+                );
+                assert_eq!(
+                    resources.lightmap().provenance,
+                    Provenance::SyntheticFixture
+                );
+            },
+        )
+        .unwrap();
+        let binding = Binding {
+            generation: state.generation(),
+            epoch,
+        };
+        assert!(
+            binding
+                .consume_state(
+                    &state,
+                    &pixels,
+                    Provenance::SyntheticFixture,
+                    material::Limits {
+                        max_dimension: 2,
+                        max_array_layers: 2048,
+                        payload_bytes: 1044
+                    },
+                    |_| ()
+                )
+                .unwrap_err()
+                .contains("lightmap")
+        );
+    }
+}
