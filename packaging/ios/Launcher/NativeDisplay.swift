@@ -57,7 +57,7 @@ private final class NativeSession {
     }
     func valid() -> Bool {
         guard ProcessInfo.processInfo.systemUptime - started < 35, let parent = parent, let window = window, parent.window === window,
-              view.superview === parent, UIApplication.shared.applicationState == .active,
+              view.superview === parent, !window.isHidden, window.isKeyWindow, !parent.isHidden, UIApplication.shared.applicationState == .active,
               window.rootViewController?.presentedViewController == nil else { return false }
         return CGSize(width:(parent.bounds.width*window.screen.scale).rounded(),height:(parent.bounds.height*window.screen.scale).rounded()) == view.initialPixels
     }
@@ -73,11 +73,20 @@ private func cancelNative(_ id: UInt64) {
 public func nativeDisplayRequest(_ id: UInt64, _ pointer: UnsafeMutableRawPointer?, _ work: NativeWork?, _ cancel: NativeCancel?, _ ready: NativeReady?) -> Bool {
     guard Thread.isMainThread, nativeTargets.isEmpty, let pointer=pointer, let work=work, let cancel=cancel, let ready=ready,
           let parent=Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? UIView,
-          let window=parent.window, window.rootViewController?.presentedViewController == nil,
-          UIApplication.shared.applicationState == .active else { return false }
+          let window=parent.window, !window.isHidden, window.isKeyWindow, !parent.isHidden, window.rootViewController?.presentedViewController == nil,
+          UIApplication.shared.applicationState == .active else {
+        LauncherLog.write("native attach unavailable: idle host and live, visible, key game view without modal required")
+        return false
+    }
     let pixels=CGSize(width:(parent.bounds.width*window.screen.scale).rounded(),height:(parent.bounds.height*window.screen.scale).rounded())
-    guard pixels.width>0, pixels.height>0, pixels.width<=4096, pixels.height<=4096, pixels.width*pixels.height*12 <= 64*1024*1024 else { return false }
-    guard MTLCreateSystemDefaultDevice() != nil else { return false }
+    guard pixels.width>0, pixels.height>0, pixels.width<=4096, pixels.height<=4096, pixels.width*pixels.height*12 <= 64*1024*1024 else {
+        LauncherLog.write("native attach rejected: physical dimensions \(pixels), policy 1..4096 and <=64MiB three-drawable reservation")
+        return false
+    }
+    guard MTLCreateSystemDefaultDevice() != nil else {
+        LauncherLog.write("native attach rejected: no system Metal device")
+        return false
+    }
     // UIKit lifecycle notifications execute on main; no session is retained by observer.
     if !nativeObserving { nativeObserving=true
         NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object:nil, queue:.main) { _ in cancelAllNativeTargets() }

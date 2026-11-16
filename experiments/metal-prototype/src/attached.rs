@@ -149,6 +149,9 @@ pub fn submit<T: Send + 'static>(
         return Err("expected actual UIKit window".into());
     };
     let request = symbol("horizon_native_display_request")?;
+    // Paired publication/release ABI must exist BEFORE UI resources are created.
+    let _ = symbol("horizon_native_display_publish")?;
+    let _ = symbol("horizon_native_display_cancel")?;
     let request: extern "C" fn(
         u64,
         *mut c_void,
@@ -192,6 +195,9 @@ pub fn submit<T: Send + 'static>(
     Ok((Ticket { id, cancel }, recv))
 }
 impl Ticket {
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Acquire)
+    }
     pub fn publish(&self) {
         let allowed = ENTRY.lock().ok().is_some_and(|e| {
             e.as_ref()

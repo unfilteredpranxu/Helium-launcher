@@ -13446,7 +13446,7 @@ impl Game<'_> {
         self.streaming = streaming;
         #[cfg(feature = "helium-direct-metal")]
         if let Some(native) = self.direct_metal.as_mut() {
-            native.invalidate("world replaced");
+            native.world_changed();
         }
         self.world = world;
         self.inventory = inventory;
@@ -18722,6 +18722,7 @@ impl ApplicationHandler for Game<'_> {
                 return;
             }
         };
+        log::info!("Horizon checkpoint: winit game/loading window created");
         horizon_client::window::settle_created_fullscreen(&window, fullscreen);
         drop(window_step);
         horizon_client::telemetry::note_display(&window);
@@ -20657,7 +20658,9 @@ impl<'a> Game<'a> {
         );
         let mut game = Game {
             #[cfg(feature = "helium-direct-metal")]
-            direct_metal: horizon_metal_bridge::Controller::from_environment(),
+            direct_metal: (!options.split_guest)
+                .then(horizon_metal_bridge::Controller::from_environment)
+                .flatten(),
             world_biomes: None,
             world_biomes_base: None,
             res: res.clone(),
@@ -22598,7 +22601,7 @@ fn build_renderer(
     // Made here when the worker did not: the renderer's own fallback has no LabPBR maps.
     let prepared = prepared.unwrap_or_else(|| prepare_renderer_textures(pack));
     #[cfg(feature = "helium-direct-metal")]
-    let prepared = if horizon_metal_bridge::enabled() {
+    let prepared = if horizon_metal_bridge::Controller::observe_surface(offscreen) {
         prepared.retain_material_snapshot(horizon_metal_bridge::runtime_snapshot_budget())
     } else {
         prepared
@@ -23166,6 +23169,7 @@ impl Loading {
                 return;
             }
         };
+        log::info!("Horizon checkpoint: winit game/loading window created");
         horizon_client::window::settle_created_fullscreen(&window, fullscreen);
         drop(window_step);
         horizon_client::telemetry::note_display(&window);
@@ -23425,6 +23429,7 @@ impl Loading {
         }
     }
     fn finish(&mut self, loaded: Loaded) -> Result<Option<split::Split<'static>>> {
+        log::info!("Horizon checkpoint: prepared resources loaded; starting game renderer handoff");
         let handoff_at = Instant::now();
         let mut options = self.options.take().ok_or("loading already finished")?;
         options.resources = loaded.root.clone();
@@ -23867,6 +23872,10 @@ pub fn run_with() -> Result<()> {
     let Some(mut options) = Options::read()? else {
         return Ok(());
     };
+    log::info!(
+        "Horizon checkpoint: prepared resource manifest located={}",
+        options.resources.join("horizon-resources.json").is_file()
+    );
     // The PC half of a phone import: one command, one archive, no window, no GPU. It is the game's own
     // binary because it is the game that decides what the archive means (`horizon_client::import`), and
     // a player already has this executable on the computer with the prepared folder on it.

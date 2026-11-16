@@ -13,6 +13,44 @@ struct KeepAlive<S> {
     _device: Retained<Device>,
     _queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
 }
+// An attached UI owner may disappear while the GPU still owns the drawable.
+// Bind the layer to the exact native command through Objective-C ownership;
+// never transfer a !Send Rust CAMetalLayer into a Rust completion closure.
+static LAYER_OWNER_KEY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+fn retain_layer_for_command(command: &ProtocolObject<dyn MTLCommandBuffer>, layer: &CAMetalLayer) {
+    use objc2::ffi::{OBJC_ASSOCIATION_RETAIN_NONATOMIC, objc_setAssociatedObject};
+    let key = std::ptr::from_ref(&LAYER_OWNER_KEY).cast();
+    // SAFETY: live native objects, unique process-static key, retain policy. No
+    // borrowed Rust data is stored. The layer has no reference back to command.
+    unsafe {
+        objc_setAssociatedObject(
+            std::ptr::from_ref(command).cast_mut().cast(),
+            key,
+            std::ptr::from_ref(layer).cast_mut().cast(),
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC,
+        );
+    }
+    let callback = |completed: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+        // Metal invokes this only at terminal execution, including errors. The
+        // command argument is live. Clearing its native reference does not touch
+        // UIKit, a Rust Display/session, or any borrowed stack state.
+        unsafe {
+            objc_setAssociatedObject(
+                completed.as_ptr().cast(),
+                std::ptr::from_ref(&LAYER_OWNER_KEY).cast(),
+                std::ptr::null_mut(),
+                OBJC_ASSOCIATION_RETAIN_NONATOMIC,
+            );
+        }
+    };
+    fn checked<T: Send + Sync + 'static>(_: &T) {}
+    checked(&callback);
+    let block = RcBlock::new(callback);
+    // Metal copies the block. It captures no layer, command or session; no cycle.
+    unsafe {
+        command.addCompletedHandler(RcBlock::as_ptr(&block));
+    }
+}
 pub struct Display {
     layer: Retained<CAMetalLayer>,
     device: crate::upload::Id,
@@ -232,6 +270,7 @@ impl Display {
         let payload = live + self.size.0 * self.size.1 * 12; // checked by fit before allocation
         self.progress.begin(payload)?;
         self.used = true;
+        retain_layer_for_command(&command, &self.layer);
         command.commit();
         Ok(Some(Presentation {
             output,
@@ -298,6 +337,47 @@ impl<S: Source> Presentation<'_, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "real Metal command/layer ownership and terminal retirement; NOT attached UIKit runtime"]
+    fn native_command_owns_layer_until_terminal_without_view_or_rust_session() {
+        use objc2::rc::Weak;
+        use std::time::{Duration, Instant};
+        let renderer = TerrainRenderer::new().unwrap();
+        let weak = autoreleasepool(|_| {
+            let layer = CAMetalLayer::new();
+            let weak = Weak::from_retained(&layer);
+            let command = renderer.queue.commandBuffer().unwrap();
+            retain_layer_for_command(&command, &layer);
+            drop(layer); // no UI/Display/session owns it now
+            assert!(
+                weak.load().is_some(),
+                "exact unsubmitted command retains native layer"
+            );
+            command.commit(); // tiny command may complete before first poll
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !matches!(
+                command.status(),
+                MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error
+            ) {
+                assert!(Instant::now() < deadline, "native command deadline");
+                std::thread::sleep(Duration::from_millis(1)); // diagnostic worker ONLY
+            }
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert!(command.error().is_none());
+            weak
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while weak.load().is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "layer owner must retire after actual Metal completion"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        eprintln!(
+            "G06-C native command retained layer after UI/Rust owner release, actual terminal success retired it; no attached window/scanout claim"
+        );
+    }
     #[test]
     #[ignore = "real Metal presentation-pass channel/alpha/orientation diagnostic; no drawable or scanout claim"]
     fn actual_bgra_conversion_preserves_corners_and_alpha() {

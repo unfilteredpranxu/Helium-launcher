@@ -29,20 +29,25 @@ pub enum Mode {
     AttachedOneSection,
 }
 impl Mode {
+    fn observes_surface(self, offscreen: bool) -> bool {
+        self != Self::Disabled && !(self == Self::AttachedOneSection && offscreen)
+    }
     pub fn parse(value: Option<&str>) -> Result<Self, String> {
         match value {
             None | Some("") | Some("off") => Ok(Self::Disabled),
             Some("one-section") => Ok(Self::OneSectionDiagnostic),
             Some("attached-one-section") => Ok(Self::AttachedOneSection),
-            Some(v) => Err(format!(
-                "unsupported HELIUM_DIRECT_METAL={v}; use one-section, attached-one-section or off"
-            )),
+            Some(_) => Err("unsupported HELIUM_DIRECT_METAL value; use one-section, attached-one-section or off".into()),
         }
     }
 }
 fn selected_mode() -> Result<Mode, String> {
-    if let Ok(value) = std::env::var("HELIUM_DIRECT_METAL") {
-        return Mode::parse(Some(&value));
+    match std::env::var("HELIUM_DIRECT_METAL") {
+        Ok(value) => return Mode::parse(Some(&value)),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("non-UTF8 native mode rejected".into());
+        }
+        Err(std::env::VarError::NotPresent) => {}
     }
     #[cfg(target_os = "ios")]
     return match helium_metal_prototype::attached::device_test_mode()? {
@@ -54,8 +59,7 @@ fn selected_mode() -> Result<Mode, String> {
     Ok(Mode::Disabled)
 }
 pub fn enabled() -> bool {
-    cfg!(any(target_os = "macos", target_os = "ios"))
-        && selected_mode().is_ok_and(|m| m != Mode::Disabled)
+    Controller::observe_surface(false)
 }
 #[derive(Default, Debug)]
 struct Counters {
@@ -168,42 +172,39 @@ fn camera_view(origin: [i32; 3], camera: [f64; 3], clip: [[f32; 4]; 4]) -> Resul
         clip_from_relative: clip,
     })
 }
-/// Conservative section AABB/frustum intersection in Metal's 0..w depth space.
-/// Column-major actual game clip transform; does not claim occlusion visibility.
-fn section_visible(view: View) -> bool {
+/// Conservative geometry/frustum intersection in Metal's 0..w depth space.
+/// Uses ORIGINAL positions, including model overhang beyond the 16-block section.
+/// A crossing triangle can be visible with no vertex inside; reject only if all
+/// vertices are outside the same plane. This does not prove occlusion visibility.
+fn points_visible(view: View, points: impl IntoIterator<Item = [f32; 3]>) -> bool {
     let mut outside = [true; 6];
-    for x in [0., 16.] {
-        for y in [0., 16.] {
-            for z in [0., 16.] {
-                let p = [
-                    x + view.origin[0],
-                    y + view.origin[1],
-                    z + view.origin[2],
-                    1.,
-                ];
-                let c: [f32; 4] = std::array::from_fn(|r| {
-                    (0..4).map(|i| view.clip_from_relative[i][r] * p[i]).sum()
-                });
-                if !c.iter().all(|n| n.is_finite()) {
-                    return false;
-                }
-                for (i, distance) in [
-                    c[0] + c[3],
-                    c[3] - c[0],
-                    c[1] + c[3],
-                    c[3] - c[1],
-                    c[2],
-                    c[3] - c[2],
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    outside[i] &= distance < 0.;
-                }
-            }
+    for position in points {
+        let p = [
+            position[0] + view.origin[0],
+            position[1] + view.origin[1],
+            position[2] + view.origin[2],
+            1.,
+        ];
+        let c: [f32; 4] =
+            std::array::from_fn(|r| (0..4).map(|i| view.clip_from_relative[i][r] * p[i]).sum());
+        if !c.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        for (i, d) in [
+            c[0] + c[3],
+            c[3] - c[0],
+            c[1] + c[3],
+            c[3] - c[1],
+            c[2],
+            c[3] - c[2],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            outside[i] &= d < 0.;
         }
     }
-    !outside.into_iter().any(|n| n)
+    !outside.into_iter().any(|v| v)
 }
 struct Flight {
     geometry: Arc<Geometry>,
@@ -230,6 +231,7 @@ pub struct Controller {
     candidate: Option<Geometry>,
     flight: Option<Flight>,
     sequence: u64,
+    world_epoch: u64,
     finished: bool,
     counters: Counters,
     last_error: Option<String>,
@@ -239,6 +241,27 @@ pub struct Controller {
     displayed: Option<Shown>,
 }
 impl Controller {
+    pub fn observe_surface(offscreen: bool) -> bool {
+        cfg!(any(target_os = "macos", target_os = "ios"))
+            && selected_mode().is_ok_and(|m| {
+                m.observes_surface(offscreen)
+                    && (m != Mode::AttachedOneSection || cfg!(target_os = "ios"))
+            })
+    }
+    /// Local runtime session counter, never a save ID or pointer identity.
+    pub fn world_changed(&mut self) {
+        self.invalidate("world replaced");
+        match self.world_epoch.checked_add(1) {
+            Some(epoch) => {
+                self.world_epoch = epoch;
+                log::info!("Helium native world session epoch={epoch}");
+            }
+            None => {
+                self.finished = true;
+                self.error("world epochs exhausted; restart diagnostic session".into());
+            }
+        }
+    }
     pub fn from_environment() -> Option<Self> {
         let mode = match selected_mode() {
             Ok(m) => m,
@@ -267,6 +290,7 @@ impl Controller {
             candidate: None,
             flight: None,
             sequence: 0,
+            world_epoch: 0,
             finished: false,
             counters: Default::default(),
             last_error: None,
@@ -277,6 +301,13 @@ impl Controller {
         }
     }
     pub fn set_window(&mut self, window: Option<Arc<winit::window::Window>>) {
+        if self
+            .window
+            .as_ref()
+            .is_some_and(|old| window.as_ref().is_none_or(|new| old.id() != new.id()))
+        {
+            self.invalidate("actual game window changed/destroyed");
+        }
         self.window = window;
     }
     fn error(&mut self, error: String) {
@@ -288,6 +319,7 @@ impl Controller {
     }
     pub fn invalidate(&mut self, reason: &str) {
         self.candidate = None;
+        self.camera = None;
         #[cfg(target_os = "ios")]
         {
             self.displayed = None;
@@ -312,6 +344,10 @@ impl Controller {
         if self.mode == Mode::Disabled || self.finished {
             return;
         }
+        if self.mode == Mode::AttachedOneSection && self.camera.is_none() {
+            self.counters.busy += 1; // wait for a genuine world camera, never a title/old-world transform
+            return;
+        }
         self.sequence = match self.sequence.checked_add(1) {
             Some(n) => n,
             None => {
@@ -327,10 +363,10 @@ impl Controller {
             self.counters.busy += 1;
             return;
         }
-        if let Some((camera, clip)) = self.camera {
+        if let Some((camera, clip)) = self.camera.filter(|_| !mesh.solid.is_empty()) {
             let visible = section_origin(key, min_y)
                 .and_then(|o| camera_view(o, camera, clip))
-                .is_ok_and(|v| section_visible(v));
+                .is_ok_and(|v| points_visible(v, mesh.solid.iter().map(|p| p.pos)));
             if !visible {
                 self.counters.rejected += 1;
                 return;
@@ -418,20 +454,23 @@ impl Controller {
         }
         #[cfg(target_os = "ios")]
         if self.displayed.as_ref().is_some_and(|d| {
-            d.source.iter().any(|s| s.check_current(renderer).is_err())
+            d._ticket.is_cancelled()
+                || d.source.iter().any(|s| s.check_current(renderer).is_err())
                 || renderer.material_state().light_revision() != Ok(d.light_revision)
                 || d.size != [renderer.config.width, renderer.config.height]
         }) {
             self.invalidate("displayed producer state changed");
         }
-        self.camera = Some((
-            frame.camera.to_array(),
-            renderer
-                .views(frame)
-                .primary()
-                .view_proj(frame.bob * frame.spin)
-                .to_cols_array_2d(),
-        ));
+        self.camera = (!frame.title).then(|| {
+            (
+                frame.camera.to_array(),
+                renderer
+                    .views(frame)
+                    .primary()
+                    .view_proj(frame.bob * frame.spin)
+                    .to_cols_array_2d(),
+            )
+        });
         if let Some(f) = &self.flight {
             if f.source.iter().any(|s| s.check_current(renderer).is_err())
                 || renderer.material_state().light_revision() != Ok(f.light_revision)
@@ -526,7 +565,11 @@ impl Controller {
                 .view_proj(frame.bob * frame.spin)
                 .to_cols_array_2d();
             let view = camera_view(g.origin, frame.camera.to_array(), clip)?;
-            if !section_visible(view) {
+            if !points_visible(
+                view,
+                (0..g.vertices.len() / 24)
+                    .map(|i| g.mesh().vertex(i).map(|v| v.pos).unwrap_or([f32::NAN; 3])),
+            ) {
                 return Err("candidate outside current camera frustum; waiting for visible accepted section".into());
             }
             log::info!(
@@ -557,6 +600,7 @@ impl Controller {
         let geometry = Arc::new(g);
         let cancel = Arc::new(AtomicBool::new(false));
         let job = Job {
+            world_epoch: self.world_epoch,
             source,
             geometry: geometry.clone(),
             cancel: cancel.clone(),
@@ -622,6 +666,7 @@ impl Drop for Controller {
     }
 }
 struct Job {
+    world_epoch: u64,
     source: Vec<BankSource>,
     geometry: Arc<Geometry>,
     cancel: Arc<AtomicBool>,
@@ -800,7 +845,8 @@ fn run_impl(
     }
     drop(presentation);
     Ok(format!(
-        "backend=direct-Metal key={:?} origin={:?} accepted_mesh_sequence={} banks={:?} revision={} vertices={} indices={} native_upload={:?} frame={:?} presentation={:?}; attached_generation={attachment:?}; GPU command completed, scanout unverified",
+        "backend=direct-Metal world_epoch={} key={:?} origin={:?} accepted_mesh_sequence={} banks={:?} revision={} vertices={} indices={} native_upload={:?} frame={:?} presentation={:?}; attached_generation={attachment:?}; GPU command completed, scanout unverified",
+        job.world_epoch,
         job.geometry.key,
         job.geometry.origin,
         job.geometry.sequence,
@@ -860,6 +906,10 @@ mod tests {
         let c = Controller::new(Mode::Disabled);
         assert!(c.candidate.is_none() && c.flight.is_none());
         assert_eq!(c.counters.accepted, 0);
+        assert!(!Mode::Disabled.observes_surface(false));
+        assert!(!Mode::AttachedOneSection.observes_surface(true));
+        assert!(Mode::AttachedOneSection.observes_surface(false));
+        assert!(Mode::OneSectionDiagnostic.observes_surface(true));
     }
     #[test]
     fn attached_selection_is_explicit_and_strict() {
@@ -877,7 +927,7 @@ mod tests {
         }
     }
     #[test]
-    fn handcrafted_frustum_boundaries_use_column_major_metal_depth() {
+    fn handcrafted_geometry_frustum_uses_original_positions_and_metal_depth() {
         let clip = [
             [1., 0., 0., 0.],
             [0., 1., 0., 0.],
@@ -888,11 +938,35 @@ mod tests {
             origin,
             clip_from_relative: clip,
         };
-        assert!(section_visible(v([0.; 3]))); // crosses clip planes
-        assert!(!section_visible(v([2., 0., 0.])));
-        assert!(!section_visible(v([0., 0., -17.])));
-        assert!(!section_visible(v([0., 0., 2.])));
-        assert!(!section_visible(v([f32::NAN, 0., 0.])));
+        assert!(points_visible(v([0.; 3]), [[0.; 3], [16.; 3]])); // crosses clip planes
+        assert!(!points_visible(v([2., 0., 0.]), [[0.; 3], [16.; 3]]));
+        assert!(!points_visible(v([0., 0., -17.]), [[0.; 3], [16.; 3]]));
+        assert!(!points_visible(v([0., 0., 2.]), [[0.; 3], [16.; 3]]));
+        assert!(!points_visible(v([f32::NAN, 0., 0.]), [[0.; 3], [16.; 3]]));
+        assert!(points_visible(
+            v([2., 0., 0.]),
+            [[-2., 0., 0.], [-1.5, 0.5, 0.5]]
+        )); // true model overhang
+        assert!(!points_visible(v([0.; 3]), []));
+        assert!(points_visible(
+            v([0.; 3]),
+            [[-2., -2., 0.5], [2., -2., 0.5], [0., 2., 0.5]]
+        ));
+        let perspective = View {
+            origin: [0.; 3],
+            clip_from_relative: [
+                [1., 0., 0., 0.],
+                [0., 1., 0., 0.],
+                [0., 0., -1., -1.],
+                [0., 0., -1., 0.],
+            ],
+        };
+        assert!(points_visible(perspective, [[0., 0., -2.]]));
+        assert!(!points_visible(perspective, [[0., 0., 2.]]));
+        let mut translated = v([0.; 3]);
+        translated.clip_from_relative[3][0] = -10.;
+        assert!(points_visible(translated, [[10., 0., 0.5]]));
+        assert!(!points_visible(translated, [[0., 0., 0.5]]));
     }
     #[test]
     fn handoff_preserves_all_bytes_and_large_global_ids() {
@@ -951,6 +1025,12 @@ mod tests {
     #[test]
     fn unload_reload_replacement_and_shutdown_revoke_bounded_ownership() {
         let mut c = Controller::new(Mode::OneSectionDiagnostic);
+        c.camera = Some(([0.; 3], [[0.; 4]; 4]));
+        c.world_changed();
+        assert!(c.camera.is_none());
+        assert_eq!(c.world_epoch, 1);
+        c.world_changed();
+        assert_eq!(c.world_epoch, 2);
         c.candidate = Some(geometry((1, 2, 3), 1));
         c.remove_columns([(1, 3)].into_iter());
         assert!(c.candidate.is_none());
@@ -1087,6 +1167,7 @@ mod ownership_tests {
             + geometry.vertices.capacity()
             + geometry.indices.capacity() * 4;
         let job = Job {
+            world_epoch: 0, // handcrafted test, NOT an actual game session
             source: banks,
             geometry,
             cancel: Arc::new(AtomicBool::new(false)),
