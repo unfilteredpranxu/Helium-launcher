@@ -536,6 +536,9 @@ impl TerrainRenderer {
         authority: &S::Authority,
         budget: Budget,
     ) -> Result<Material<S>, String> {
+        if sources.is_empty() || sources.len() > 8 {
+            return Err("bank set requires one to eight sources".into());
+        }
         let ds: Vec<_> = sources.iter().map(Source::description).collect();
         crate::banks::validate(&ds)?;
         let mut total = crate::banks::source_bytes(sources.iter())?;

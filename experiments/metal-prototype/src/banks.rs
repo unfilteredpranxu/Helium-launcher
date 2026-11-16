@@ -87,7 +87,10 @@ pub fn source_bytes<'a, S: crate::upload::Source + 'a>(
 ) -> Result<usize, String> {
     let mut keys = Vec::new();
     let mut total = 0usize;
-    for s in sources {
+    for (count, s) in sources.enumerate() {
+        if count >= 8 {
+            return Err("too many retained bank sources".into());
+        }
         let key = s.retention_key();
         if key.is_some_and(|k| keys.contains(&k)) {
             continue;

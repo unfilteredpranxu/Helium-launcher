@@ -875,3 +875,28 @@ fn v2_device_memory_mips_and_legacy_policy_are_checked() {
     }
     assert!(crate::banks::validate(&ds).is_err());
 }
+#[test]
+fn unchanged_revision_rebind_does_not_issue_new_gpu_completion() {
+    let device = Id::new().unwrap();
+    let owner = Id::new().unwrap();
+    let id = Identity {
+        generation: 7,
+        revision: 1,
+    };
+    let mut r = Record::prepared(id, device, owner).unwrap();
+    assert!(r.rebind_identical(Identity { revision: 2, ..id }).is_err());
+    r.advance(Phase::Prepared, Phase::Encoded).unwrap();
+    r.advance(Phase::Encoded, Phase::Submitted).unwrap();
+    let mut old = r.finish(true).unwrap();
+    assert!(
+        r.rebind_identical(Identity {
+            generation: 8,
+            revision: 2
+        })
+        .is_err()
+    );
+    r.rebind_identical(Identity { revision: 2, ..id }).unwrap();
+    assert!(r.consume(&mut old, id, device, owner).is_err());
+    assert!(r.observe(Some(true)).is_err());
+    assert!(r.rebind_identical(Identity { revision: 1, ..id }).is_err());
+}
