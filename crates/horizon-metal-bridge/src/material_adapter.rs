@@ -419,3 +419,22 @@ mod upload_source_tests {
         assert!(weak.upgrade().is_none());
     }
 }
+
+/// Test-only owned snapshot, handcrafted base pixels through production mip code.
+#[cfg(test)]
+pub(crate) fn handcrafted_bridge_bank() -> BankSource {
+    let prepared = horizon_client_render::gfx::PreparedTextures::new(
+        &[255; 3 * 16],
+        2,
+        3,
+        &[],
+        (&[255; 16], 2),
+    )
+    .retain_material_snapshot(4096);
+    let state = prepared.capture_materials(2, 3, false);
+    BankSource {
+        snapshot: state.snapshot().unwrap().clone(),
+        ticket: state.ticket().unwrap(),
+        bank: 0,
+    }
+}

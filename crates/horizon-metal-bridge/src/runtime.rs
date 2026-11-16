@@ -39,8 +39,9 @@ impl Mode {
     }
 }
 pub fn enabled() -> bool {
-    Mode::parse(std::env::var("HELIUM_DIRECT_METAL").ok().as_deref())
-        == Ok(Mode::OneSectionDiagnostic)
+    cfg!(any(target_os = "macos", target_os = "ios"))
+        && Mode::parse(std::env::var("HELIUM_DIRECT_METAL").ok().as_deref())
+            == Ok(Mode::OneSectionDiagnostic)
 }
 #[derive(Default, Debug)]
 struct Counters {
@@ -678,5 +679,115 @@ mod tests {
         let mut m = mesh();
         m.solid = vec![m.solid[0]; GEOMETRY_BUDGET / 24 + 4];
         assert!(Geometry::capture((0, 0, 0), 0, &m, State::new().generation(), 1, 300).is_err());
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use crate::adapter::material_adapter::handcrafted_bridge_bank;
+    fn geometry(source: &BankSource) -> Arc<Geometry> {
+        let mut mesh = SectionMesh::default();
+        for pos in [
+            [-0.5, -0.5, 0.5],
+            [0.5, -0.5, 0.5],
+            [0.5, 0.5, 0.5],
+            [-0.5, 0.5, 0.5],
+        ] {
+            mesh.solid
+                .push(horizon_client_render::mesher::TerrainVertex::new(
+                    pos,
+                    [0., 0.],
+                    0x8000,
+                    0x00ffffff,
+                    0,
+                ));
+        }
+        Arc::new(
+            Geometry::capture(
+                (0, 0, 0),
+                0,
+                &mesh,
+                source.description().identity.generation,
+                1,
+                3,
+            )
+            .unwrap()
+            .unwrap(),
+        )
+    }
+    #[test]
+    fn game_shutdown_unload_and_replacement_revoke_worker_lease() {
+        for reason in [
+            "shutdown",
+            "unload",
+            "replacement",
+            "suspend",
+            "pack reload",
+        ] {
+            let source = handcrafted_bridge_bank();
+            let geometry = geometry(&source);
+            let cancel = Arc::new(AtomicBool::new(false));
+            let (_send, receiver) = mpsc::sync_channel(1);
+            let mut owner = Controller::new(Mode::OneSectionDiagnostic);
+            owner.flight = Some(Flight {
+                geometry: geometry.clone(),
+                source,
+                cancel: cancel.clone(),
+                light_revision: 1,
+                size: [256, 256],
+                receiver,
+            });
+            if reason == "shutdown" {
+                drop(owner)
+            } else if reason == "unload" {
+                owner.remove_columns([(0, 0)].into_iter());
+            } else {
+                owner.invalidate(reason);
+            }
+            assert!(cancel.load(Ordering::Acquire));
+            assert!(Arc::strong_count(&geometry) >= 1); // CPU lease survives producer release
+        }
+    }
+    #[test]
+    fn cpu_lease_accounts_shared_pixels_and_rejects_revocation() {
+        let bank = handcrafted_bridge_bank();
+        let geometry = geometry(&bank);
+        let pixels = bank.pixels().as_ptr();
+        let lease = LeasedSource { bank, geometry };
+        let authority = AtomicBool::new(false);
+        assert_eq!(pixels, lease.pixels().as_ptr());
+        assert!(lease.retained_bytes() >= lease.pixels().len() + 120);
+        lease.check_current(&authority).unwrap();
+        authority.store(true, Ordering::Release);
+        assert!(lease.check_current(&authority).is_err());
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    #[ignore = "actual Metal worker; handcrafted SectionMesh/lighting/camera, production mip generator; NOT category D"]
+    fn native_worker_from_production_owned_bank_and_typed_section() {
+        let bank = handcrafted_bridge_bank();
+        let geometry = geometry(&bank);
+        let job = Job {
+            source: bank,
+            geometry,
+            cancel: Arc::new(AtomicBool::new(false)),
+            lightmap: [255; 1024],
+            view: View {
+                origin: [0.; 3],
+                clip_from_relative: [
+                    [1., 0., 0., 0.],
+                    [0., 1., 0., 0.],
+                    [0., 0., 1., 0.],
+                    [0., 0., 0., 1.],
+                ],
+            },
+            size: [256, 256],
+        };
+        let report = run(job).expect("real Metal bridge worker");
+        assert!(report.contains("backend=direct-Metal"));
+        eprintln!(
+            "G06 native worker with HANDCRAFTED production structs and production mip preparation, synthetic camera/lightmap; NOT game-runtime evidence: {report}"
+        );
     }
 }

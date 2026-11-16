@@ -74,7 +74,7 @@ def main():
         if args.resources:
             ENV["HORIZON_MESH_TEST_RESOURCES"] = str(args.resources.resolve())
             run([str(binary), "--ignored", "--exact",
-                 "tests::actual_mesher_output_with_adjacent_cubes_fractional_models_and_tint"])
+                 "shared::tests::actual_mesher_output_with_adjacent_cubes_fractional_models_and_tint"])
 
 
 if __name__ == "__main__":

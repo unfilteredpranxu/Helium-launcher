@@ -140,6 +140,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/bridge"
           cargo +1.95.0 test --locked -p horizon-metal-bridge 2>&1 | tee "$RUNNER_TEMP/bridge/tests.log"
+          cargo +1.95.0 test --locked -p horizon-metal-bridge --lib runtime::ownership_tests::native_worker_from_production_owned_bank_and_typed_section -- --ignored --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/bridge/native.log"
           cargo +1.95.0 check --locked -p horizon-client --no-default-features --features helium-direct-metal 2>&1 | tee "$RUNNER_TEMP/bridge/game.log"
           cargo +1.95.0 check --locked --target aarch64-apple-ios -p horizon-metal-bridge 2>&1 | tee "$RUNNER_TEMP/bridge/ios.log"
       - name: Publish bridge compilation evidence
@@ -148,7 +149,7 @@ jobs:
         with:
           script: |
             const fs=require('fs'), path=require('path');
-            const summary=['tests.log','game.log','ios.log'].map(n=>{
+            const summary=['tests.log','native.log','game.log','ios.log'].map(n=>{
               const p=path.join(process.env.RUNNER_TEMP,'bridge',n);
               return '### '+n+'\n```text\n'+(fs.existsSync(p)?fs.readFileSync(p,'utf8').slice(-10000):'NOT RUN')+'\n```';
             }).join('\n');

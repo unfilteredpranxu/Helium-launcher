@@ -17585,10 +17585,12 @@ impl Game<'_> {
                 });
                 let rendered = horizon_client::spans::time("renderer", || renderer.render(&frame));
                 #[cfg(feature = "helium-direct-metal")]
-                if matches!(rendered, Ok(true))
-                    && let Some(native) = self.direct_metal.as_mut()
-                {
-                    native.frame(renderer, &frame);
+                if let Some(native) = self.direct_metal.as_mut() {
+                    if matches!(rendered, Ok(true)) {
+                        native.frame(renderer, &frame);
+                    } else {
+                        native.invalidate("production frame unavailable");
+                    }
                 }
                 rendered
             }
