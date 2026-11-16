@@ -23,6 +23,9 @@ on:
       - 'experiments/metal-prototype/Cargo.lock'
       - '.github/workflows/helium-metal-upload.yml'
   workflow_dispatch:
+concurrency:
+  group: helium-metal-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
   checks: write

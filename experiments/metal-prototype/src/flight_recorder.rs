@@ -269,11 +269,12 @@ pub struct Event {
     pub test_only: bool,
     pub last_confirmed: u32,
     pub gpu_inflight: bool,
+    pub elapsed_ms: u64,
 }
 impl Event {
     pub fn json(&self) -> String {
         format!(
-            "{{\"schema_version\":2,\"boot_id\":{},\"event_seq\":{},\"attempt_id\":{},\"world_epoch\":{},\"monotonic_ns\":{},\"stage_code\":{},\"stage\":\"{:?}\",\"emitter_code\":{},\"emitter\":\"{:?}\",\"cause_code\":{},\"cause\":\"{:?}\",\"first\":{},\"expected\":{},\"observed\":{},\"test_only\":{},\"last_confirmed_stage\":{},\"gpu_inflight\":{}}}\n",
+            "{{\"schema_version\":2,\"boot_id\":{},\"event_seq\":{},\"attempt_id\":{},\"world_epoch\":{},\"monotonic_ns\":{},\"stage_code\":{},\"stage\":\"{:?}\",\"emitter_code\":{},\"emitter\":\"{:?}\",\"cause_code\":{},\"cause\":\"{:?}\",\"first\":{},\"expected\":{},\"observed\":{},\"test_only\":{},\"last_confirmed_stage\":{},\"gpu_inflight\":{},\"elapsed_ms\":{}}}\n",
             self.boot,
             self.seq,
             self.attempt,
@@ -290,7 +291,8 @@ impl Event {
             self.observed,
             self.test_only,
             self.last_confirmed,
-            self.gpu_inflight
+            self.gpu_inflight,
+            self.elapsed_ms
         )
     }
     fn parse(line: &str) -> Option<Self> {
@@ -327,6 +329,7 @@ impl Event {
             test_only: line.contains("\"test_only\":true"),
             last_confirmed: u32::try_from(n(line, "last_confirmed_stage").unwrap_or(0)).ok()?,
             gpu_inflight: line.contains("\"gpu_inflight\":true"),
+            elapsed_ms: n(line, "elapsed_ms").unwrap_or(0),
         })
     }
 }
@@ -346,6 +349,7 @@ struct State {
     blocked: Vec<u64>,
     pending: Vec<(u64, bool)>,
     ended: Vec<u64>,
+    started: Vec<(u64, u128)>,
 }
 pub struct Recorder {
     state: Arc<Mutex<State>>,
@@ -378,6 +382,7 @@ impl Recorder {
                 blocked: Vec::with_capacity(3),
                 pending: Vec::with_capacity(3),
                 ended: Vec::with_capacity(3),
+                started: Vec::with_capacity(3),
             })),
             start: Instant::now(),
             ack: Arc::new(AtomicU64::new(0)),
@@ -457,6 +462,7 @@ impl Recorder {
             return false;
         }
         s.attempts.push((id, world));
+        s.started.push((id, self.start.elapsed().as_nanos()));
         s.pending.push((id, false));
         s.fields[0] = 0;
         s.fields[1] = 0;
@@ -621,12 +627,20 @@ impl Recorder {
             }
         }
         let gpu_inflight = s.pending.iter().any(|p| p.0 == id && p.1);
+        let nanos = self.start.elapsed().as_nanos();
+        let elapsed_ms = (nanos.saturating_sub(
+            s.started
+                .iter()
+                .find(|a| a.0 == id)
+                .map(|a| a.1)
+                .unwrap_or(0),
+        ) / 1_000_000) as u64;
         let e = Event {
             boot: s.boot,
             seq,
             attempt: id,
             world,
-            nanos: self.start.elapsed().as_nanos(),
+            nanos,
             stage,
             emitter,
             cause,
@@ -636,6 +650,7 @@ impl Recorder {
             test_only: self.test_only,
             last_confirmed,
             gpu_inflight,
+            elapsed_ms,
         };
         if id == 0 || s.attempts.last().is_some_and(|a| a.0 == id) {
             match stage {
@@ -720,7 +735,13 @@ impl Recorder {
             s.dropped,
             u64::from(self.failed.load(Ordering::Acquire) || s.torn != 0),
             s.attempts.len() as u64,
-            self.start.elapsed().as_millis() as u64,
+            (self.start.elapsed().as_nanos().saturating_sub(
+                s.started
+                    .iter()
+                    .find(|a| a.0 == id)
+                    .map(|a| a.1)
+                    .unwrap_or(0),
+            ) / 1_000_000) as u64,
             e.map(|e| e.expected).unwrap_or(0),
             e.map(|e| e.observed).unwrap_or(0),
             u64::from(s.recovery),
@@ -886,7 +907,11 @@ impl Store {
         for e in s.previous.iter().rev().take(80).rev() {
             report.push_str(&e.json());
         }
-        report.push_str("CURRENT TIMELINE:\n");
+        report.push_str("HUMAN TIMELINE (milliseconds since each exact attempt began; attempt 0 uses boot time):\n");
+        for e in &events {
+            report.push_str(&format!("Attempt {} +{} ms {:?} / {:?} cause={:?} expected={} observed={} possible_gpu_pending={} seq={}\n",e.attempt,e.elapsed_ms,e.emitter,e.stage,e.cause,e.expected,e.observed,e.gpu_inflight,e.seq));
+        }
+        report.push_str("CURRENT TIMELINE (machine-readable schema v2):\n");
         for e in events {
             report.push_str(&e.json());
         }
@@ -923,6 +948,7 @@ impl Store {
             blocked: vec![],
             pending: vec![],
             ended: vec![],
+            started: vec![],
         };
         self.write_snapshot(&s)
     }
