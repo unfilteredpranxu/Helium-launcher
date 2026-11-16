@@ -173,7 +173,13 @@ impl<S: Source> Material<S> {
     pub(super) fn sources(&self) -> Vec<Arc<S>> {
         std::iter::once(self)
             .chain(self.members.iter())
-            .filter_map(|m| m.source.clone())
+            .flat_map(|m| {
+                if let Some(p) = &m.pending {
+                    p.sources()
+                } else {
+                    m.source.clone().into_iter().collect()
+                }
+            })
             .collect()
     }
     pub(super) fn source_payload(&self) -> Result<usize, String> {
@@ -220,7 +226,7 @@ impl<S: Source> Material<S> {
                 .saturating_add(m.counters.failed_operations);
             c.pending = c.pending.saturating_add(m.counters.pending);
         }
-        if self.banked && self.sources().len() == self.members.len() + 1 {
+        if self.banked {
             c.source_retained = self.source_payload().unwrap_or(usize::MAX);
         }
         c
@@ -570,9 +576,18 @@ impl TerrainRenderer {
         if sources.is_empty() || sources.len() > 8 {
             return Err("bank set requires one to eight sources".into());
         }
+        let overhead = sources
+            .len()
+            .checked_mul(size_of::<Material<S>>() + size_of::<Description<S::Generation>>() + 64)
+            .ok_or("bank set metadata overflow")?;
+        if overhead > budget.payload_bytes {
+            return Err("bank set metadata budget exceeded".into());
+        }
         let ds: Vec<_> = sources.iter().map(Source::description).collect();
         crate::banks::validate(&ds)?;
-        let mut total = crate::banks::source_bytes(sources.iter())?;
+        let mut total = crate::banks::source_bytes(sources.iter())?
+            .checked_add(overhead)
+            .ok_or("set metadata/source overflow")?;
         let mut staging = 0;
         let mut metadata = 0;
         for s in sources {

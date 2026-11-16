@@ -88,7 +88,7 @@ pub fn source_bytes<'a, S: crate::upload::Source + 'a>(
     let mut keys = Vec::new();
     let mut total = 0usize;
     for (count, s) in sources.enumerate() {
-        if count >= 8 {
+        if count >= 16 {
             return Err("too many retained bank sources".into());
         }
         let key = s.retention_key();

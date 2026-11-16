@@ -178,6 +178,15 @@ impl<S: Source + Send + Sync + 'static> Frames<S> {
         let source_payload = material.source_payload()?;
         let layout = if material.is_banked() {
             let ds = material.descriptions();
+            let metadata = ds
+                .len()
+                .checked_mul(
+                    size_of::<crate::upload::Description<S::Generation>>()
+                        + size_of::<(u32, Texture)>()
+                        + 2 * size_of::<Arc<S>>()
+                        + 32,
+                )
+                .ok_or("banked frame metadata overflow")?;
             crate::banks::check_mesh(mesh, &ds)?;
             let mut layout = super::super::resource_layout_ceiling(
                 mesh,
@@ -194,6 +203,7 @@ impl<S: Source + Send + Sync + 'static> Frames<S> {
             layout.payload_bytes = layout
                 .payload_bytes
                 .checked_add(source_payload)
+                .and_then(|n| n.checked_add(metadata))
                 .ok_or("frame group overflow")?;
             if layout.payload_bytes > options.budget.payload_bytes {
                 return Err("banked frame budget exceeded".into());

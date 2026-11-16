@@ -20,6 +20,13 @@ pub(super) struct Pending<S: Source> {
     description: Description<S::Generation>,
     revoked: Option<String>,
 }
+impl<S: Source> Pending<S> {
+    pub(super) fn sources(&self) -> Vec<Arc<S>> {
+        std::iter::once(self.lease.owners.source.clone())
+            .chain(self.lease.owners.previous.clone())
+            .collect()
+    }
+}
 impl<S: Source + Send + Sync + 'static> Material<S> {
     /// Validates, encodes and commits ONE upload. Never waits for scheduling or
     /// completion. Busy/rejected calls allocate no staging or command buffer.
