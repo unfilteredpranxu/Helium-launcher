@@ -9,6 +9,8 @@ use objc2_foundation::NSString;
 use objc2_metal::*;
 use std::{ffi::c_void, ptr::NonNull};
 
+pub(crate) mod material_upload;
+
 type Device = ProtocolObject<dyn MTLDevice>;
 type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
@@ -22,6 +24,7 @@ pub struct TerrainRenderer {
     reversed: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     forward: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     capabilities: Capabilities,
+    upload_device: crate::upload::Id,
 }
 impl TerrainRenderer {
     pub fn capabilities(&self) -> &Capabilities {
@@ -150,6 +153,7 @@ impl TerrainRenderer {
             reversed,
             forward,
             capabilities,
+            upload_device: crate::upload::Id::new()?,
         })
     }
 
@@ -162,7 +166,7 @@ impl TerrainRenderer {
         options: Options,
     ) -> Result<Image, String> {
         let layout = validate(mesh, atlas, lightmap, view, options, &self.capabilities)?;
-        autoreleasepool(|_| self.draw(mesh, atlas, lightmap, view, options, layout))
+        autoreleasepool(|_| self.draw(mesh, atlas, lightmap, view, options, layout, None))
     }
     fn draw(
         &self,
@@ -172,6 +176,7 @@ impl TerrainRenderer {
         view: View,
         options: Options,
         layout: ResourceLayout,
+        resident: Option<&Texture>,
     ) -> Result<Image, String> {
         let vertices = upload(&self.device, mesh.vertices)?;
         // SAFETY: a borrowed u32 slice has no padding; allocation size is checked
@@ -191,15 +196,19 @@ impl TerrainRenderer {
         // SAFETY: fully initialized 80 bytes, no padding, Metal buffer starts at offset zero.
         let bytes = unsafe { std::slice::from_raw_parts(uniforms.as_ptr().cast(), 80) };
         let uniforms = upload(&self.device, bytes)?;
-        let sprites = texture(
-            &self.device,
-            atlas.width,
-            atlas.height,
-            atlas.layers,
-            true,
-            MTLPixelFormat::RGBA8Unorm,
-            MTLTextureUsage::ShaderRead,
-        )?;
+        let sprites = if let Some(resident) = resident {
+            resident.clone()
+        } else {
+            texture(
+                &self.device,
+                atlas.width,
+                atlas.height,
+                atlas.layers,
+                true,
+                MTLPixelFormat::RGBA8Unorm,
+                MTLTextureUsage::ShaderRead,
+            )?
+        };
         let lm = texture(
             &self.device,
             16,
@@ -229,7 +238,7 @@ impl TerrainRenderer {
         )?;
         // All padding initialized; shared staging works on unified AND discrete GPUs.
         let mut pixels = vec![0u8; layout.staging_bytes];
-        for layer in 0..atlas.layers {
+        for layer in 0..if resident.is_none() { atlas.layers } else { 0 } {
             for row in 0..atlas.height {
                 let source = (layer * atlas.height + row) * atlas.width * 4;
                 let target = layer * layout.atlas_slice + row * layout.atlas_row;
@@ -256,7 +265,7 @@ impl TerrainRenderer {
         let blit = command
             .blitCommandEncoder()
             .ok_or("upload encoder allocation failed")?;
-        for layer in 0..atlas.layers {
+        for layer in 0..if resident.is_none() { atlas.layers } else { 0 } {
             // SAFETY: validated complete slices, aligned offsets/rows, same-device resources.
             unsafe {
                 blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(

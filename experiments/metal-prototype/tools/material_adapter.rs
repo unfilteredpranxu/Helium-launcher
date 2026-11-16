@@ -278,3 +278,142 @@ mod snapshot_tests {
         );
     }
 }
+
+/// G05: owns the authentic immutable snapshot, not a borrowed byte pointer.
+/// Authority is always the LIVE production renderer; historical owners alone
+/// cannot authorize an upload or receipt after animation/reload/release.
+pub struct BankSource {
+    snapshot: std::sync::Arc<horizon_client_render::gfx::material_snapshot::Snapshot>,
+    ticket: horizon_client_render::gfx::material_snapshot::Ticket,
+    bank: u32,
+}
+impl Binding {
+    pub fn upload_source(&self, renderer: &Renderer, bank: u32) -> Result<BankSource, String> {
+        renderer
+            .validate_material_snapshot_mode()
+            .map_err(str::to_owned)?;
+        let state = renderer.material_state();
+        if state.generation() != self.generation {
+            return Err("obsolete upload binding".into());
+        }
+        let snapshot = state.snapshot().map_err(str::to_owned)?;
+        state.current(snapshot).map_err(str::to_owned)?;
+        if snapshot.banks().get(bank as usize).is_none() {
+            return Err("missing production bank".into());
+        }
+        Ok(BankSource {
+            snapshot: snapshot.clone(),
+            ticket: state.ticket().map_err(str::to_owned)?,
+            bank,
+        })
+    }
+}
+impl BankSource {
+    /// Last production job set as a contiguous span within this bank. The uploader
+    /// ALSO verifies all bytes outside the span against its completed source, so
+    /// skipped revisions or omitted changes cannot silently become resident.
+    pub fn changed_span(
+        &self,
+        renderer: &Renderer,
+    ) -> Result<helium_metal_prototype::upload::Update, String> {
+        use helium_metal_prototype::upload::Source;
+        self.check_current(renderer)?;
+        let d = self.description();
+        let mut span: Option<(u32, u32)> = None;
+        for &global in renderer.changed_material_layers() {
+            if let Ok(local) = d.slice(global) {
+                span = Some(span.map_or((local, local), |(lo, hi)| (lo.min(local), hi.max(local))));
+            }
+        }
+        let (lo, hi) = span.ok_or("no changed layers in this bank")?;
+        Ok(helium_metal_prototype::upload::Update::Layers {
+            first: lo,
+            count: hi - lo + 1,
+        })
+    }
+}
+impl helium_metal_prototype::upload::Source for BankSource {
+    type Generation = horizon_client_render::gfx::material_snapshot::Generation;
+    type Authority = Renderer;
+    fn description(&self) -> helium_metal_prototype::upload::Description<Self::Generation> {
+        let bank = &self.snapshot.banks()[self.bank as usize];
+        helium_metal_prototype::upload::Description {
+            version: helium_metal_prototype::upload::VERSION,
+            identity: helium_metal_prototype::upload::Identity {
+                generation: self.snapshot.generation(),
+                revision: self.snapshot.revision(),
+            },
+            bank: self.bank,
+            split: self.snapshot.split(),
+            sprites: self.snapshot.sprites(),
+            used: bank.used(),
+            allocated: bank.allocated(),
+            size: self.snapshot.size(),
+            levels: bank.levels(),
+            format: material::Format::Rgba8Unorm,
+            layout: helium_metal_prototype::upload::Layout::LayerMajorMipMajor,
+        }
+    }
+    fn pixels(&self) -> &[u8] {
+        self.snapshot.banks()[self.bank as usize].pixels()
+    }
+    fn retained_bytes(&self) -> usize {
+        self.snapshot.retained_bytes()
+    }
+    fn check_current(&self, renderer: &Renderer) -> Result<(), String> {
+        renderer
+            .validate_material_snapshot_mode()
+            .map_err(str::to_owned)?;
+        let state = renderer.material_state();
+        state.check_ticket(self.ticket).map_err(str::to_owned)?;
+        state.current(&self.snapshot).map_err(str::to_owned)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod upload_source_tests {
+    use super::*;
+    use helium_metal_prototype::upload::Source;
+    #[test]
+    fn authentic_prepared_owner_preserves_upload_identity_and_bytes() {
+        // Handcrafted base pixels through actual production mip preparation.
+        let prepared = horizon_client_render::gfx::PreparedTextures::new(
+            &[17; 3 * 16],
+            2,
+            3,
+            &[],
+            (&[255; 16], 2),
+        )
+        .retain_material_snapshot(4096);
+        let state = prepared.capture_materials(2, 3, false);
+        let snapshot = state.snapshot().unwrap().clone();
+        let weak = std::sync::Arc::downgrade(&snapshot);
+        let source = BankSource {
+            snapshot,
+            ticket: state.ticket().unwrap(),
+            bank: 0,
+        };
+        let d = source.description();
+        assert_eq!(d.identity.generation, state.generation());
+        assert_eq!(d.identity.revision, state.animation_revision());
+        assert_eq!(
+            (d.bank, d.used, d.allocated, d.size, d.levels),
+            (0, 3, 3, 2, 2)
+        );
+        assert_eq!(d.slice(2).unwrap(), 2);
+        assert!(d.slice(3).is_err());
+        assert_eq!(
+            source.pixels(),
+            state.snapshot().unwrap().banks()[0].pixels()
+        );
+        assert_eq!(
+            source.pixels().as_ptr(),
+            state.snapshot().unwrap().banks()[0].pixels().as_ptr()
+        );
+        drop(state);
+        assert!(weak.upgrade().is_some());
+        drop(source);
+        assert!(weak.upgrade().is_none());
+    }
+}

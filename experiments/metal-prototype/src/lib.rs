@@ -6,6 +6,7 @@ pub use scene::{Mesh, Vertex, fixture, fixture_camera};
 pub mod material;
 pub mod section;
 pub mod terrain;
+pub mod upload;
 
 #[cfg(any(target_os = "macos", target_os = "ios", test))]
 mod ffi;

@@ -3,7 +3,7 @@
 use crate::Image;
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-mod metal;
+pub(crate) mod metal;
 pub mod validation;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use metal::TerrainRenderer;
@@ -198,7 +198,7 @@ pub(crate) fn product(values: &[usize]) -> Result<usize, String> {
         a.checked_mul(b).ok_or("resource size overflow".into())
     })
 }
-fn aligned_row(width: usize) -> Result<usize, String> {
+pub(crate) fn aligned_row(width: usize) -> Result<usize, String> {
     product(&[width, 4])?
         .checked_add(255)
         .map(|n| n & !255)
@@ -222,24 +222,50 @@ pub fn validate(
     options: Options,
     caps: &Capabilities,
 ) -> Result<ResourceLayout, String> {
+    let texture_bytes = product(&[atlas.width, atlas.height, atlas.layers, 4])?;
+    if atlas.rgba.len() != texture_bytes {
+        return Err("texture byte length mismatch".into());
+    }
+    resource_layout(
+        mesh,
+        (atlas.width, atlas.height, atlas.layers),
+        texture_bytes,
+        true,
+        lightmap,
+        view,
+        options,
+        caps,
+    )
+}
+
+/// Same G02 geometry/target policy for a previously validated resident texture.
+/// Resident mip payload is counted, while its atlas staging is omitted.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resource_layout(
+    mesh: &Mesh<'_>,
+    extent: (usize, usize, usize),
+    texture_bytes: usize,
+    upload_atlas: bool,
+    lightmap: &[u8],
+    view: View,
+    options: Options,
+    caps: &Capabilities,
+) -> Result<ResourceLayout, String> {
+    let (width, height, layers) = extent;
     if !caps.baseline() || caps.sample_counts & (1 << 1) == 0 {
         return Err("unrecognized Metal baseline; no inferred capabilities".into());
     }
-    if atlas.width == 0
-        || atlas.height == 0
-        || atlas.layers == 0
-        || atlas.layers > TEXTURE_LAYER_CEILING
-        || [atlas.width, atlas.height, options.width, options.height]
+    if width == 0
+        || height == 0
+        || layers == 0
+        || layers > TEXTURE_LAYER_CEILING
+        || [width, height, options.width, options.height]
             .iter()
             .any(|&n| n == 0 || n > TEXTURE_SIDE_CEILING)
     {
         return Err("texture/target extent exceeds conservative probe policy".into());
     }
-    let texture_bytes = product(&[atlas.width, atlas.height, atlas.layers, 4])?;
-    if atlas.rgba.len() != texture_bytes
-        || lightmap.len() != 16 * 16 * 4
-        || lightmap.chunks_exact(4).any(|p| p[3] != 255)
-    {
+    if lightmap.len() != 16 * 16 * 4 || lightmap.chunks_exact(4).any(|p| p[3] != 255) {
         return Err("texture bytes or 16x16 lightmap length mismatch".into());
     }
     if !view
@@ -255,9 +281,13 @@ pub fn validate(
     if pixels > options.budget.target_pixels {
         return Err("target pixel budget exceeded".into());
     }
-    let atlas_row = aligned_row(atlas.width)?;
-    let atlas_slice = product(&[atlas_row, atlas.height])?;
-    let atlas_staging = product(&[atlas_slice, atlas.layers])?;
+    let atlas_row = aligned_row(width)?;
+    let atlas_slice = product(&[atlas_row, height])?;
+    let atlas_staging = if upload_atlas {
+        product(&[atlas_slice, layers])?
+    } else {
+        0
+    };
     let staging_bytes = atlas_staging
         .checked_add(256 * 16)
         .ok_or("staging overflow")?;
@@ -294,7 +324,7 @@ pub fn validate(
     if payload_bytes > options.budget.payload_bytes {
         return Err("resident payload budget exceeded".into());
     }
-    mesh.validate(atlas.layers)?;
+    mesh.validate(layers)?;
     Ok(ResourceLayout {
         index_bytes,
         atlas_row,
