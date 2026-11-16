@@ -410,6 +410,10 @@ fn native_material_upload_readback_updates_and_resident_render() {
     assert!(weak.upgrade().is_none());
     assert_eq!(material.counters().reused_resources, 1);
     assert_eq!(material.counters().completed_uploads, 2);
+    assert_eq!(material.counters().upload_bytes, 80);
+    assert_eq!(material.counters().texture_payload, 60);
+    assert_eq!(material.counters().staging_peak, 2304);
+    assert_eq!(material.counters().pending, 0);
     assert_eq!(
         material
             .readback_for_validation(&renderer, &a, budget())

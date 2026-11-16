@@ -3,7 +3,11 @@ on:
   push:
     branches: [feature/helium-g05-metal-upload]
     paths:
-      - 'experiments/metal-prototype/**'
+      - 'experiments/metal-prototype/src/**'
+      - 'experiments/metal-prototype/tools/**'
+      - 'experiments/metal-prototype/examples/**'
+      - 'experiments/metal-prototype/Cargo.toml'
+      - 'experiments/metal-prototype/Cargo.lock'
       - '.github/workflows/helium-metal-upload.yml'
   workflow_dispatch:
 permissions:
@@ -61,14 +65,13 @@ jobs:
             xcrun --sdk iphoneos metal -target air64-apple-ios15.0 -std=ios-metal2.0 -c \
               experiments/metal-prototype/src/terrain/terrain24.metal -o "$RUNNER_TEMP/helium-upload/g02.air"
           } 2>&1 | tee "$RUNNER_TEMP/helium-upload/msl.log"
-      - name: Probe native Metal upload, readback and resident G02 oracle
+      - name: Probe native Metal uploads and original G01/G02 GPU regressions
         id: gpu
         continue-on-error: true
         run: |
           set -euo pipefail
           cargo +1.95.0 test --locked --manifest-path experiments/metal-prototype/Cargo.toml \
-            upload::tests::native_material_upload_readback_updates_and_resident_render \
-            -- --ignored --exact --nocapture \
+            -- --ignored --nocapture \
             2>&1 | tee "$RUNNER_TEMP/helium-upload/native-runtime.log"
       - name: Report separate runtime outcome
         if: always()
