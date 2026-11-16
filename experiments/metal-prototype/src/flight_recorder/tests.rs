@@ -404,3 +404,32 @@ fn retired_attempt_is_not_misclassified_by_a_later_retry_note_on_relaunch() {
     assert!(next.wait_ack(Duration::from_secs(5)));
     assert_eq!(next.status()[13], 0);
 }
+
+#[test]
+fn repeated_boots_without_a_new_attempt_keep_the_last_first_cause() {
+    let path = temp();
+    let r = Recorder::persistent_kind(path.clone(), true).unwrap();
+    r.begin(1);
+    r.record(
+        1,
+        Stage::Cancelled,
+        Emitter::Swift,
+        Some(Cause::ViewLayoutInvalid),
+        2360,
+        0,
+    );
+    assert!(r.wait_ack(Duration::from_secs(5)));
+    drop(r);
+    std::thread::sleep(Duration::from_millis(250));
+    for _ in 0..3 {
+        let r = Recorder::persistent_kind(path.clone(), true).unwrap();
+        assert!(r.wait_ack(Duration::from_secs(5)));
+        assert!(
+            fs::read_to_string(path.join("Helium-Metal-Report.txt"))
+                .unwrap()
+                .contains("ViewLayoutInvalid")
+        );
+        drop(r);
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}

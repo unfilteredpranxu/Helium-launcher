@@ -784,8 +784,40 @@ impl Store {
                 None => torn += 1,
             }
         }
+        // A boot which never reaches an attempt must not erase the last failure
+        // merely because the owner opens Files/relaunches repeatedly.
+        if !events.iter().any(|e| e.attempt != 0) {
+            if let Ok(file) = fs::File::open(self.path.join("helium-metal-previous.jsonl")) {
+                let mut previous = Vec::new();
+                if file.take(512 * 1024 + 1).read_to_end(&mut previous).is_ok() {
+                    let mut prior = previous
+                        .split(|b| *b == b'\n')
+                        .filter(|l| !l.is_empty())
+                        .filter_map(|l| std::str::from_utf8(l).ok().and_then(Event::parse))
+                        .collect::<Vec<_>>();
+                    prior.append(&mut events);
+                    events = prior;
+                } else {
+                    torn += 1;
+                }
+            }
+        }
         if events.len() > 259 {
-            events.drain(..events.len() - 259);
+            let priority = events
+                .iter()
+                .filter(|e| e.first)
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>();
+            events.drain(..events.len() - 256);
+            for first in priority {
+                if !events
+                    .iter()
+                    .any(|e| e.boot == first.boot && e.seq == first.seq)
+                {
+                    events.insert(0, first);
+                }
+            }
         }
         if !events.is_empty() {
             let normalized = events.iter().map(Event::json).collect::<String>();
