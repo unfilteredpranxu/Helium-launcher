@@ -25,8 +25,13 @@ pub struct TerrainRenderer {
     forward: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     capabilities: Capabilities,
     upload_device: crate::upload::Id,
+    upload_slot: std::sync::Arc<crate::upload::Slot>,
 }
 impl TerrainRenderer {
+    /// Includes orphaned pending cleanup after a material is dropped/released.
+    pub fn upload_retention(&self) -> crate::upload::Retention {
+        self.upload_slot.retention()
+    }
     pub fn capabilities(&self) -> &Capabilities {
         &self.capabilities
     }
@@ -154,6 +159,7 @@ impl TerrainRenderer {
             forward,
             capabilities,
             upload_device: crate::upload::Id::new()?,
+            upload_slot: crate::upload::Slot::global(),
         })
     }
 

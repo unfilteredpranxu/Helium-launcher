@@ -1,7 +1,7 @@
 name: Helium Metal Upload Validation
 on:
   push:
-    branches: [feature/helium-g05-metal-upload]
+    branches: [feature/helium-g05-metal-upload, feature/helium-g05-async-upload]
     paths:
       - 'experiments/metal-prototype/src/**'
       - 'experiments/metal-prototype/tools/**'
@@ -71,7 +71,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo +1.95.0 test --locked --manifest-path experiments/metal-prototype/Cargo.toml \
-            -- --ignored --nocapture \
+            -- --ignored --nocapture --test-threads=1 \
             2>&1 | tee "$RUNNER_TEMP/helium-upload/native-runtime.log"
       - name: Report separate runtime outcome
         if: always()

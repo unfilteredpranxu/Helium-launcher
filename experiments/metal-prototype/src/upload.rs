@@ -8,7 +8,17 @@ use std::{
     fmt::Debug,
     sync::atomic::{AtomicU64, Ordering},
 };
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "ios", test)),
+    allow(dead_code)
+)]
+mod slot;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub(crate) use slot::{Ownership, Slot};
+pub use slot::{Poll, Retention};
 pub const VERSION: u32 = 1;
+/// Additive nonblocking API; source descriptions and receipt identity stay v1.
+pub const NONBLOCKING_VERSION: u32 = 1;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use crate::terrain::metal::material_upload::Material;
 
@@ -343,6 +353,7 @@ pub enum Phase {
     Prepared,
     Encoded,
     Submitted,
+    Pending,
     Completed,
     Failed,
     Invalidated,
@@ -408,7 +419,7 @@ impl<G: Copy + Eq> Record<G> {
         &mut self,
         successful_metal_completion: bool,
     ) -> Result<Ticket<G>, String> {
-        if self.ticket.phase != Phase::Submitted {
+        if !matches!(self.ticket.phase, Phase::Submitted | Phase::Pending) {
             return Err("upload was not submitted".into());
         }
         self.ticket.phase = if successful_metal_completion {
@@ -423,6 +434,18 @@ impl<G: Copy + Eq> Record<G> {
             consumed: false,
             ..self.ticket
         })
+    }
+    pub(crate) fn observe(&mut self, terminal: Option<bool>) -> Result<Option<Ticket<G>>, String> {
+        if !matches!(self.phase(), Phase::Submitted | Phase::Pending) {
+            return Err("no submitted upload to observe".into());
+        }
+        match terminal {
+            None => {
+                self.ticket.phase = Phase::Pending;
+                Ok(None)
+            }
+            Some(success) => self.finish(success).map(Some),
+        }
     }
     pub(crate) fn invalidate(&mut self) {
         self.ticket.phase = Phase::Invalidated;
@@ -467,6 +490,16 @@ pub struct Counters {
     pub pending: usize,
     pub failed_allocations: u64,
     pub completed_uploads: u64,
+    pub submitted_operations: u64,
+    pub failed_operations: u64,
+    pub invalidations: u64,
+    pub budget_rejections: u64,
+    pub pending_polls: u64,
+    pub staging_capacity: usize,
+    pub source_retained: usize,
 }
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, any(target_os = "macos", target_os = "ios")))]
+mod async_native_tests;

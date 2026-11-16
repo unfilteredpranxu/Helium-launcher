@@ -4,15 +4,19 @@ use crate::upload::{
     Budget, Counters, Description, Id, Phase, Plan, Record, Source, Ticket, Update,
 };
 
-/// One persistent texture. All methods that reference it wait for their exact
-/// command; no raw texture handle or asynchronous borrowed callback escapes.
+/// One persistent texture. Uploads either explicitly block (G05-A) or occupy
+/// the nonblocking slot (G05-B). Pending residency cannot be sampled/read back.
+/// No raw texture handle or borrowed callback escapes; Drop never waits.
+mod nonblocking;
+use std::sync::Arc;
 pub struct Material<S: Source> {
+    pending: Option<nonblocking::Pending<S>>,
     texture: Option<Texture>,
     _device: Retained<Device>,
     device_id: Id,
     owner: Id,
     description: Description<S::Generation>,
-    source: Option<S>,
+    source: Option<Arc<S>>,
     record: Record<S::Generation>,
     counters: Counters,
 }
@@ -23,6 +27,11 @@ impl TerrainRenderer {
         authority: &S::Authority,
         budget: Budget,
     ) -> Result<Material<S>, String> {
+        if self.upload_slot.busy() {
+            return Err(
+                "native upload slot busy; cannot create another material while work retires".into(),
+            );
+        }
         let plan = Plan::prepare(
             source,
             authority,
@@ -53,6 +62,7 @@ impl TerrainRenderer {
             let owner = Id::new()?;
             Ok(Material {
                 texture: Some(texture),
+                pending: None,
                 _device: self.device.clone(),
                 device_id: self.upload_device,
                 owner,
@@ -78,11 +88,19 @@ impl<S: Source> Material<S> {
         self.description
     }
     pub fn release(&mut self) {
-        // No command can still be in flight: only blocking methods expose this owner.
+        if self.record.phase() != Phase::Invalidated {
+            self.counters.invalidations = self.counters.invalidations.saturating_add(1);
+        }
         self.record.invalidate();
         self.texture = None;
         self.source = None;
-        self.counters.texture_payload = 0;
+        if self.pending.is_none() {
+            self.counters.texture_payload = 0;
+            self.counters.source_retained = 0;
+        }
+        // Pending fields and Metal's copied completion keepalive are NOT cancelled.
+        // Standard Drop releases handles without waiting; the retaining command
+        // keeps GPU resources and the completion lease keeps CPU owners alive.
     }
     /// Offscreen/validation worker use only. Serializes updates and bounds pending
     /// work to ONE operation. Failure after encoding invalidates existing residency.
@@ -94,17 +112,26 @@ impl<S: Source> Material<S> {
         update: Update,
         budget: Budget,
     ) -> Result<Ticket<S::Generation>, String> {
+        if self.pending.is_some() {
+            return Err("material upload already pending".into());
+        }
+        let permit = renderer.upload_slot.acquire()?;
         if self.device_id != renderer.upload_device || self.texture.is_none() {
             return Err("released material or recreated/wrong Metal device owner".into());
         }
         let plan = Plan::prepare(
             &source,
             authority,
-            self.source.as_ref(),
+            self.source.as_deref(),
             update,
             &renderer.capabilities,
             budget,
-        )?;
+        )
+        .inspect_err(|e| {
+            if e.contains("budget") {
+                self.counters.budget_rejections = self.counters.budget_rejections.saturating_add(1);
+            }
+        })?;
         let d = plan.description();
         let mut expected = self.description;
         expected.identity.revision = d.identity.revision;
@@ -118,6 +145,13 @@ impl<S: Source> Material<S> {
         }
         self.record = Record::prepared(d.identity, self.device_id, self.owner)?;
         self.counters.pending = 1;
+        self.counters.staging_capacity = plan.staging_bytes();
+        self.counters.source_retained = plan.source_bytes();
+        permit.account(
+            plan.texture_bytes(),
+            plan.staging_bytes(),
+            plan.source_bytes(),
+        );
         self.counters.staging_peak = self.counters.staging_peak.max(plan.staging_bytes());
         self.counters.source_peak = self.counters.source_peak.max(plan.source_bytes());
         let texture = self.texture.as_ref().unwrap().clone();
@@ -147,6 +181,8 @@ impl<S: Source> Material<S> {
             blit.endEncoding();
             self.record.advance(Phase::Prepared, Phase::Encoded)?;
             command.commit();
+            self.counters.submitted_operations =
+                self.counters.submitted_operations.saturating_add(1);
             let submitted = self.record.advance(Phase::Encoded, Phase::Submitted);
             self.counters.upload_bytes = self
                 .counters
@@ -156,7 +192,7 @@ impl<S: Source> Material<S> {
             submitted?;
             let status = command.status();
             let error = command.error();
-            // The ONLY non-test path to completion: this exact command, after wait,
+            // Blocking completion requires this exact command, after wait,
             // must report Completed AND no NSError. Submission alone never suffices.
             if status != MTLCommandBufferStatus::Completed || error.is_some() {
                 let _ = self.record.finish(false);
@@ -170,13 +206,15 @@ impl<S: Source> Material<S> {
             self.record.finish(true)
         });
         self.counters.pending = 0;
+        self.counters.staging_capacity = 0;
         match result {
             Ok(ticket) => {
                 if self.source.is_some() {
                     self.counters.reused_resources =
                         self.counters.reused_resources.saturating_add(1);
                 }
-                self.source = Some(source);
+                self.counters.source_retained = source.retained_bytes();
+                self.source = Some(Arc::new(source));
                 self.description = d;
                 self.counters.completed_uploads = self.counters.completed_uploads.saturating_add(1);
                 Ok(ticket)
@@ -190,6 +228,8 @@ impl<S: Source> Material<S> {
                     self.record.fail();
                 }
                 self.source = None;
+                self.counters.source_retained = 0;
+                self.counters.failed_operations = self.counters.failed_operations.saturating_add(1);
                 Err(error)
             }
         }
@@ -202,9 +242,12 @@ impl<S: Source> Material<S> {
         authority: &S::Authority,
         ticket: &mut Ticket<S::Generation>,
     ) -> Result<(), String> {
+        if self.pending.is_some() {
+            return Err("material upload pending; residency unavailable".into());
+        }
         let source = self
             .source
-            .as_ref()
+            .as_deref()
             .ok_or("no completed source residency")?;
         source.check_current(authority)?;
         if self.texture.is_none() {
@@ -229,9 +272,12 @@ impl<S: Source> Material<S> {
         authority: &S::Authority,
         budget: Budget,
     ) -> Result<Vec<u8>, String> {
+        if self.pending.is_some() {
+            return Err("material upload pending; readback unavailable".into());
+        }
         let source = self
             .source
-            .as_ref()
+            .as_deref()
             .ok_or("no completed material residency")?;
         source.check_current(authority)?;
         if self.device_id != renderer.upload_device || self.record.phase() != Phase::Completed {
@@ -324,9 +370,12 @@ impl TerrainRenderer {
         view: View,
         options: Options,
     ) -> Result<Image, String> {
+        if material.pending.is_some() {
+            return Err("material upload pending; drawing unavailable".into());
+        }
         let source = material
             .source
-            .as_ref()
+            .as_deref()
             .ok_or("no completed material upload")?;
         source.check_current(authority)?;
         if material.device_id != self.upload_device || material.record.phase() != Phase::Completed {

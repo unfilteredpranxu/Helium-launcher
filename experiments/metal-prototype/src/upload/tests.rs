@@ -2,13 +2,13 @@ use super::*;
 use std::sync::Arc;
 // Handcrafted fixtures, not Minecraft data or fabricated GPU results.
 #[derive(Clone)]
-struct Fixture {
-    description: Description<u64>,
-    pixels: Arc<Vec<u8>>,
+pub(super) struct Fixture {
+    pub(super) description: Description<u64>,
+    pub(super) pixels: Arc<Vec<u8>>,
 }
-struct Authority {
-    identity: Identity<u64>,
-    live: bool,
+pub(super) struct Authority {
+    pub(super) identity: Identity<u64>,
+    pub(super) live: bool,
 }
 impl Source for Fixture {
     type Generation = u64;
@@ -30,7 +30,7 @@ impl Source for Fixture {
         }
     }
 }
-fn fixture() -> (Fixture, Authority) {
+pub(super) fn fixture() -> (Fixture, Authority) {
     let identity = Identity {
         generation: 1,
         revision: 1,
@@ -70,7 +70,7 @@ fn fixture() -> (Fixture, Authority) {
         },
     )
 }
-fn caps() -> Capabilities {
+pub(super) fn caps() -> Capabilities {
     Capabilities {
         apple_families: 1 << 4,
         common_families: 0,
@@ -83,7 +83,7 @@ fn caps() -> Capabilities {
         argument_buffer_tier: None,
     }
 }
-fn budget() -> Budget {
+pub(super) fn budget() -> Budget {
     Budget {
         payload_bytes: 1 << 20,
         staging_bytes: 1 << 20,
