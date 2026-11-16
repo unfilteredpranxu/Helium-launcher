@@ -1,7 +1,7 @@
 name: Helium Metal Upload Validation
 on:
   push:
-    branches: [feature/helium-g05-metal-upload, feature/helium-g05-async-upload, feature/helium-g05-async-draw, feature/helium-g05-metal-presentation, feature/helium-g06-real-world-metal, feature/helium-g06-production-banks, feature/helium-g06-attached-game]
+    branches: [feature/helium-g05-metal-upload, feature/helium-g05-async-upload, feature/helium-g05-async-draw, feature/helium-g05-metal-presentation, feature/helium-g06-real-world-metal, feature/helium-g06-production-banks, feature/helium-g06-attached-game, feature/helium-g06d-one-build-diagnostics]
     paths:
       - 'crates/horizon-metal-bridge/**'
       - 'crates/horizon-client/src/game.rs'
@@ -166,6 +166,8 @@ jobs:
             await github.rest.checks.create({owner:context.repo.owner,repo:context.repo.repo,head_sha:context.sha,name:'Helium production bridge evidence',status:'completed',conclusion:'neutral',output:{title:'Read individual compilation logs; not gameplay runtime proof',summary}});
 
   attached-ios-game:
+    # G06-D is not owner-ready until its full HUD/export/self-test gates exist.
+    if: github.ref_name != 'feature/helium-g06d-one-build-diagnostics'
     needs: apple-sdk
     runs-on: macos-26
     timeout-minutes: 90

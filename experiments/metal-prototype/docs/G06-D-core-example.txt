@@ -1,0 +1,11 @@
+HELIUM G06-D RECORDER CORE — NOT OWNER-TEST READY
+OWNER_SCREEN_CONFIRMED: UNVERIFIED
+No assets, account identifiers, paths, chat or free-form text accepted.
+FIRST CAUSES (retained independently of timeline tail):
+{"test_only":true,"schema_version":1,"event_seq":3,"attempt_id":1,"monotonic_ns":141964,"stage":"Cancelled","emitter":"Game","cause":"Some(MaterialChanged)","first":true,"expected":11,"observed":12}
+TIMELINE TAIL:
+{"test_only":true,"schema_version":1,"event_seq":1,"attempt_id":1,"monotonic_ns":2344,"stage":"HostRequested","emitter":"Game","cause":"None","first":false,"expected":0,"observed":0}
+{"test_only":true,"schema_version":1,"event_seq":2,"attempt_id":1,"monotonic_ns":3485,"stage":"UploadStarted","emitter":"Worker","cause":"None","first":false,"expected":0,"observed":0}
+{"test_only":true,"schema_version":1,"event_seq":3,"attempt_id":1,"monotonic_ns":141964,"stage":"Cancelled","emitter":"Game","cause":"Some(MaterialChanged)","first":true,"expected":11,"observed":12}
+{"test_only":true,"schema_version":1,"event_seq":4,"attempt_id":1,"monotonic_ns":171299,"stage":"Cancelled","emitter":"Swift","cause":"Some(ViewLayoutInvalid)","first":false,"expected":11,"observed":12}
+NEXT ACTION FOR CODEX: finish HUD, recovery, saturation/error reporting and full integration gates.

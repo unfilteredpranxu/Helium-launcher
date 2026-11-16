@@ -1,5 +1,6 @@
-//! Audited iOS main-view/worker handoff. UIKit remains in the bundled Swift host.
-//! MIT; Copyright (c) 2026 Horizon contributors.
+//! Audited iOS native handoff; MIT, Horizon contributors.
+use crate::flight_recorder::{self as recorder, Cause, Emitter, Stage};
+
 use crate::{attached_protocol::Gate, display::Display, terrain::TerrainRenderer};
 use objc2::{ClassType, rc::Retained, runtime::AnyObject};
 use objc2_quartz_core::CAMetalLayer;
@@ -87,6 +88,14 @@ pub fn device_test_mode() -> Result<i32, String> {
     Ok(f())
 }
 extern "C" fn invalidate(id: u64) {
+    recorder::global().record(
+        id,
+        Stage::Cancelled,
+        Emitter::Swift,
+        Some(Cause::Unknown),
+        0,
+        0,
+    );
     if let Ok(entry) = ENTRY.lock() {
         if let Some(e) = entry.as_ref().filter(|e| e.id == id) {
             e.status.cancel();
@@ -132,6 +141,18 @@ extern "C" fn run(id: u64, p: *mut AnyObject) {
         Ok(())
     }));
     if !matches!(result, Ok(Ok(()))) {
+        recorder::global().record(
+            id,
+            Stage::Cancelled,
+            Emitter::Worker,
+            Some(if result.is_err() {
+                Cause::Panic
+            } else {
+                Cause::WorkerFailed
+            }),
+            0,
+            0,
+        );
         status.finish(false);
         cancel.store(true, Ordering::Release);
     }
@@ -180,6 +201,8 @@ pub fn submit<T: Send + 'static>(
         if e.is_some() {
             return Err("native attached session busy/retiring".into());
         }
+        recorder::global().begin(id);
+        recorder::emit(Stage::HostRequested, Emitter::Game, None, 0, 0);
         *e = Some(Entry {
             id,
             cancel: cancel.clone(),
@@ -188,6 +211,16 @@ pub fn submit<T: Send + 'static>(
                 let mut result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(layer)))
                         .unwrap_or_else(|_| Err("native worker panic".into()));
+                if result.is_err() {
+                    recorder::global().record(
+                        id,
+                        Stage::Cancelled,
+                        Emitter::Worker,
+                        Some(Cause::WorkerFailed),
+                        0,
+                        0,
+                    );
+                }
                 if !state.finish(result.is_ok()) && result.is_ok() {
                     result = Err(
                         "worker returned without a current exact native presentation completion"
@@ -228,6 +261,14 @@ impl Ticket {
         }
     }
     pub fn cancel(&self) {
+        recorder::global().record(
+            self.id,
+            Stage::Cancelled,
+            Emitter::Ticket,
+            Some(Cause::TicketCancelled),
+            0,
+            0,
+        );
         self.cancel.store(true, Ordering::Release);
         if let Ok(p) = symbol("horizon_native_display_cancel") {
             let f: extern "C" fn(u64) = unsafe { std::mem::transmute(p) };

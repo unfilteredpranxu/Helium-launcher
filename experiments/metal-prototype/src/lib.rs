@@ -5,6 +5,7 @@ pub use scene::{Mesh, Vertex, fixture, fixture_camera};
 
 pub mod banks;
 pub mod display;
+pub mod flight_recorder;
 pub mod frame;
 pub mod material;
 pub mod section;

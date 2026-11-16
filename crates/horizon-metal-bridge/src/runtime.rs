@@ -2,6 +2,7 @@ use crate::adapter::{
     self,
     material_adapter::{BankSource, Binding},
 };
+use helium_metal_prototype::flight_recorder::{self as recorder, Cause, Emitter, Stage};
 use helium_metal_prototype::{
     section::{Format, Limits},
     terrain::{Mesh, View},
@@ -318,6 +319,13 @@ impl Controller {
         }
     }
     pub fn invalidate(&mut self, reason: &str) {
+        recorder::emit(
+            Stage::Cancelled,
+            Emitter::Game,
+            Some(Cause::reason(reason)),
+            0,
+            0,
+        );
         self.candidate = None;
         self.camera = None;
         #[cfg(target_os = "ios")]
@@ -476,6 +484,28 @@ impl Controller {
                 || renderer.material_state().light_revision() != Ok(f.light_revision)
                 || f.size != [renderer.config.width, renderer.config.height]
             {
+                let cause = if f.source.iter().any(|s| s.check_current(renderer).is_err()) {
+                    Cause::BankStale
+                } else if renderer.material_state().light_revision() != Ok(f.light_revision) {
+                    Cause::LightmapChanged
+                } else {
+                    Cause::FrameSizeChanged
+                };
+                recorder::emit(
+                    Stage::Cancelled,
+                    Emitter::Game,
+                    Some(cause),
+                    if cause == Cause::LightmapChanged {
+                        f.light_revision
+                    } else {
+                        0
+                    },
+                    if cause == Cause::LightmapChanged {
+                        renderer.material_state().light_revision().unwrap_or(0)
+                    } else {
+                        0
+                    },
+                );
                 f.cancel.store(true, Ordering::Release);
             }
             match f.receiver.try_recv() {
@@ -660,6 +690,7 @@ impl Controller {
 }
 impl Drop for Controller {
     fn drop(&mut self) {
+        recorder::emit(Stage::Cancelled, Emitter::Game, Some(Cause::Shutdown), 0, 0);
         if let Some(f) = &self.flight {
             f.cancel.store(true, Ordering::Release);
         }
