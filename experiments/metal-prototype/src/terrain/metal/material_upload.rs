@@ -193,10 +193,35 @@ impl<S: Source> Material<S> {
     pub fn phase(&self) -> Phase {
         self.record.phase()
     }
+    pub fn bank_counters(&self, bank: u32) -> Result<Counters, String> {
+        if self.description.bank == bank {
+            Ok(self.counters)
+        } else {
+            self.members
+                .iter()
+                .find(|m| m.description.bank == bank)
+                .map(|m| m.counters)
+                .ok_or_else(|| "missing bank counters".into())
+        }
+    }
     pub fn counters(&self) -> Counters {
         let mut c = self.counters;
         for m in &self.members {
             c.texture_payload = c.texture_payload.saturating_add(m.counters.texture_payload);
+            c.upload_bytes = c.upload_bytes.saturating_add(m.counters.upload_bytes);
+            c.completed_uploads = c
+                .completed_uploads
+                .saturating_add(m.counters.completed_uploads);
+            c.submitted_operations = c
+                .submitted_operations
+                .saturating_add(m.counters.submitted_operations);
+            c.failed_operations = c
+                .failed_operations
+                .saturating_add(m.counters.failed_operations);
+            c.pending = c.pending.saturating_add(m.counters.pending);
+        }
+        if self.banked && self.sources().len() == self.members.len() + 1 {
+            c.source_retained = self.source_payload().unwrap_or(usize::MAX);
         }
         c
     }
@@ -382,6 +407,9 @@ impl<S: Source> Material<S> {
         authority: &S::Authority,
         budget: Budget,
     ) -> Result<Vec<u8>, String> {
+        if self.banked {
+            return Err("group texture readback is not a single-bank operation".into());
+        }
         if self.pending.is_some() {
             return Err("material upload pending; readback unavailable".into());
         }
@@ -481,6 +509,9 @@ impl TerrainRenderer {
         view: View,
         options: Options,
     ) -> Result<Image, String> {
+        if material.banked {
+            return Err("use nonblocking banked Frames for a bank set".into());
+        }
         if material.pending.is_some() {
             return Err("material upload pending; drawing unavailable".into());
         }

@@ -768,7 +768,7 @@ fn native_512_banks_sample_high_slices_without_global_aliases() {
     while r.upload_retention().busy {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    assert_eq!(group.bank_mut(0).unwrap().counters().completed_uploads, 1);
+    assert_eq!(group.bank_counters(0).unwrap().completed_uploads, 1);
     assert_eq!(group.bank_mut(2).unwrap().counters().completed_uploads, 1);
     assert_eq!(group.bank_mut(1).unwrap().counters().upload_bytes, 10260);
     frames

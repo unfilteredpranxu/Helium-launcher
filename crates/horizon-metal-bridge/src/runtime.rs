@@ -588,8 +588,11 @@ fn run(job: Job) -> Result<String, String> {
         job.geometry.key,
         job.geometry.origin,
         job.geometry.sequence,
-        d.bank,
-        d.identity.revision,
+        descriptions
+            .iter()
+            .map(|d| (d.bank, d.split, d.used, d.allocated))
+            .collect::<Vec<_>>(),
+        descriptions[0].identity.revision,
         job.geometry.vertices.len() / 24,
         job.geometry.indices.len(),
         material.counters(),
