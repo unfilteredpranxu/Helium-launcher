@@ -191,7 +191,14 @@ impl<G: Copy + Eq + Debug> Plan<G> {
                     terrain::TEXTURE_LAYER_CEILING
                 }
         {
-            return Err("bank exceeds unchanged G02 4096-side/256-slice policy".into());
+            return Err(format!(
+                "bank exceeds G02/versioned 4096-side/{}-slice policy",
+                if d.version == BANKED_VERSION {
+                    512
+                } else {
+                    256
+                }
+            ));
         }
         if d.split == 0
             || d.split > 2048

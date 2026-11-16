@@ -900,3 +900,30 @@ fn unchanged_revision_rebind_does_not_issue_new_gpu_completion() {
     assert!(r.observe(Some(true)).is_err());
     assert!(r.rebind_identical(Identity { revision: 1, ..id }).is_err());
 }
+#[test]
+fn sparse_bank_sets_require_no_bank_zero_or_padding_alias() {
+    use crate::{
+        banks,
+        terrain::{Mesh, TerrainVertex},
+    };
+    let (s, _) = fixture();
+    let mut d = s.description;
+    d.version = BANKED_VERSION;
+    d.bank = 1;
+    d.split = 512;
+    d.sprites = 515;
+    d.used = 3;
+    d.allocated = 4;
+    let mut v = [TerrainVertex {
+        pos: [0.; 3],
+        uv: [0; 2],
+        layer: 0x8000 | 514,
+        light: 0,
+        color: 0x91ffffff,
+    }; 3];
+    banks::check_mesh(&Mesh::from_vertices(&v, &[0, 1, 2]), &[d]).unwrap();
+    for x in &mut v {
+        x.layer = 515;
+    }
+    assert!(banks::check_mesh(&Mesh::from_vertices(&v, &[0, 1, 2]), &[d]).is_err());
+}
