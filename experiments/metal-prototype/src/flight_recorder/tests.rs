@@ -374,3 +374,33 @@ fn possible_inflight_state_only_changes_at_submission_terminal_or_retirement() {
     );
     assert_eq!(r.first(2), None);
 }
+
+#[test]
+fn retired_attempt_is_not_misclassified_by_a_later_retry_note_on_relaunch() {
+    let path = temp();
+    let r = Recorder::persistent_kind(path.clone(), true).unwrap();
+    r.begin(1);
+    r.record(
+        1,
+        Stage::Cancelled,
+        Emitter::Swift,
+        Some(Cause::LightmapChanged),
+        11,
+        12,
+    );
+    r.record(1, Stage::Retired, Emitter::Game, None, 0, 0);
+    r.record(
+        1,
+        Stage::RetryWaiting,
+        Emitter::Game,
+        Some(Cause::NoFreshMesh),
+        0,
+        0,
+    );
+    assert!(r.wait_ack(Duration::from_secs(5)));
+    drop(r);
+    std::thread::sleep(Duration::from_millis(250));
+    let next = Recorder::persistent_kind(path, true).unwrap();
+    assert!(next.wait_ack(Duration::from_secs(5)));
+    assert_eq!(next.status()[13], 0);
+}

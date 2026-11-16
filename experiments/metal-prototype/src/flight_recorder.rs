@@ -400,9 +400,18 @@ impl Recorder {
                 let (old, torn) = store.recover();
                 if let Some(state) = state.upgrade() {
                     let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
-                    s.recovery = old
-                        .last()
-                        .is_some_and(|e| !matches!(e.stage, Stage::Removed | Stage::Retired));
+                    s.recovery = if old.iter().any(|e| e.attempt != 0) {
+                        old.iter().filter(|e| e.attempt != 0).any(|e| {
+                            !old.iter().any(|v| {
+                                v.boot == e.boot
+                                    && v.attempt == e.attempt
+                                    && (v.stage == Stage::Retired
+                                        || (v.stage == Stage::Removed && !v.gpu_inflight))
+                            })
+                        })
+                    } else {
+                        !old.is_empty()
+                    };
                     s.previous = old;
                     s.torn = torn;
                 }
@@ -709,7 +718,7 @@ impl Recorder {
             s.seq,
             self.ack.load(Ordering::Acquire),
             s.dropped,
-            u64::from(self.failed.load(Ordering::Acquire)),
+            u64::from(self.failed.load(Ordering::Acquire) || s.torn != 0),
             s.attempts.len() as u64,
             self.start.elapsed().as_millis() as u64,
             e.map(|e| e.expected).unwrap_or(0),
@@ -780,8 +789,12 @@ impl Store {
         }
         if !events.is_empty() {
             let normalized = events.iter().map(Event::json).collect::<String>();
-            let _ = fs::create_dir_all(&self.path);
-            let _ = fs::write(self.path.join("helium-metal-previous.jsonl"), normalized);
+            if fs::create_dir_all(&self.path)
+                .and_then(|_| self.replace("helium-metal-previous.jsonl", normalized.as_bytes()))
+                .is_err()
+            {
+                torn += 1;
+            }
         }
         (events, torn)
     }
@@ -805,10 +818,11 @@ impl Store {
         let json = events.iter().map(Event::json).collect::<String>();
         self.replace("helium-metal-events.jsonl", json.as_bytes())?;
         let mut report = format!(
-            "HELIUM METAL G06-D DIAGNOSTIC\nSCHEMA 2 | source={}\nboot={} | TEST_ONLY={}\nrecorder_status=OK | persisted_sequence={} | lost_timeline_events={}\nPREVIOUS_BOOT_INCOMPLETE={} | malformed_previous_records={}\nWGpu FALLBACK ACTIVE | PHYSICAL_PIXELS_UNVERIFIED\nPersistence acknowledgement is not a power-loss/fsync guarantee.\nSELF_TEST: typed initialization/serialization running; GPU/UI checks listed separately.\n",
+            "HELIUM METAL G06-D DIAGNOSTIC\nSCHEMA 2 | source={}\nboot={} | TEST_ONLY={}\nrecorder_status={} | persisted_sequence={} | lost_timeline_events={}\nPREVIOUS_BOOT_INCOMPLETE={} | malformed_previous_records={}\nWGpu FALLBACK ACTIVE | PHYSICAL_PIXELS_UNVERIFIED\nPersistence acknowledgement is not a power-loss/fsync guarantee.\nSELF_TEST: typed initialization/serialization running; GPU/UI checks listed separately.\n",
             option_env!("HELIUM_DIAGNOSTIC_SHA").unwrap_or("development-unidentified"),
             s.boot,
             events.first().map(|e| e.test_only).unwrap_or(false),
+            if s.torn == 0 { "OK" } else { "DEGRADED" },
             s.seq,
             s.dropped,
             s.recovery,
