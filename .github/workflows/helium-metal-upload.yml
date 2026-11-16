@@ -1,8 +1,13 @@
 name: Helium Metal Upload Validation
 on:
   push:
-    branches: [feature/helium-g05-metal-upload, feature/helium-g05-async-upload, feature/helium-g05-async-draw, feature/helium-g05-metal-presentation]
+    branches: [feature/helium-g05-metal-upload, feature/helium-g05-async-upload, feature/helium-g05-async-draw, feature/helium-g05-metal-presentation, feature/helium-g06-real-world-metal]
     paths:
+      - 'crates/horizon-metal-bridge/**'
+      - 'crates/horizon-client/src/game.rs'
+      - 'crates/horizon-client/Cargo.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - 'experiments/metal-prototype/src/**'
       - 'experiments/metal-prototype/ios/**'
       - 'experiments/metal-prototype/helium_metal_prototype.h'
@@ -116,3 +121,35 @@ jobs:
           name: helium-metal-upload-evidence
           path: ${{ runner.temp }}/helium-upload/*.log
           if-no-files-found: warn
+
+  production-bridge:
+    runs-on: macos-26
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: '3'
+      IPHONEOS_DEPLOYMENT_TARGET: '15.0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup target add --toolchain 1.95.0 aarch64-apple-ios
+      - name: Check the actual game opt-in and iOS bridge
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bridge"
+          cargo +1.95.0 test --locked -p horizon-metal-bridge 2>&1 | tee "$RUNNER_TEMP/bridge/tests.log"
+          cargo +1.95.0 check --locked -p horizon-client --no-default-features --features helium-direct-metal 2>&1 | tee "$RUNNER_TEMP/bridge/game.log"
+          cargo +1.95.0 check --locked --target aarch64-apple-ios -p horizon-metal-bridge 2>&1 | tee "$RUNNER_TEMP/bridge/ios.log"
+      - name: Publish bridge compilation evidence
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs=require('fs'), path=require('path');
+            const summary=['tests.log','game.log','ios.log'].map(n=>{
+              const p=path.join(process.env.RUNNER_TEMP,'bridge',n);
+              return '### '+n+'\n```text\n'+(fs.existsSync(p)?fs.readFileSync(p,'utf8').slice(-10000):'NOT RUN')+'\n```';
+            }).join('\n');
+            await github.rest.checks.create({owner:context.repo.owner,repo:context.repo.repo,head_sha:context.sha,name:'Helium production bridge evidence',status:'completed',conclusion:'neutral',output:{title:'Read individual compilation logs; not gameplay runtime proof',summary}});

@@ -85,8 +85,8 @@ mod campfire_douse;
 mod cartography;
 mod cat_spawner;
 mod chat;
-mod chat_input;
 mod chat_filter;
+mod chat_input;
 mod chiseled_bookshelf;
 mod client_ambient;
 mod clipboard;
@@ -377,8 +377,8 @@ mod spear;
 mod spectator;
 mod spill;
 mod splash_water;
-mod splitscreen;
 mod split;
+mod splitscreen;
 mod startup_menu;
 mod station_control;
 mod stations;
@@ -2568,6 +2568,8 @@ struct WorldIcon {
 }
 
 struct Game<'a> {
+    #[cfg(feature = "helium-direct-metal")]
+    direct_metal: Option<horizon_metal_bridge::Controller>,
     /// Shared with an integrated server; collision and motion tables are independently reference counted.
     res: Arc<Resources>,
     /// Owned shared resources for constructing the optional second client.
@@ -8562,9 +8564,8 @@ impl Game<'_> {
     /// which keys its buttons are holding (`TouchInput::holds_key`).
     fn heal_hold_latches(&mut self) {
         let touch = |key| self.touch.holds_key(key);
-        let shift = self.modifiers.shift_key()
-            || touch(KeyCode::ShiftLeft)
-            || touch(KeyCode::ShiftRight);
+        let shift =
+            self.modifiers.shift_key() || touch(KeyCode::ShiftLeft) || touch(KeyCode::ShiftRight);
         let control = self.modifiers.control_key()
             || touch(KeyCode::ControlLeft)
             || touch(KeyCode::ControlRight);
@@ -13439,6 +13440,10 @@ impl Game<'_> {
         self.pitch = pitch;
         self.selected = level.selected_slot.clamp(0, 8) as usize;
         self.streaming = streaming;
+        #[cfg(feature = "helium-direct-metal")]
+        if let Some(native) = self.direct_metal.as_mut() {
+            native.invalidate("world replaced");
+        }
         self.world = world;
         self.inventory = inventory;
         self.save = save;
@@ -13729,6 +13734,10 @@ impl Game<'_> {
         self.kept_block_entities.get_mut().clear();
         self.bosses = Default::default();
         self.streaming.paused = true;
+        #[cfg(feature = "helium-direct-metal")]
+        if let Some(native) = self.direct_metal.as_mut() {
+            native.invalidate("world exited");
+        }
         self.world = World::new(self.res.facts().air, 0);
         self.player = None;
         // `LocalPlayer`'s constructor: `KeyMapping.resetToggleKeys`, so a sneak or sprint toggled
@@ -15527,6 +15536,10 @@ impl Game<'_> {
         self.clear_lod();
         self.pending_uploads.clear();
         let context = self.worker_context();
+        #[cfg(feature = "helium-direct-metal")]
+        if let Some(native) = self.direct_metal.as_mut() {
+            native.invalidate("resource pack reloaded");
+        }
         self.streaming.reload_resources(&mut self.world, context);
         self.native_shaders = native_shaders::NativeShaders::picking(&std::mem::take(
             &mut self.native_shaders.picked,
@@ -17570,7 +17583,14 @@ impl Game<'_> {
                 } else {
                     horizon_client::debug_overlay::GPU_TIMING_GAP
                 });
-                horizon_client::spans::time("renderer", || renderer.render(&frame))
+                let rendered = horizon_client::spans::time("renderer", || renderer.render(&frame));
+                #[cfg(feature = "helium-direct-metal")]
+                if matches!(rendered, Ok(true))
+                    && let Some(native) = self.direct_metal.as_mut()
+                {
+                    native.frame(renderer, &frame);
+                }
+                rendered
             }
             None => Err("renderer".into()),
         };
@@ -18421,6 +18441,17 @@ impl Game<'_> {
             .extend(waiting.into_iter().map(|chunk| (chunk, 0)));
         let (uploads, unloaded) =
             horizon_client::spans::time("streaming", || self.streaming.update(&mut self.world));
+        #[cfg(feature = "helium-direct-metal")]
+        if let Some(native) = self.direct_metal.as_mut() {
+            native.remove_columns(unloaded.iter().map(|c| (c.x, c.z)));
+            if let Some(renderer) = self.renderer.as_ref() {
+                for (key, mesh) in &uploads {
+                    if self.world.chunks.contains_key(&(key.0, key.2)) {
+                        native.section(renderer, *key, self.world.layout().min_y(), mesh);
+                    }
+                }
+            }
+        }
         self.streaming.extra.truncate(areas);
         self.spawn_fresh_chunks();
         // Before the unloaded chunks' block entities are written and dropped.
@@ -18624,6 +18655,12 @@ fn autosave_interval(rate: f32) -> i64 {
     i64::from((rate * 300.0) as i32).max(100)
 }
 impl ApplicationHandler for Game<'_> {
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(feature = "helium-direct-metal")]
+        if let Some(native) = self.direct_metal.as_mut() {
+            native.invalidate("application suspended");
+        }
+    }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -18723,12 +18760,7 @@ impl ApplicationHandler for Game<'_> {
         // agent input call the inherent handler on the client that already owns the input.
         if let Some(guest) = &mut self.splitscreen_guest {
             if splitscreen::guest_input(&event) {
-                guest.handle_window_event(
-                    event_loop,
-                    id,
-                    event,
-                    input_trace::InputOrigin::User,
-                );
+                guest.handle_window_event(event_loop, id, event, input_trace::InputOrigin::User);
                 return;
             }
             if splitscreen::shared_event(&event) {
@@ -20617,6 +20649,8 @@ impl<'a> Game<'a> {
             &gui.atlas.translucent,
         );
         let mut game = Game {
+            #[cfg(feature = "helium-direct-metal")]
+            direct_metal: horizon_metal_bridge::Controller::from_environment(),
             world_biomes: None,
             world_biomes_base: None,
             res: res.clone(),
@@ -22555,7 +22589,14 @@ fn build_renderer(
     // over to the game.
     atlas.font.reset_cache();
     // Made here when the worker did not: the renderer's own fallback has no LabPBR maps.
-    let prepared = Some(prepared.unwrap_or_else(|| prepare_renderer_textures(pack)));
+    let prepared = prepared.unwrap_or_else(|| prepare_renderer_textures(pack));
+    #[cfg(feature = "helium-direct-metal")]
+    let prepared = if horizon_metal_bridge::enabled() {
+        prepared.retain_material_snapshot(horizon_metal_bridge::runtime_snapshot_budget())
+    } else {
+        prepared
+    };
+    let prepared = Some(prepared);
     let atlas_pixels = atlas.pixels();
     let mut renderer = pollster::block_on(Renderer::new(
         window,

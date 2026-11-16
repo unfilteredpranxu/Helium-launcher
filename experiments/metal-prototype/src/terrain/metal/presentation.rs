@@ -22,6 +22,32 @@ pub struct Display {
     progress: display::Progress,
 }
 impl TerrainRenderer {
+    /// Worker-only, UNATTACHED diagnostic target. This is not a game surface or
+    /// evidence of visible display; never competes with wgpu's drawable.
+    pub fn detached_diagnostic_display(
+        &self,
+        width: usize,
+        height: usize,
+    ) -> Result<Display, String> {
+        display::fit((width, height), (width, height), 0, 192 * 1024 * 1024)?;
+        let layer = CAMetalLayer::new();
+        layer.setDevice(Some(&self.device));
+        layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+        layer.setAllowsNextDrawableTimeout(true);
+        layer.setPresentsWithTransaction(false);
+        layer.setMaximumDrawableCount(3);
+        let mut size = layer.drawableSize();
+        size.width = width as f64;
+        size.height = height as f64;
+        layer.setDrawableSize(size);
+        let space = objc2_core_graphics::CGColorSpace::with_name(Some(unsafe {
+            objc2_core_graphics::kCGColorSpaceLinearSRGB
+        }))
+        .ok_or("linear-sRGB unavailable")?;
+        layer.setColorspace(Some(&space));
+        self.display(layer)
+    }
+
     /// Layer must be configured by its UI owner for SDR linear-sRGB BGRA8Unorm,
     /// with stable physical drawableSize until this one-shot Display is retired.
     /// Retains the layer; never stores a borrowed Swift pointer.
