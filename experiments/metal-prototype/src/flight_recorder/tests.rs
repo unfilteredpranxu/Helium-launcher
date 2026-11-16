@@ -300,3 +300,34 @@ fn cleanup_and_no_fresh_mesh_cannot_invent_failure_after_reveal() {
     assert_eq!(r.first(1), None);
     assert_eq!(r.status()[24], 1);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn actual_disk_full_is_degraded_without_false_acknowledgement() {
+    let path = temp();
+    fs::create_dir_all(&path).unwrap();
+    std::os::unix::fs::symlink("/dev/full", path.join("helium-metal-events.jsonl.pending"))
+        .unwrap();
+    let r = Recorder::persistent_kind(path.clone(), true).unwrap();
+    r.begin(1);
+    r.record(
+        1,
+        Stage::Cancelled,
+        Emitter::Swift,
+        Some(Cause::ViewDetached),
+        0,
+        0,
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(r.status()[8], 1);
+    assert_eq!(r.status()[6], 0);
+    assert!(r.status()[27] > 0);
+    assert_eq!(r.first(1), Some(Cause::ViewDetached));
+    fs::remove_file(path.join("helium-metal-events.jsonl.pending")).unwrap();
+    assert!(r.wait_ack(Duration::from_secs(5)));
+    assert!(
+        fs::read_to_string(path.join("Helium-Metal-Report.txt"))
+            .unwrap()
+            .contains("write_errors_total=")
+    );
+}

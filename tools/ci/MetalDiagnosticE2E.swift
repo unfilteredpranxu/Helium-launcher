@@ -12,6 +12,9 @@ import Foundation
   }
   assert(helium_diag_test_attempt_v2(101)==2)
   for (code,expected) in [(UInt32(10),UInt64(2360)),(12,1),(14,1),(13,1)] {assert(helium_diag_event_v2(101,30,code,expected,0)==2)}
+  for code in [UInt32(11),18,19,24,34,28,30,31,6,2,4,15,21,22,23,33] { assert(helium_diag_event_v2(101,30,code,11,12)==2) }
+  assert(helium_diag_event_v2(101,21,0,0,0)==0) // Swift cannot fabricate DRAW_GPU_COMPLETED
+  assert(helium_diag_event_v2(101,30,999,0,0)==0)
   assert(helium_diag_test_attempt_v2(102)==2);assert(helium_diag_event_v2(102,14,0,2360,1640)==2)
   assert(helium_diag_event_v2(101,30,19,0,0)==2) // late callback MUST stay attempt101
   assert(helium_diag_event_v2(102,30,7,11,12)==2);assert(helium_diag_event_v2(102,999,1,0,0)==0)
@@ -21,6 +24,13 @@ import Foundation
   assert(state[2]==103 && state[4]==3 && state[6]>=state[5] && state[8]==0 && state[15]==1)
   let report=try String(contentsOfFile:root+"/Helium-Metal-Report.txt",encoding:.utf8)
   assert(report.contains("recorder_status=OK") && report.contains("ViewLayoutInvalid") && report.contains("LightmapChanged") && report.contains("ColumnUnloaded") && report.contains("PHYSICAL_PIXELS_UNVERIFIED"))
+  let lines=try String(contentsOfFile:root+"/helium-metal-events.jsonl",encoding:.utf8).split(separator:"\n").map{try JSONSerialization.jsonObject(with:Data($0.utf8)) as! [String:Any]}
+  let sequence=lines.map{($0["event_seq"] as! NSNumber).uint64Value}
+  assert(zip(sequence,sequence.dropFirst()).allSatisfy{$0 < $1})
+  let causes=lines.filter{($0["first"] as? Bool)==true}
+  assert(causes.count==3 && (causes[0]["attempt_id"] as! NSNumber).uint64Value==101 && (causes[0]["cause_code"] as! NSNumber).intValue==10)
+  assert(lines.filter{($0["attempt_id"] as! NSNumber).uint64Value==101 && ($0["cause_code"] as! NSNumber).intValue==19}.count==2)
+  assert(lines.allSatisfy{($0["test_only"] as? Bool)==true})
   let hud=MetalDiagnosticModel.hud(state,mode:"TEST_EVENT_ONLY")
   assert(hud.contains("COLUMN_UNLOADED") && hud.contains("WGpu FALLBACK ACTIVE"))
   for (bundle,marker,legacy,file,expected) in [("dev.helium.g06ctest",2,false,Optional<Data>.none,Int32(2)),("dev.helium.g06ctest",2,false,Data("off\n".utf8),0),("dev.horizon.game",2,false,nil,0),("dev.horizon.game",nil,false,nil,0),("dev.helium.g06ctest",3,false,nil,-1),("dev.helium.g06ctest",2,false,Data("bad".utf8),-1)] {

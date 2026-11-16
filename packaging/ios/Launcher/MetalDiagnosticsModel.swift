@@ -27,6 +27,6 @@ struct MetalDiagnosticModel {
         guard a.count == 32, a[0] == 2 else {return "HELIUM METAL G06-D\nRECORDER DEGRADED: ABI mismatch\nWGpu FALLBACK ACTIVE"}
         let stage = a[3] < UInt64(stages.count) ? stages[Int(a[3])] : "INVALID_STAGE"
         let cause = a[4] < UInt64(causes.count) ? causes[Int(a[4])] : "UNKNOWN"
-        return "HELIUM METAL G06-D — DIAGNOSTIC\nMode: \(mode) | Attempt \(a[2]) / 3 | boot \(a[1])\nStage: \(stage) | \(a[10]) ms\nBanks: \(a[16])/\(a[17]) | gen/revision: \(a[18]) | light: \(a[19])\nFIRST CAUSE: \(cause)\nNATIVE REVEAL: \(a[24] == 1 ? (a[15] == 1 ? "TEST_ONLY" : "YES") : "NO") | PIXELS UNVERIFIED\nRecorder: \(a[8] == 0 ? "OK" : "DEGRADED") | ack \(a[6])/\(a[5]) | lost \(a[7])\nSelf-test: \(a[26] == 2 ? "PASS (recorder only)" : "RUNNING / NOT VERIFIED")\nWGpu FALLBACK ACTIVE\nFiles → Helium G06C Test → logs → Helium-Metal-Report.txt"
+        return "HELIUM METAL G06-D — DIAGNOSTIC\nMode: \(mode) | Attempt \(a[2]) / 3 | boot \(a[1])\nStage: \(stage) | \(a[10]) ms\nBanks: \(a[16])/\(a[17]) | gen: \(a[18]) | material: \(a[20]) | light: \(a[19])\nFIRST CAUSE: \(cause)\nNATIVE REVEAL: \(a[24] == 1 ? (a[15] == 1 ? "TEST_ONLY" : "YES") : "NO") | PIXELS UNVERIFIED\nRecorder: \(a[8] == 0 ? "OK" : "DEGRADED") | ack \(a[6])/\(a[5]) | lost \(a[7])\nSelf-test: \(a[26] == 2 ? "PASS (recorder only)" : "RUNNING / NOT VERIFIED")\nWGpu FALLBACK ACTIVE\nFiles → Helium G06C Test → logs → Helium-Metal-Report.txt"
     }
 }

@@ -40,9 +40,11 @@ impl Gate {
             self.native_confirmed.store(true, Ordering::Release);
         }
     }
+    pub fn verification_ready(&self) -> bool {
+        !self.cancelled() && self.native_confirmed.load(Ordering::Acquire)
+    }
     pub fn finish(&self, success: bool) -> bool {
-        let verified =
-            success && !self.cancelled() && self.native_confirmed.load(Ordering::Acquire);
+        let verified = success && self.verification_ready();
         self.state
             .compare_exchange(
                 2,

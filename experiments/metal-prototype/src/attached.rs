@@ -288,8 +288,28 @@ pub fn submit_attempt<T: Send + 'static>(
             work: Some(Box::new(move |layer| {
                 let mut result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(layer)))
-                        .unwrap_or_else(|_| Err("native worker panic".into()));
+                        .unwrap_or_else(|_| {
+                            recorder::global().record(
+                                id,
+                                Stage::Cancelled,
+                                Emitter::Worker,
+                                Some(Cause::Panic),
+                                0,
+                                0,
+                            );
+                            Err("native worker panic".into())
+                        });
                 if result.is_err() {
+                    recorder::global().record(
+                        id,
+                        Stage::Cancelled,
+                        Emitter::Worker,
+                        Some(Cause::WorkerFailed),
+                        0,
+                        0,
+                    );
+                }
+                if result.is_ok() && !state.verification_ready() {
                     recorder::global().record(
                         id,
                         Stage::Cancelled,

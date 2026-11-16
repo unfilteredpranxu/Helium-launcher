@@ -232,6 +232,55 @@ struct Shown {
 }
 /// One candidate and one worker, never a world mirror or mesh queue. This mode
 /// keeps wgpu as producer/fallback. Attached mode uses a distinct UIKit child layer.
+fn producer_changes(
+    renderer: &Renderer,
+    source: &[BankSource],
+    light: u64,
+    size: [u32; 2],
+) -> [Option<(Cause, u64, u64)>; 3] {
+    let state = renderer.material_state();
+    let bank = source
+        .iter()
+        .find(|s| s.check_current(renderer).is_err())
+        .map(|s| {
+            let d = s.description();
+            if d.identity.generation != state.generation() {
+                (
+                    Cause::RendererChanged,
+                    generation_value(d.identity.generation),
+                    generation_value(state.generation()),
+                )
+            } else if d.identity.revision != state.animation_revision() {
+                (
+                    Cause::MaterialChanged,
+                    d.identity.revision,
+                    state.animation_revision(),
+                )
+            } else {
+                (
+                    Cause::BankStale,
+                    d.identity.revision,
+                    state.animation_revision(),
+                )
+            }
+        });
+    let lighting = (state.light_revision() != Ok(light)).then(|| {
+        (
+            Cause::LightmapChanged,
+            light,
+            state.light_revision().unwrap_or(0),
+        )
+    });
+    let actual = [renderer.config.width, renderer.config.height];
+    let viewport = (actual != size).then(|| {
+        (
+            Cause::FrameSizeChanged,
+            (u64::from(size[0]) << 32) | u64::from(size[1]),
+            (u64::from(actual[0]) << 32) | u64::from(actual[1]),
+        )
+    });
+    [bank, lighting, viewport]
+}
 pub struct Controller {
     mode: Mode,
     candidate: Option<Geometry>,
@@ -528,13 +577,21 @@ impl Controller {
             self.displayed = None;
         }
         #[cfg(target_os = "ios")]
-        if self.displayed.as_ref().is_some_and(|d| {
-            d._ticket.is_cancelled()
-                || d.source.iter().any(|s| s.check_current(renderer).is_err())
-                || renderer.material_state().light_revision() != Ok(d.light_revision)
-                || d.size != [renderer.config.width, renderer.config.height]
-        }) {
-            self.invalidate("displayed producer state changed");
+        if let Some(d) = &self.displayed {
+            let changes = producer_changes(renderer, &d.source, d.light_revision, d.size);
+            if changes.iter().any(Option::is_some) {
+                for (cause, expected, observed) in changes.into_iter().flatten() {
+                    recorder::global().record(
+                        d.attempt,
+                        Stage::Cancelled,
+                        Emitter::Game,
+                        Some(cause),
+                        expected,
+                        observed,
+                    );
+                }
+                self.invalidate("displayed producer state changed");
+            }
         }
         self.camera = (!frame.title).then(|| {
             (
@@ -547,45 +604,21 @@ impl Controller {
             )
         });
         if let Some(f) = &self.flight {
-            if f.source.iter().any(|s| s.check_current(renderer).is_err())
-                || renderer.material_state().light_revision() != Ok(f.light_revision)
-                || f.size != [renderer.config.width, renderer.config.height]
-            {
-                let cause = if f.source.iter().any(|s| s.check_current(renderer).is_err()) {
-                    if f.source.first().is_some_and(|s| {
-                        s.description().identity.generation
-                            == renderer.material_state().generation()
-                    }) {
-                        Cause::MaterialChanged
-                    } else {
-                        Cause::BankStale
+            if !f.cancel.load(Ordering::Acquire) {
+                let changes = producer_changes(renderer, &f.source, f.light_revision, f.size);
+                if changes.iter().any(Option::is_some) {
+                    for (cause, expected, observed) in changes.into_iter().flatten() {
+                        recorder::global().record(
+                            f.attempt,
+                            Stage::Cancelled,
+                            Emitter::Game,
+                            Some(cause),
+                            expected,
+                            observed,
+                        );
                     }
-                } else if renderer.material_state().light_revision() != Ok(f.light_revision) {
-                    Cause::LightmapChanged
-                } else {
-                    Cause::FrameSizeChanged
-                };
-                recorder::global().record(
-                    f.attempt,
-                    Stage::Cancelled,
-                    Emitter::Game,
-                    Some(cause),
-                    if cause == Cause::MaterialChanged {
-                        f.source[0].description().identity.revision
-                    } else if cause == Cause::LightmapChanged {
-                        f.light_revision
-                    } else {
-                        0
-                    },
-                    if cause == Cause::MaterialChanged {
-                        renderer.material_state().animation_revision()
-                    } else if cause == Cause::LightmapChanged {
-                        renderer.material_state().light_revision().unwrap_or(0)
-                    } else {
-                        0
-                    },
-                );
-                f.cancel.store(true, Ordering::Release);
+                    f.cancel.store(true, Ordering::Release);
+                }
             }
             match f.receiver.try_recv() {
                 Ok(result) => {
@@ -630,6 +663,15 @@ impl Controller {
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    recorder::global().record(
+                        f.attempt,
+                        Stage::Cancelled,
+                        Emitter::Game,
+                        Some(Cause::WorkerFailed),
+                        0,
+                        0,
+                    );
+                    self.retry_forbidden = true;
                     self.flight = None;
                     self.finished = true;
                     self.error("native worker disconnected".into())
@@ -669,6 +711,10 @@ impl Controller {
                     0,
                 );
             }
+            return;
+        }
+        #[cfg(target_os = "ios")]
+        if self.mode == Mode::AttachedOneSection && !helium_metal_prototype::attached::can_start() {
             return;
         }
         let Some(g) = self.candidate.take() else {
@@ -833,7 +879,19 @@ impl Controller {
                         attached: Some(ticket),
                     })
                 }
-                Err(e) => self.error(e),
+                Err(e) => {
+                    recorder::global().record(
+                        attempt,
+                        Stage::Cancelled,
+                        Emitter::Game,
+                        Some(Cause::InvalidAbi),
+                        0,
+                        0,
+                    );
+                    self.finished = true;
+                    self.retry_forbidden = true;
+                    self.error(e);
+                }
             }
             return;
         }

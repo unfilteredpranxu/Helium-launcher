@@ -117,6 +117,7 @@ impl Cause {
             "displayed producer state changed" => Self::BankStale,
             "renderer replaced" | "renderer rebuilding" => Self::RendererChanged,
             "world closed" => Self::WorldChanged,
+            "mesh sequence exhausted" => Self::Shutdown,
             _ => Self::Unknown,
         }
     }
@@ -262,11 +263,12 @@ pub struct Event {
     pub expected: u64,
     pub observed: u64,
     pub test_only: bool,
+    pub last_confirmed: u32,
 }
 impl Event {
     pub fn json(&self) -> String {
         format!(
-            "{{\"schema_version\":2,\"boot_id\":{},\"event_seq\":{},\"attempt_id\":{},\"world_epoch\":{},\"monotonic_ns\":{},\"stage_code\":{},\"stage\":\"{:?}\",\"emitter_code\":{},\"emitter\":\"{:?}\",\"cause_code\":{},\"cause\":\"{:?}\",\"first\":{},\"expected\":{},\"observed\":{},\"test_only\":{}}}\n",
+            "{{\"schema_version\":2,\"boot_id\":{},\"event_seq\":{},\"attempt_id\":{},\"world_epoch\":{},\"monotonic_ns\":{},\"stage_code\":{},\"stage\":\"{:?}\",\"emitter_code\":{},\"emitter\":\"{:?}\",\"cause_code\":{},\"cause\":\"{:?}\",\"first\":{},\"expected\":{},\"observed\":{},\"test_only\":{},\"last_confirmed_stage\":{}}}\n",
             self.boot,
             self.seq,
             self.attempt,
@@ -281,7 +283,8 @@ impl Event {
             self.first,
             self.expected,
             self.observed,
-            self.test_only
+            self.test_only,
+            self.last_confirmed
         )
     }
     fn parse(line: &str) -> Option<Self> {
@@ -295,15 +298,18 @@ impl Event {
         if n(line, "schema_version")? != 2 {
             return None;
         }
-        let code = n(line, "cause_code")? as u32;
+        let code = u32::try_from(n(line, "cause_code")?).ok()?;
+        if code > 41 {
+            return None;
+        }
         Some(Self {
             boot: n(line, "boot_id")?,
             seq: n(line, "event_seq")?,
             attempt: n(line, "attempt_id")?,
             world: n(line, "world_epoch")?,
             nanos: u128::from(n(line, "monotonic_ns")?),
-            stage: Stage::from_code(n(line, "stage_code")? as u32)?,
-            emitter: Emitter::from_code(n(line, "emitter_code")? as u32)?,
+            stage: Stage::from_code(u32::try_from(n(line, "stage_code")?).ok()?)?,
+            emitter: Emitter::from_code(u32::try_from(n(line, "emitter_code")?).ok()?)?,
             cause: if code == 0 {
                 None
             } else {
@@ -313,6 +319,7 @@ impl Event {
             expected: n(line, "expected")?,
             observed: n(line, "observed")?,
             test_only: line.contains("\"test_only\":true"),
+            last_confirmed: u32::try_from(n(line, "last_confirmed_stage").unwrap_or(0)).ok()?,
         })
     }
 }
@@ -507,6 +514,24 @@ impl Recorder {
         }) {
             return;
         }
+        if id == 0
+            && cause.is_some_and(|c| {
+                matches!(
+                    c,
+                    Cause::AppInactive
+                        | Cause::MemoryPressure
+                        | Cause::Shutdown
+                        | Cause::WorldChanged
+                )
+            })
+        {
+            let ids = s.attempts.iter().map(|a| a.0).collect::<Vec<_>>();
+            for id in ids {
+                if !s.blocked.contains(&id) {
+                    s.blocked.push(id);
+                }
+            }
+        }
         if id != 0
             && cause.is_some_and(|c| {
                 matches!(
@@ -540,6 +565,23 @@ impl Recorder {
             return;
         };
         s.seq = seq;
+        let last_confirmed = s
+            .events
+            .iter()
+            .rev()
+            .find(|e| e.attempt == id)
+            .map(|e| {
+                if matches!(
+                    e.stage,
+                    Stage::Cancelled | Stage::Removed | Stage::RetryWaiting | Stage::RetryExhausted
+                ) || e.stage as u32 >= 35
+                {
+                    e.last_confirmed
+                } else {
+                    e.stage as u32
+                }
+            })
+            .unwrap_or(0);
         let e = Event {
             boot: s.boot,
             seq,
@@ -553,6 +595,7 @@ impl Recorder {
             expected,
             observed,
             test_only: self.test_only,
+            last_confirmed,
         };
         if id == 0 || s.attempts.last().is_some_and(|a| a.0 == id) {
             match stage {
@@ -561,6 +604,9 @@ impl Recorder {
                 }
                 Stage::BankCompleted => {
                     s.fields[0] += 1;
+                }
+                Stage::MaterialRevision => {
+                    s.fields[4] = expected;
                 }
                 Stage::CameraReady => {
                     s.fields[2] = expected;
@@ -745,12 +791,7 @@ impl Store {
         report.push_str("FIRST CAUSES (priority retained, at most 3):\n");
         for e in &s.first {
             report.push_str(&format!("Attempt {} FIRST CAUSE {:?} emitter={:?} last confirmed stage before cancel retained in timeline\n",e.attempt,e.cause,e.emitter));
-            let last = s
-                .events
-                .iter()
-                .rev()
-                .find(|v| v.attempt == e.attempt && v.seq < e.seq && v.stage != Stage::Cancelled)
-                .map(|v| v.stage);
+            let last = Stage::from_code(e.last_confirmed);
             report.push_str(&format!("Last confirmed stage at first cause: {last:?}\n"));
             report.push_str(&e.json());
         }
