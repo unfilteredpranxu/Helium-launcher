@@ -120,18 +120,15 @@ impl Geometry {
         }
     }
 }
-fn bank_zero_layers(
+fn production_layers(
     snapshot: &horizon_client_render::gfx::material_snapshot::Snapshot,
 ) -> Result<usize, String> {
-    let bank = snapshot
-        .banks()
-        .first()
-        .ok_or("production snapshot has no bank zero")?;
-    if bank.allocated() > 512 || snapshot.split() > 512 {
-        return Err("production split/array exceeds v2 512 policy".into());
+    if snapshot.split() == 0 || snapshot.split() > 2048 || snapshot.banks().len() > 8 {
+        return Err("unsupported production namespace".into());
     }
     Ok(snapshot.sprites() as usize)
 }
+
 fn section_origin(key: Key, min_y: i32) -> Result<[i32; 3], String> {
     Ok([
         key.0.checked_mul(16).ok_or("section X overflow")?,
@@ -266,7 +263,7 @@ impl Controller {
                     mesh,
                     state.generation(),
                     self.sequence,
-                    bank_zero_layers(snapshot)?,
+                    production_layers(snapshot)?,
                 )
             });
         self.counters.preparation_us += start.elapsed().as_micros();
@@ -838,17 +835,16 @@ mod ownership_tests {
 mod bank_tests {
     use super::*;
     #[test]
-    fn real_prepared_metadata_rejects_512_before_geometry_retention() {
+    fn real_prepared_metadata_retains_namespace_without_bank_zero_assumption() {
         use horizon_client_render::gfx::PreparedTextures;
         let pixels = vec![255; 512 * 4];
         let p = PreparedTextures::new(&pixels, 1, 512, &[], (&[255; 4], 1))
             .retain_material_snapshot(1 << 20);
         let s = p.capture_materials(1, 512, false);
-        let error = bank_zero_layers(s.snapshot().unwrap()).unwrap_err();
-        assert!(error.contains("512 policy"));
+        assert_eq!(production_layers(s.snapshot().unwrap()).unwrap(), 512);
         let p = PreparedTextures::new(&pixels[..256 * 4], 1, 256, &[], (&[255; 4], 1))
             .retain_material_snapshot(1 << 20);
         let s = p.capture_materials(1, 256, false);
-        assert!(bank_zero_layers(s.snapshot().unwrap()).is_err());
+        assert_eq!(production_layers(s.snapshot().unwrap()).unwrap(), 256);
     }
 }

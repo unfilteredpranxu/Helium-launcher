@@ -175,6 +175,7 @@ impl<S: Source + Send + Sync + 'static> Frames<S> {
         let (stamp, source, sprites) = material.resident(renderer, authority)?;
         let d = source.description();
         let bindings = material.bindings()?;
+        let source_payload = material.source_payload()?;
         let layout = if material.is_banked() {
             let ds = material.descriptions();
             crate::banks::check_mesh(mesh, &ds)?;
@@ -192,7 +193,7 @@ impl<S: Source + Send + Sync + 'static> Frames<S> {
             )?;
             layout.payload_bytes = layout
                 .payload_bytes
-                .checked_add(material.source_payload()?)
+                .checked_add(source_payload)
                 .ok_or("frame group overflow")?;
             if layout.payload_bytes > options.budget.payload_bytes {
                 return Err("banked frame budget exceeded".into());
@@ -203,7 +204,7 @@ impl<S: Source + Send + Sync + 'static> Frames<S> {
                 mesh,
                 d,
                 material.counters().texture_payload,
-                material.source_payload()?,
+                source_payload,
                 lightmap,
                 view,
                 options,
@@ -317,16 +318,9 @@ impl<S: Source + Send + Sync + 'static> Frames<S> {
             protocol.encoded()?;
             // Full frame payload conservatively occupies this shared slot until
             // terminal cleanup; not an assertion about physical allocator bytes.
-            permit.account(
-                material.counters().texture_payload,
-                4096,
-                source.retained_bytes(),
-            );
+            permit.account(material.counters().texture_payload, 4096, source_payload);
             permit.account_frame(
-                layout.payload_bytes
-                    - source.retained_bytes()
-                    - material.counters().texture_payload
-                    - 8192,
+                layout.payload_bytes - source_payload - material.counters().texture_payload - 8192,
             );
             let lease = Arc::new(Lease {
                 _sources: material.sources(),

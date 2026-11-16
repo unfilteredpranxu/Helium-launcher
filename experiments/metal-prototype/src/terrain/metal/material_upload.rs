@@ -112,6 +112,45 @@ impl<S: Source> Material<S> {
             self.texture.as_ref().ok_or("material released")?.clone(),
         ))
     }
+    /// Reuse exact completed GPU bytes after an unrelated bank animation changes.
+    /// No GPU completion is fabricated: the old command's bytes must be identical.
+    pub fn adopt_unchanged(
+        &mut self,
+        renderer: &TerrainRenderer,
+        source: S,
+        authority: &S::Authority,
+        budget: Budget,
+    ) -> Result<(), String> {
+        let _permit = renderer.upload_slot.acquire()?;
+        if self.pending.is_some()
+            || self.device_id != renderer.upload_device
+            || self.texture.is_none()
+        {
+            return Err("busy/released/wrong-device bank".into());
+        }
+        self.record.residency()?;
+        source.check_current(authority)?;
+        let old = self.source.as_ref().ok_or("missing completed bank")?;
+        let d = source.description();
+        let mut expected = self.description;
+        expected.identity.revision = d.identity.revision;
+        if d != expected
+            || d.identity.revision <= self.description.identity.revision
+            || source.pixels() != old.pixels()
+        {
+            return Err("changed bytes/layout/generation require upload".into());
+        }
+        let bytes = crate::banks::source_bytes([&source, &**old].into_iter())?
+            .checked_add(self.counters().texture_payload)
+            .ok_or("adoption budget overflow")?;
+        if bytes > budget.payload_bytes {
+            return Err("adoption budget exceeded".into());
+        }
+        self.record.rebind_identical(d.identity)?;
+        self.source = Some(Arc::new(source));
+        self.description = d;
+        Ok(())
+    }
     pub fn bank_mut(&mut self, bank: u32) -> Result<&mut Self, String> {
         if self.description.bank == bank {
             Ok(self)

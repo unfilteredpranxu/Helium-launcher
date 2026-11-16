@@ -626,6 +626,7 @@ fn native_512_banks_sample_high_slices_without_global_aliases() {
         height: 16,
         ..Options::default()
     };
+    let original_sources = sources.clone();
     for source in sources {
         let bank = source.description.bank;
         group
@@ -712,6 +713,90 @@ fn native_512_banks_sample_high_slices_without_global_aliases() {
             }
         }
     }
+    // New animation revision: unchanged banks retain completed textures, changed
+    // bank uploads only its first layer. Mixed revisions must reject while staged.
+    a.identity.revision = 2;
+    let mut changed = original_sources[1].clone();
+    changed.description.identity = a.identity;
+    Arc::make_mut(&mut changed.pixels)[0] = 99;
+    let mut same = original_sources[0].clone();
+    same.description.identity = a.identity;
+    group
+        .bank_mut(0)
+        .unwrap()
+        .adopt_unchanged(&r, same, &a, budget())
+        .unwrap();
+    assert!(
+        frames
+            .begin(
+                &r,
+                &group,
+                &a,
+                &Mesh::from_vertices(&vertices, &indices),
+                &light,
+                View::identity(),
+                options
+            )
+            .is_err()
+    );
+    let mut same = original_sources[2].clone();
+    same.description.identity = a.identity;
+    group
+        .bank_mut(2)
+        .unwrap()
+        .adopt_unchanged(&r, same, &a, budget())
+        .unwrap();
+    group
+        .bank_mut(1)
+        .unwrap()
+        .begin_upload(
+            &r,
+            changed,
+            &a,
+            Update::Layers { first: 0, count: 1 },
+            budget(),
+        )
+        .unwrap();
+    loop {
+        match group.bank_mut(1).unwrap().poll_upload(&r, &a) {
+            Poll::Completed(_) => break,
+            Poll::Pending => std::thread::sleep(std::time::Duration::from_millis(1)),
+            _ => panic!("partial bank update failed"),
+        }
+    }
+    while r.upload_retention().busy {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(group.bank_mut(0).unwrap().counters().completed_uploads, 1);
+    assert_eq!(group.bank_mut(2).unwrap().counters().completed_uploads, 1);
+    assert_eq!(group.bank_mut(1).unwrap().counters().upload_bytes, 2052);
+    frames
+        .begin(
+            &r,
+            &group,
+            &a,
+            &Mesh::from_vertices(&vertices, &indices),
+            &light,
+            View::identity(),
+            options,
+        )
+        .unwrap();
+    let mut receipt = loop {
+        match frames.poll(&r, &group, &a) {
+            frame::Poll::Completed(t) => break t,
+            frame::Poll::Pending => std::thread::sleep(std::time::Duration::from_millis(1)),
+            _ => panic!("updated bank draw failed"),
+        }
+    };
+    while r.upload_retention().busy {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let image = frames
+        .take_completed(&r, &group, &a, &mut receipt)
+        .unwrap()
+        .readback_for_validation(1 << 20)
+        .unwrap();
+    assert_eq!(image.rgba[(8 * 96 + 72) * 4], 99);
     a.live = false;
     assert!(
         frames

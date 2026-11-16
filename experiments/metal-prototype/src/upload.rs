@@ -421,6 +421,18 @@ pub(crate) struct Record<G> {
     allow(dead_code)
 )]
 impl<G: Copy + Eq> Record<G> {
+    /// Same GPU bytes/owner, newer CPU animation revision; caller must prove
+    /// exact byte equality. No new upload receipt or command completion is issued.
+    pub(crate) fn rebind_identical(&mut self, identity: Identity<G>) -> Result<(), String> {
+        if self.phase() != Phase::Completed
+            || identity.generation != self.ticket.identity.generation
+            || identity.revision <= self.ticket.identity.revision
+        {
+            return Err("invalid unchanged residency adoption".into());
+        }
+        self.ticket.identity = identity;
+        Ok(())
+    }
     pub(crate) fn residency(&self) -> Result<Stamp<G>, String> {
         if self.phase() != Phase::Completed {
             return Err("no successful completed residency".into());

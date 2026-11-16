@@ -10,7 +10,7 @@ pub fn validate<G: Copy + Eq>(descriptions: &[Description<G>]) -> Result<(), Str
     let first = descriptions.first().ok_or("empty bank set")?;
     if descriptions.len() > 8
         || first.split == 0
-        || first.split > 512
+        || first.split > 2048
         || first.sprites == 0
         || first.sprites > 32768
         || first.sprites.div_ceil(first.split) > 8
@@ -52,7 +52,7 @@ pub fn validate<G: Copy + Eq>(descriptions: &[Description<G>]) -> Result<(), Str
     Ok(())
 }
 pub fn required(mesh: &Mesh<'_>, split: u32, sprites: u32) -> Result<Vec<u32>, String> {
-    if split == 0 || split > 512 || sprites == 0 || sprites.div_ceil(split) > 8 {
+    if split == 0 || split > 2048 || sprites == 0 || sprites.div_ceil(split) > 8 {
         return Err("invalid sprite namespace".into());
     }
     mesh.validate(sprites as usize)?;
