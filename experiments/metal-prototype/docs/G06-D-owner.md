@@ -12,3 +12,10 @@ It is the actual Rust game, not Metal Probe. No Minecraft resources are bundled.
 The HUD reports exact first causes, bank progress, generation/light revision, recorder acknowledgement, losses/degradation and fallback. `TEST_ONLY` CI reports are synthetic infrastructure tests and are never physical-device evidence. If recorder storage fails, the HUD says DEGRADED; do not regard an older disk report as a complete timeline.
 
 Prepared resources remain private and are neither committed nor uploaded by this diagnostic. Existing imports/worlds are reused; the diagnostic does not alter saves, artwork, shader settings or geometry. No continuous direct-Metal gameplay/FPS claim.
+
+Qualified build: source `f709821676d4fc2c0ccf9f9b49ce40d0fc1a0aab`,
+[green CI run](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/43927386632),
+[one final unsigned-game artifact](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/43927386632/artifacts/14260916522).
+The artifact includes `verified.log`; the unsigned executable SHA-256 is
+`f495c89bbfe60709a79796a1e1d331bdc71b370e1f4fffa4df20a148abe425f2`.
+Physical native terrain and the original first cause remain pending your run.
