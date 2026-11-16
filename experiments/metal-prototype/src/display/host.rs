@@ -108,7 +108,15 @@ impl Source for Fixture {
 }
 fn drive(layer: Retained<CAMetalLayer>, t: &Token) -> Result<(), String> {
     let r = TerrainRenderer::new()?;
-    let mut display = r.display(layer)?;
+    // Same private GPU-confirmed reveal gate as the game attachment. This probe
+    // is a synthetic fixture; it supplies native test evidence, not a world.
+    let gate = Arc::new(crate::attached_protocol::Gate::new(Arc::new(
+        AtomicBool::new(false),
+    )));
+    if !gate.start() || !gate.claim_display() {
+        return Err("probe attachment gate claim failed".into());
+    }
+    let mut display = r.display(layer)?.with_attachment(gate.clone());
     let chart = validation::fixture();
     let mut pixels = Vec::with_capacity(60);
     for layer in chart.sprites.chunks_exact(16) {
@@ -166,8 +174,15 @@ fn drive(layer: Retained<CAMetalLayer>, t: &Token) -> Result<(), String> {
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
     if t.cancelled.load(Ordering::Acquire) {
+        gate.cancel();
         return Err("presentation revoked".into());
     }
+    if !gate.finish(true) || !gate.publish() {
+        return Err("probe missing exact native presentation confirmation".into());
+    }
+    eprintln!(
+        "G06-C private reveal gate confirmed by exact successful native presentation command"
+    );
     t.status.store(3, Ordering::Release);
     Ok(())
 }

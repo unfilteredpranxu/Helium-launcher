@@ -6,12 +6,16 @@ use std::sync::{
 pub(crate) struct Gate {
     state: AtomicU8,
     cancel: Arc<AtomicBool>,
+    claimed: AtomicBool,
+    native_confirmed: AtomicBool,
 }
 impl Gate {
     pub fn new(cancel: Arc<AtomicBool>) -> Self {
         Self {
             state: AtomicU8::new(1),
             cancel,
+            claimed: AtomicBool::new(false),
+            native_confirmed: AtomicBool::new(false),
         }
     }
     pub fn start(&self) -> bool {
@@ -21,15 +25,33 @@ impl Gate {
                 .compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
     }
-    /// Called only after the owned worker returns. Native worker success itself
-    /// requires exact upload/draw/present command completion, not this CPU gate.
-    pub fn finish(&self, success: bool) {
-        let _ = self.state.compare_exchange(
-            2,
-            if success { 3 } else { 4 },
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+    pub fn claim_display(&self) -> bool {
+        self.running()
+            && !self.cancelled()
+            && self
+                .claimed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
+    /// Crate-private: ONLY the exact Presentation::poll successful terminal path
+    /// calls this in production. No public receipt/status setter can confirm it.
+    pub fn native_completed(&self) {
+        if self.running() && !self.cancelled() && self.claimed.load(Ordering::Acquire) {
+            self.native_confirmed.store(true, Ordering::Release);
+        }
+    }
+    pub fn finish(&self, success: bool) -> bool {
+        let verified =
+            success && !self.cancelled() && self.native_confirmed.load(Ordering::Acquire);
+        self.state
+            .compare_exchange(
+                2,
+                if verified { 3 } else { 4 },
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+            && verified
     }
     pub fn publish(&self) -> bool {
         !self.cancelled()
@@ -65,7 +87,10 @@ mod tests {
         assert!(g.start());
         assert!(!g.start());
         assert!(!g.publish());
-        g.finish(true);
+        assert!(g.claim_display());
+        assert!(!g.claim_display());
+        g.native_completed(); // SIMULATED terminal event, no GPU in this CPU test
+        assert!(g.finish(true));
         assert!(!g.published());
         assert!(g.publish());
         assert!(g.published());
@@ -73,6 +98,17 @@ mod tests {
         assert!(!g.start());
         g.finish(false);
         assert!(g.published());
+    }
+    #[test]
+    fn worker_ok_without_native_command_confirmation_cannot_publish() {
+        let g = gate();
+        assert!(g.start());
+        assert!(g.claim_display());
+        assert!(!g.finish(true));
+        assert!(!g.publish());
+        g.native_completed();
+        assert!(!g.finish(true));
+        assert!(!g.publish());
     }
     #[test]
     fn cancellation_keeps_pending_retirement_distinct() {
@@ -104,7 +140,9 @@ mod tests {
         let old = gate();
         assert!(old.start());
         let new = gate();
-        old.finish(true);
+        assert!(old.claim_display());
+        old.native_completed(); // simulated
+        assert!(old.finish(true));
         assert!(!new.publish());
         assert!(old.publish());
         old.cancel();

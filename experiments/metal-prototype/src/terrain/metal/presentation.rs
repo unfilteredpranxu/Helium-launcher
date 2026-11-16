@@ -52,6 +52,7 @@ fn retain_layer_for_command(command: &ProtocolObject<dyn MTLCommandBuffer>, laye
     }
 }
 pub struct Display {
+    completion: Option<Arc<crate::attached_protocol::Gate>>,
     layer: Retained<CAMetalLayer>,
     device: crate::upload::Id,
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
@@ -145,6 +146,7 @@ impl TerrainRenderer {
             .newRenderPipelineStateWithDescriptor_error(&desc)
             .map_err(|e| format!("display pipeline: {e}"))?;
         Ok(Display {
+            completion: None,
             layer,
             device: self.upload_device,
             pipeline,
@@ -155,6 +157,10 @@ impl TerrainRenderer {
     }
 }
 impl Display {
+    pub(crate) fn with_attachment(mut self, gate: Arc<crate::attached_protocol::Gate>) -> Self {
+        self.completion = Some(gate);
+        self
+    }
     pub fn counters(&self) -> display::Counters {
         self.progress.counters
     }
@@ -331,6 +337,11 @@ impl<S: Source> Presentation<'_, S> {
         };
         let result = self.display.progress.observe(terminal, !self.invalid);
         self.terminal = terminal.is_some();
+        if result == Ok(true) {
+            if let Some(gate) = &self.display.completion {
+                gate.native_completed();
+            }
+        }
         result.map_err(|e| format!("{e}: {status:?}, {:?}", self.command.error()))
     }
 }
@@ -340,43 +351,63 @@ mod tests {
     #[test]
     #[ignore = "real Metal command/layer ownership and terminal retirement; NOT attached UIKit runtime"]
     fn native_command_owns_layer_until_terminal_without_view_or_rust_session() {
-        use objc2::rc::Weak;
+        use objc2::{ffi::objc_getAssociatedObject, rc::Weak};
         use std::time::{Duration, Instant};
         let renderer = TerrainRenderer::new().unwrap();
-        let weak = autoreleasepool(|_| {
+        let baseline = autoreleasepool(|_| {
+            let layer = CAMetalLayer::new();
+            let weak = Weak::from_retained(&layer);
+            drop(layer);
+            weak
+        });
+        eprintln!(
+            "G06-C baseline CAMetalLayer weakly observable after original owner/pool release: {}",
+            baseline.load().is_some()
+        );
+        autoreleasepool(|_| {
             let layer = CAMetalLayer::new();
             let weak = Weak::from_retained(&layer);
             let command = renderer.queue.commandBuffer().unwrap();
             retain_layer_for_command(&command, &layer);
-            drop(layer); // no UI/Display/session owns it now
+            let associated = || unsafe {
+                objc_getAssociatedObject(
+                    std::ptr::from_ref(&*command).cast(),
+                    std::ptr::from_ref(&LAYER_OWNER_KEY).cast(),
+                )
+            };
+            assert_eq!(
+                associated(),
+                std::ptr::from_ref(&*layer).cast(),
+                "exact native command owns exact layer"
+            );
+            drop(layer);
             assert!(
                 weak.load().is_some(),
-                "exact unsubmitted command retains native layer"
+                "unsubmitted command lease survives UI/Rust owner release"
             );
-            command.commit(); // tiny command may complete before first poll
+            command.commit(); // may complete before first poll
             let deadline = Instant::now() + Duration::from_secs(10);
             while !matches!(
                 command.status(),
                 MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error
             ) {
                 assert!(Instant::now() < deadline, "native command deadline");
-                std::thread::sleep(Duration::from_millis(1)); // diagnostic worker ONLY
+                std::thread::sleep(Duration::from_millis(1));
             }
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
             assert!(command.error().is_none());
-            weak
-        });
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while weak.load().is_some() {
-            assert!(
-                Instant::now() < deadline,
-                "layer owner must retire after actual Metal completion"
+            while !associated().is_null() {
+                assert!(
+                    Instant::now() < deadline,
+                    "exact native layer lease must retire at real terminal execution"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            eprintln!(
+                "G06-C exact native command layer association cleared at terminal success; remaining native/autorelease liveness={} is not this command lease",
+                weak.load().is_some()
             );
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        eprintln!(
-            "G06-C native command retained layer after UI/Rust owner release, actual terminal success retired it; no attached window/scanout claim"
-        );
+        });
     }
     #[test]
     #[ignore = "real Metal presentation-pass channel/alpha/orientation diagnostic; no drawable or scanout claim"]

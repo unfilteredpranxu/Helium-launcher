@@ -166,6 +166,7 @@ jobs:
             await github.rest.checks.create({owner:context.repo.owner,repo:context.repo.repo,head_sha:context.sha,name:'Helium production bridge evidence',status:'completed',conclusion:'neutral',output:{title:'Read individual compilation logs; not gameplay runtime proof',summary}});
 
   attached-ios-game:
+    needs: apple-sdk
     runs-on: macos-26
     timeout-minutes: 90
     env:

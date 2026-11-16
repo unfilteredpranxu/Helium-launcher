@@ -125,5 +125,5 @@ mod apple_tests {
 #[cfg(target_os = "ios")]
 pub mod attached;
 
-#[cfg(any(target_os = "ios", test))]
+#[cfg(any(target_os = "ios", target_os = "macos", test))]
 mod attached_protocol;

@@ -29,10 +29,16 @@ pub struct Ticket {
 pub struct Layer {
     layer: Retained<CAMetalLayer>,
     id: u64,
+    gate: Arc<Gate>,
 }
 impl Layer {
     pub fn display(&self, renderer: &TerrainRenderer) -> Result<Display, String> {
-        renderer.display(self.layer.clone())
+        if !self.gate.claim_display() {
+            return Err("attached target already claimed, cancelled or not running".into());
+        }
+        Ok(renderer
+            .display(self.layer.clone())?
+            .with_attachment(self.gate.clone()))
     }
     pub fn generation(&self) -> u64 {
         self.id
@@ -118,7 +124,11 @@ extern "C" fn run(id: u64, p: *mut AnyObject) {
         }
         let layer =
             unsafe { Retained::retain(p.cast::<CAMetalLayer>()) }.ok_or("layer retain failed")?;
-        work(Layer { layer, id });
+        work(Layer {
+            layer,
+            id,
+            gate: status.clone(),
+        });
         Ok(())
     }));
     if !matches!(result, Ok(Ok(()))) {
@@ -175,9 +185,15 @@ pub fn submit<T: Send + 'static>(
             cancel: cancel.clone(),
             status,
             work: Some(Box::new(move |layer| {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(layer)))
-                    .unwrap_or_else(|_| Err("native worker panic".into()));
-                state.finish(result.is_ok());
+                let mut result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(layer)))
+                        .unwrap_or_else(|_| Err("native worker panic".into()));
+                if !state.finish(result.is_ok()) && result.is_ok() {
+                    result = Err(
+                        "worker returned without a current exact native presentation completion"
+                            .into(),
+                    );
+                }
                 let _ = send.send(result);
             })),
         });
