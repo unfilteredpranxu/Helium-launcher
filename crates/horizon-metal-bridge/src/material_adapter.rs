@@ -360,6 +360,9 @@ impl helium_metal_prototype::upload::Source for BankSource {
     fn retained_bytes(&self) -> usize {
         self.snapshot.retained_bytes()
     }
+    fn retention_key(&self) -> Option<(usize, usize)> {
+        Some((std::sync::Arc::as_ptr(&self.snapshot) as usize, 0))
+    }
     fn check_current(&self, renderer: &Renderer) -> Result<(), String> {
         renderer
             .validate_material_snapshot_mode()

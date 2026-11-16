@@ -276,6 +276,32 @@ pub(crate) fn resource_layout_mode(
     options: Options,
     caps: &Capabilities,
 ) -> Result<ResourceLayout, String> {
+    resource_layout_ceiling(
+        mesh,
+        extent,
+        texture_bytes,
+        upload_atlas,
+        readback,
+        lightmap,
+        view,
+        options,
+        caps,
+        TEXTURE_LAYER_CEILING,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resource_layout_ceiling(
+    mesh: &Mesh<'_>,
+    extent: (usize, usize, usize),
+    texture_bytes: usize,
+    upload_atlas: bool,
+    readback: bool,
+    lightmap: &[u8],
+    view: View,
+    options: Options,
+    caps: &Capabilities,
+    ceiling: usize,
+) -> Result<ResourceLayout, String> {
     let (width, height, layers) = extent;
     if !caps.baseline() || caps.sample_counts & (1 << 1) == 0 {
         return Err("unrecognized Metal baseline; no inferred capabilities".into());
@@ -283,7 +309,7 @@ pub(crate) fn resource_layout_mode(
     if width == 0
         || height == 0
         || layers == 0
-        || layers > TEXTURE_LAYER_CEILING
+        || layers > ceiling
         || [width, height, options.width, options.height]
             .iter()
             .any(|&n| n == 0 || n > TEXTURE_SIDE_CEILING)

@@ -190,7 +190,7 @@ fn malformed_descriptors_and_device_policy_fail_before_staging() {
     for mutation in 0..13 {
         let mut s = original.clone();
         match mutation {
-            0 => s.description.version = 2,
+            0 => s.description.version = u32::MAX,
             1 => s.description.format = material::Format::Rgba8Srgb,
             2 => s.description.layout = Layout::Other,
             3 => s.description.size = 3,
@@ -500,5 +500,248 @@ fn immutable_plan_and_exact_256_slice_policy_boundary() {
         Plan::prepare(&source, &a, None, Update::Full, &caps(), budget())
             .unwrap_err_string()
             .contains("G02")
+    );
+}
+
+#[test]
+fn banked_namespace_uses_real_vertex_ids_without_padding_aliases() {
+    use crate::{
+        banks,
+        terrain::{Mesh, OPAQUE_LAYER, TerrainVertex},
+    };
+    let (mut source, _) = fixture();
+    source.description.version = BANKED_VERSION;
+    source.description.split = 512;
+    source.description.sprites = 1540;
+    source.description.used = 512;
+    source.description.allocated = 512;
+    let mut ds = Vec::new();
+    for bank in 0..4 {
+        let mut d = source.description;
+        d.bank = bank;
+        d.used = if bank == 3 { 4 } else { 512 };
+        d.allocated = d.used;
+        ds.push(d);
+    }
+    let ids = [0, 511, 512, 1027, 1536, 1539];
+    let vertices: Vec<_> = ids
+        .iter()
+        .flat_map(|&id| {
+            [TerrainVertex {
+                pos: [0.; 3],
+                uv: [0; 2],
+                layer: OPAQUE_LAYER | id,
+                light: 0,
+                color: 0x91ffffff,
+            }; 3]
+        })
+        .collect();
+    let indices: Vec<_> = (0..vertices.len() as u32).collect();
+    let mesh = Mesh::from_vertices(&vertices, &indices);
+    banks::check_mesh(&mesh, &ds).unwrap();
+    assert_eq!(banks::required(&mesh, 512, 1540).unwrap(), [0, 1, 2, 3]);
+    for missing in 0..4 {
+        let subset: Vec<_> = ds
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| (i != missing).then_some(*d))
+            .collect();
+        assert!(banks::check_mesh(&mesh, &subset).is_err());
+    }
+    for change in 0..5 {
+        let mut bad = ds.clone();
+        match change {
+            0 => bad[1].identity.revision += 1,
+            1 => bad[1].identity.generation += 1,
+            2 => bad[3].used = 5,
+            3 => bad[0].levels = 1,
+            _ => bad[0].split = 0,
+        };
+        assert!(banks::check_mesh(&mesh, &bad).is_err());
+    }
+    let mut bad = vertices.clone();
+    bad[0].layer = 1540;
+    assert!(banks::check_mesh(&Mesh::from_vertices(&bad, &indices), &ds).is_err());
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[test]
+#[ignore = "real Metal 512-slice and cross-bank independent full-image oracle"]
+fn native_512_banks_sample_high_slices_without_global_aliases() {
+    use crate::{
+        frame,
+        terrain::{Mesh, OPAQUE_LAYER, Options, TerrainRenderer, TerrainVertex, View},
+    };
+    let r = TerrainRenderer::new().unwrap();
+    let (base, mut a) = fixture();
+    let mut sources = Vec::new();
+    for bank in 0..3u32 {
+        let mut s = base.clone();
+        s.description.version = BANKED_VERSION;
+        s.description.split = 512;
+        s.description.sprites = 1027;
+        s.description.bank = bank;
+        s.description.used = if bank == 2 { 3 } else { 512 };
+        s.description.allocated = if bank == 2 { 4 } else { 512 };
+        s.description.size = 1;
+        s.description.levels = 1;
+        s.pixels = Arc::new(
+            (0..s.description.allocated)
+                .flat_map(|local| {
+                    let id = bank * 512 + local;
+                    [
+                        (id % 251) as u8,
+                        ((id / 251) * 37) as u8,
+                        (255 - id % 251) as u8,
+                        if id == 1026 { 0 } else { 255 },
+                    ]
+                })
+                .collect(),
+        );
+        sources.push(s);
+    }
+    let mut group = r.create_material_set(&sources, &a, budget()).unwrap();
+    let ids = [0u16, 255, 256, 511, 512, 1026];
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for (i, &id) in ids.iter().enumerate() {
+        let x = -1. + i as f32 / 3.;
+        let end = -1. + (i + 1) as f32 / 3.;
+        let base = vertices.len() as u32;
+        for pos in [[x, -1., 0.5], [end, -1., 0.5], [end, 1., 0.5], [x, 1., 0.5]] {
+            vertices.push(TerrainVertex {
+                pos,
+                uv: [0; 2],
+                layer: if i == 5 { id } else { OPAQUE_LAYER | id },
+                light: 0,
+                color: 0x91ffffff,
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    let mut frames = r.create_frames().unwrap();
+    let light = [255u8; 1024];
+    let options = Options {
+        width: 96,
+        height: 16,
+        ..Options::default()
+    };
+    for source in sources {
+        let bank = source.description.bank;
+        group
+            .bank_mut(bank)
+            .unwrap()
+            .begin_upload(&r, source, &a, Update::Full, budget())
+            .unwrap();
+        loop {
+            match group.bank_mut(bank).unwrap().poll_upload(&r, &a) {
+                Poll::Completed(_) => break,
+                Poll::Pending => std::thread::sleep(std::time::Duration::from_millis(1)),
+                _ => panic!("bank upload failed"),
+            }
+        }
+        while r.upload_retention().busy {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if bank < 2 {
+            assert!(
+                frames
+                    .begin(
+                        &r,
+                        &group,
+                        &a,
+                        &Mesh::from_vertices(&vertices, &indices),
+                        &light,
+                        View::identity(),
+                        options
+                    )
+                    .is_err()
+            );
+        }
+    }
+    for opaque in [false, true] {
+        if opaque {
+            for v in &mut vertices[20..] {
+                v.layer |= OPAQUE_LAYER;
+            }
+        }
+        frames
+            .begin(
+                &r,
+                &group,
+                &a,
+                &Mesh::from_vertices(&vertices, &indices),
+                &light,
+                View::identity(),
+                options,
+            )
+            .unwrap();
+        let mut receipt = loop {
+            match frames.poll(&r, &group, &a) {
+                frame::Poll::Completed(t) => break t,
+                frame::Poll::Pending => std::thread::sleep(std::time::Duration::from_millis(1)),
+                _ => panic!("banked frame failed"),
+            }
+        };
+        while r.upload_retention().busy {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let image = frames
+            .take_completed(&r, &group, &a, &mut receipt)
+            .unwrap()
+            .readback_for_validation(1 << 20)
+            .unwrap();
+        for y in 0..16 {
+            for x in 0..96 {
+                let id = ids[x / 16] as u32;
+                let expected = if x >= 80 && !opaque {
+                    [0, 0, 0, 255]
+                } else {
+                    [
+                        (id % 251) as u8,
+                        ((id / 251) * 37) as u8,
+                        (255 - id % 251) as u8,
+                        255,
+                    ]
+                };
+                assert_eq!(
+                    &image.rgba[(y * 96 + x) * 4..][..4],
+                    &expected,
+                    "pixel {x},{y}"
+                );
+            }
+        }
+    }
+    a.live = false;
+    assert!(
+        frames
+            .begin(
+                &r,
+                &group,
+                &a,
+                &Mesh::from_vertices(&vertices, &indices),
+                &light,
+                View::identity(),
+                options
+            )
+            .is_err()
+    );
+    a.live = true;
+    group.bank_mut(1).unwrap().release();
+    assert!(
+        frames
+            .begin(
+                &r,
+                &group,
+                &a,
+                &Mesh::from_vertices(&vertices, &indices),
+                &light,
+                View::identity(),
+                options
+            )
+            .is_err()
+    );
+    eprintln!(
+        "G06-B real GPU 512 arrays, slices 0/255/256/511, 3 banks, partial bank last-used, full image, opaque/cutout and released set passed"
     );
 }

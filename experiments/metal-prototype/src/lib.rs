@@ -3,6 +3,7 @@
 mod scene;
 pub use scene::{Mesh, Vertex, fixture, fixture_camera};
 
+pub mod banks;
 pub mod display;
 pub mod frame;
 pub mod material;

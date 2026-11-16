@@ -24,6 +24,7 @@ pub struct TerrainRenderer {
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     reversed: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
+    banked_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     forward: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     capabilities: Capabilities,
     upload_device: crate::upload::Id,
@@ -123,7 +124,11 @@ impl TerrainRenderer {
             .ok_or("command queue allocation failed")?;
         let library = device
             .newLibraryWithSource_options_error(
-                &NSString::from_str(include_str!("terrain24.metal")),
+                &NSString::from_str(&format!(
+                    "{}\n{}",
+                    include_str!("terrain24.metal"),
+                    include_str!("terrain_banked.metal")
+                )),
                 None,
             )
             .map_err(|e| format!("terrain MSL compilation failed: {e}"))?;
@@ -143,6 +148,14 @@ impl TerrainRenderer {
         let pipeline = device
             .newRenderPipelineStateWithDescriptor_error(&desc)
             .map_err(|e| format!("terrain pipeline failed: {e}"))?;
+        desc.setFragmentFunction(
+            library
+                .newFunctionWithName(&NSString::from_str("terrain_banked_fragment"))
+                .as_deref(),
+        );
+        let banked_pipeline = device
+            .newRenderPipelineStateWithDescriptor_error(&desc)
+            .map_err(|e| format!("banked pipeline: {e}"))?;
         let depth = |compare| {
             let desc = MTLDepthStencilDescriptor::new();
             desc.setDepthCompareFunction(compare);
@@ -157,6 +170,7 @@ impl TerrainRenderer {
             device,
             queue,
             pipeline,
+            banked_pipeline,
             reversed,
             forward,
             capabilities,
@@ -298,6 +312,7 @@ impl TerrainRenderer {
             &depth,
             mesh.indices.len(),
             options,
+            None,
         )?;
         let blit = command
             .blitCommandEncoder()
@@ -351,6 +366,7 @@ impl TerrainRenderer {
         depth: &Texture,
         index_count: usize,
         options: Options,
+        banks: Option<(&Mesh<'_>, &[(u32, Texture)], u32)>,
     ) -> Result<(), String> {
         let pass = MTLRenderPassDescriptor::new();
         // SAFETY: supported color attachment zero.
@@ -376,7 +392,11 @@ impl TerrainRenderer {
         let encoder = command
             .renderCommandEncoderWithDescriptor(&pass)
             .ok_or("render encoder allocation failed")?;
-        encoder.setRenderPipelineState(&self.pipeline);
+        encoder.setRenderPipelineState(if banks.is_some() {
+            &self.banked_pipeline
+        } else {
+            &self.pipeline
+        });
         encoder.setDepthStencilState(Some(if options.depth == Depth::Reversed {
             &self.reversed
         } else {
@@ -398,13 +418,37 @@ impl TerrainRenderer {
             encoder.setVertexBuffer_offset_atIndex(Some(&uniforms), 0, 1);
             encoder.setVertexTexture_atIndex(Some(&lm), 0);
             encoder.setFragmentTexture_atIndex(Some(&sprites), 0);
-            encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
-                MTLPrimitiveType::Triangle,
-                index_count,
-                MTLIndexType::UInt32,
-                &indices,
-                0,
-            );
+            if let Some((mesh, bindings, split)) = banks {
+                for (triangle, triangle_indices) in mesh.indices.chunks_exact(3).enumerate() {
+                    let global =
+                        u32::from(mesh.vertex(triangle_indices[0] as usize)?.layer & !OPAQUE_LAYER);
+                    let bank = global / split;
+                    let first = bank * split;
+                    let texture = &bindings
+                        .iter()
+                        .find(|(id, _)| *id == bank)
+                        .ok_or("missing checked bank")?
+                        .1;
+                    encoder.setFragmentTexture_atIndex(Some(texture), 0);
+                    encoder.setFragmentBytes_length_atIndex(NonNull::from(&first).cast(), 4, 0);
+                    encoder
+                        .drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                            MTLPrimitiveType::Triangle,
+                            3,
+                            MTLIndexType::UInt32,
+                            &indices,
+                            triangle * 12,
+                        );
+                }
+            } else {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    MTLPrimitiveType::Triangle,
+                    index_count,
+                    MTLIndexType::UInt32,
+                    &indices,
+                    0,
+                );
+            }
         }
         encoder.endEncoding();
         Ok(())

@@ -17,6 +17,7 @@ mod slot;
 pub(crate) use slot::{Ownership, Slot};
 pub use slot::{Poll, Retention};
 pub const VERSION: u32 = 1;
+pub const BANKED_VERSION: u32 = 2;
 /// Additive nonblocking API; source descriptions and receipt identity stay v1.
 pub const NONBLOCKING_VERSION: u32 = 1;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -79,6 +80,11 @@ pub trait Source {
     fn pixels(&self) -> &[u8];
     /// All retained source payload (possibly the entire production snapshot).
     fn retained_bytes(&self) -> usize;
+    /// Live CPU ownership identity for accounting ONLY, never resource authority.
+    /// Default conservatively counts independent sources separately.
+    fn retention_key(&self) -> Option<(usize, usize)> {
+        None
+    }
     fn check_current(&self, authority: &Self::Authority) -> Result<(), String>;
 }
 #[derive(Clone, Copy, Debug)]
@@ -163,11 +169,14 @@ impl<G: Copy + Eq + Debug> Plan<G> {
     ) -> Result<Self, String> {
         source.check_current(authority)?;
         let d = source.description();
-        if d.version != VERSION
+        if ![VERSION, BANKED_VERSION].contains(&d.version)
             || d.format != material::Format::Rgba8Unorm
             || d.layout != Layout::LayerMajorMipMajor
         {
             return Err("unsupported upload version, RGBA format or mip layout".into());
+        }
+        if d.version == BANKED_VERSION && !crate::banks::supports_512(caps) {
+            return Err("banked textures require verified Apple4+ or Mac1+ family".into());
         }
         if !caps.baseline() || caps.sample_counts & 2 == 0 {
             return Err("unverified Metal capability baseline".into());
@@ -175,7 +184,12 @@ impl<G: Copy + Eq + Debug> Plan<G> {
         if d.size == 0
             || d.size as usize > terrain::TEXTURE_SIDE_CEILING
             || d.allocated == 0
-            || d.allocated as usize > terrain::TEXTURE_LAYER_CEILING
+            || d.allocated as usize
+                > if d.version == BANKED_VERSION {
+                    512
+                } else {
+                    terrain::TEXTURE_LAYER_CEILING
+                }
         {
             return Err("bank exceeds unchanged G02 4096-side/256-slice policy".into());
         }

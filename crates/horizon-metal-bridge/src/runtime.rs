@@ -127,16 +127,10 @@ fn bank_zero_layers(
         .banks()
         .first()
         .ok_or("production snapshot has no bank zero")?;
-    if bank.allocated() > 256 {
-        return Err(format!(
-            "actual bank 0 allocated={} used={} split={} sprites={} exceeds unchanged G05 256-slice policy",
-            bank.allocated(),
-            bank.used(),
-            snapshot.split(),
-            snapshot.sprites()
-        ));
+    if bank.allocated() > 512 || snapshot.split() > 512 {
+        return Err("production split/array exceeds v2 512 policy".into());
     }
-    Ok(bank.used() as usize)
+    Ok(snapshot.sprites() as usize)
 }
 fn section_origin(key: Key, min_y: i32) -> Result<[i32; 3], String> {
     Ok([
@@ -165,7 +159,7 @@ fn camera_view(origin: [i32; 3], camera: [f64; 3], clip: [[f32; 4]; 4]) -> Resul
 }
 struct Flight {
     geometry: Arc<Geometry>,
-    source: BankSource,
+    source: Vec<BankSource>,
     cancel: Arc<AtomicBool>,
     light_revision: u64,
     size: [u32; 2],
@@ -314,7 +308,7 @@ impl Controller {
             return;
         }
         if let Some(f) = &self.flight {
-            if f.source.check_current(renderer).is_err()
+            if f.source.iter().any(|s| s.check_current(renderer).is_err())
                 || renderer.material_state().light_revision() != Ok(f.light_revision)
                 || f.size != [renderer.config.width, renderer.config.height]
             {
@@ -324,7 +318,7 @@ impl Controller {
                 Ok(result) => {
                     let f = self.flight.take().unwrap();
                     let valid = !f.cancel.load(Ordering::Acquire)
-                        && f.source.check_current(renderer).is_ok()
+                        && f.source.iter().all(|s| s.check_current(renderer).is_ok())
                         && renderer.material_state().light_revision() == Ok(f.light_revision);
                     self.finished = true;
                     match result {
@@ -359,16 +353,23 @@ impl Controller {
         }
         let prepare = (|| {
             let binding = Binding::new(renderer)?;
-            let source = binding.upload_source(renderer, 0)?;
-            let validation = binding.upload_source(renderer, 0)?;
-            let d = source.description();
-            if d.allocated > 256 {
-                return Err(format!(
-                    "actual bank 0 allocated={} used={} split={} sprites={} exceeds unchanged G05 256-slice policy",
-                    d.allocated, d.used, d.split, d.sprites
-                ));
-            }
-            g.mesh().validate(d.used as usize)?;
+            let snapshot = renderer
+                .material_state()
+                .snapshot()
+                .map_err(str::to_owned)?;
+            let required = helium_metal_prototype::banks::required(
+                &g.mesh(),
+                snapshot.split(),
+                snapshot.sprites(),
+            )?;
+            let source = required
+                .iter()
+                .map(|&b| binding.upload_source(renderer, b))
+                .collect::<Result<Vec<_>, _>>()?;
+            let validation = required
+                .iter()
+                .map(|&b| binding.upload_source(renderer, b))
+                .collect::<Result<Vec<_>, _>>()?;
             let light_revision = renderer
                 .material_state()
                 .light_revision()
@@ -441,7 +442,7 @@ impl Drop for Controller {
     }
 }
 struct Job {
-    source: BankSource,
+    source: Vec<BankSource>,
     geometry: Arc<Geometry>,
     cancel: Arc<AtomicBool>,
     lightmap: [u8; 1024],
@@ -459,7 +460,9 @@ impl Source for LeasedSource {
     type Generation = Generation;
     type Authority = AtomicBool;
     fn description(&self) -> upload::Description<Generation> {
-        self.bank.description()
+        let mut d = self.bank.description();
+        d.version = upload::BANKED_VERSION;
+        d
     }
     fn pixels(&self) -> &[u8] {
         self.bank.pixels()
@@ -472,6 +475,11 @@ impl Source for LeasedSource {
             .and_then(|n| n.checked_add(self.geometry.vertices.capacity()))
             .and_then(|n| n.checked_add(self.bank.retained_bytes()))
             .unwrap_or(usize::MAX)
+    }
+    fn retention_key(&self) -> Option<(usize, usize)> {
+        self.bank
+            .retention_key()
+            .map(|k| (k.0, Arc::as_ptr(&self.geometry) as usize))
     }
     fn check_current(&self, cancel: &AtomicBool) -> Result<(), String> {
         if cancel.load(Ordering::Acquire) {
@@ -501,23 +509,39 @@ fn run(job: Job) -> Result<String, String> {
         Ok(())
     };
     let renderer = TerrainRenderer::new()?;
-    let d = job.source.description();
-    let source = LeasedSource {
-        bank: job.source,
-        geometry: job.geometry.clone(),
-    };
+    let sources: Vec<_> = job
+        .source
+        .into_iter()
+        .map(|bank| LeasedSource {
+            bank,
+            geometry: job.geometry.clone(),
+        })
+        .collect();
+    let descriptions: Vec<_> = sources.iter().map(Source::description).collect();
     let budget = upload::Budget {
         payload_bytes: 192 * 1024 * 1024,
         staging_bytes: 16 * 1024 * 1024,
     };
-    let mut material = renderer.create_material(&source, &job.cancel, budget)?;
-    material.begin_upload(&renderer, source, &job.cancel, upload::Update::Full, budget)?;
-    loop {
-        match material.poll_upload(&renderer, &job.cancel) {
-            upload::Poll::Completed(_) => break,
-            upload::Poll::Pending => pause()?,
-            upload::Poll::Failed(e) => return Err(e),
-            _ => return Err("missing native upload".into()),
+    let mut material = renderer.create_material_set(&sources, &job.cancel, budget)?;
+    for source in sources {
+        let bank = source.description().bank;
+        material.bank_mut(bank)?.begin_upload(
+            &renderer,
+            source,
+            &job.cancel,
+            upload::Update::Full,
+            budget,
+        )?;
+        loop {
+            match material.bank_mut(bank)?.poll_upload(&renderer, &job.cancel) {
+                upload::Poll::Completed(_) => break,
+                upload::Poll::Pending => pause()?,
+                upload::Poll::Failed(e) => return Err(e),
+                _ => return Err("missing bank upload".into()),
+            }
+        }
+        while renderer.upload_retention().busy {
+            pause()?;
         }
     }
     while renderer.upload_retention().busy {
@@ -563,7 +587,7 @@ fn run(job: Job) -> Result<String, String> {
     }
     drop(presentation);
     Ok(format!(
-        "backend=direct-Metal key={:?} origin={:?} accepted_mesh_sequence={} bank={} revision={} vertices={} indices={} native_upload={:?} frame={:?} presentation={:?}; UNATTACHED drawable",
+        "backend=direct-Metal key={:?} origin={:?} accepted_mesh_sequence={} banks={:?} revision={} vertices={} indices={} native_upload={:?} frame={:?} presentation={:?}; UNATTACHED drawable",
         job.geometry.key,
         job.geometry.origin,
         job.geometry.sequence,
@@ -750,7 +774,7 @@ mod ownership_tests {
             let mut owner = Controller::new(Mode::OneSectionDiagnostic);
             owner.flight = Some(Flight {
                 geometry: geometry.clone(),
-                source,
+                source: vec![source],
                 cancel: cancel.clone(),
                 light_revision: 1,
                 size: [256, 256],
@@ -787,7 +811,7 @@ mod ownership_tests {
         let bank = handcrafted_bridge_bank();
         let geometry = geometry(&bank);
         let job = Job {
-            source: bank,
+            source: vec![bank],
             geometry,
             cancel: Arc::new(AtomicBool::new(false)),
             lightmap: [255; 1024],
@@ -821,11 +845,10 @@ mod bank_tests {
             .retain_material_snapshot(1 << 20);
         let s = p.capture_materials(1, 512, false);
         let error = bank_zero_layers(s.snapshot().unwrap()).unwrap_err();
-        assert!(error.contains("allocated=512"));
-        assert!(error.contains("256-slice"));
+        assert!(error.contains("512 policy"));
         let p = PreparedTextures::new(&pixels[..256 * 4], 1, 256, &[], (&[255; 4], 1))
             .retain_material_snapshot(1 << 20);
         let s = p.capture_materials(1, 256, false);
-        assert_eq!(bank_zero_layers(s.snapshot().unwrap()).unwrap(), 256);
+        assert!(bank_zero_layers(s.snapshot().unwrap()).is_err());
     }
 }

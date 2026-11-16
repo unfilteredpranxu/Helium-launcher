@@ -1,7 +1,7 @@
 name: Helium Metal Upload Validation
 on:
   push:
-    branches: [feature/helium-g05-metal-upload, feature/helium-g05-async-upload, feature/helium-g05-async-draw, feature/helium-g05-metal-presentation, feature/helium-g06-real-world-metal]
+    branches: [feature/helium-g05-metal-upload, feature/helium-g05-async-upload, feature/helium-g05-async-draw, feature/helium-g05-metal-presentation, feature/helium-g06-real-world-metal, feature/helium-g06-production-banks]
     paths:
       - 'crates/horizon-metal-bridge/**'
       - 'crates/horizon-client/src/game.rs'
@@ -72,6 +72,10 @@ jobs:
             xcrun --sdk iphoneos metal -target air64-apple-ios15.0 -std=ios-metal2.0 -c \
               experiments/metal-prototype/src/terrain/terrain24.metal -o "$RUNNER_TEMP/helium-upload/g02.air"
           } 2>&1 | tee "$RUNNER_TEMP/helium-upload/msl.log"
+      - name: Compile banked terrain entry for iOS15
+        run: |
+          cat experiments/metal-prototype/src/terrain/terrain24.metal experiments/metal-prototype/src/terrain/terrain_banked.metal > "$RUNNER_TEMP/banked.metal"
+          xcrun --sdk iphoneos metal -target air64-apple-ios15.0 -std=ios-metal2.0 -c "$RUNNER_TEMP/banked.metal" -o "$RUNNER_TEMP/helium-upload/banked.air"
       - name: Compile presentation shader and unsigned probe host
         run: |
           set -euo pipefail

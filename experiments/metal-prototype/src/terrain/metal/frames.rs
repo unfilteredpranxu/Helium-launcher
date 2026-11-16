@@ -17,6 +17,7 @@ struct Targets {
 }
 struct Lease<S> {
     owners: Ownership<S>,
+    _sources: Vec<Arc<S>>,
     _device: Retained<Device>,
     _queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
 }
@@ -173,16 +174,42 @@ impl<S: Source + Send + Sync + 'static> Frames<S> {
         })?;
         let (stamp, source, sprites) = material.resident(renderer, authority)?;
         let d = source.description();
-        let layout = frame::validate(
-            mesh,
-            d,
-            material.counters().texture_payload,
-            source.retained_bytes(),
-            lightmap,
-            view,
-            options,
-            &renderer.capabilities,
-        )?;
+        let bindings = material.bindings()?;
+        let layout = if material.is_banked() {
+            let ds = material.descriptions();
+            crate::banks::check_mesh(mesh, &ds)?;
+            let mut layout = super::super::resource_layout_ceiling(
+                mesh,
+                (d.size as usize, d.size as usize, d.sprites as usize),
+                material.counters().texture_payload,
+                false,
+                false,
+                lightmap,
+                view,
+                options,
+                &renderer.capabilities,
+                32768,
+            )?;
+            layout.payload_bytes = layout
+                .payload_bytes
+                .checked_add(material.source_payload()?)
+                .ok_or("frame group overflow")?;
+            if layout.payload_bytes > options.budget.payload_bytes {
+                return Err("banked frame budget exceeded".into());
+            }
+            layout
+        } else {
+            frame::validate(
+                mesh,
+                d,
+                material.counters().texture_payload,
+                material.source_payload()?,
+                lightmap,
+                view,
+                options,
+                &renderer.capabilities,
+            )?
+        };
         let mut protocol = Protocol::prepare(stamp, self.device, self.owner)?;
         // A new accepted frame supersedes old completion even if allocation fails.
         self.invalidate("frame superseded".into());
@@ -283,6 +310,9 @@ impl<S: Source + Send + Sync + 'static> Frames<S> {
                 &targets.depth,
                 mesh.indices.len(),
                 options,
+                material
+                    .is_banked()
+                    .then_some((mesh, bindings.as_slice(), d.split)),
             )?;
             protocol.encoded()?;
             // Full frame payload conservatively occupies this shared slot until
@@ -299,6 +329,7 @@ impl<S: Source + Send + Sync + 'static> Frames<S> {
                     - 8192,
             );
             let lease = Arc::new(Lease {
+                _sources: material.sources(),
                 owners: Ownership {
                     source,
                     previous: None,
@@ -309,7 +340,7 @@ impl<S: Source + Send + Sync + 'static> Frames<S> {
             });
             let retained = lease.clone();
             let keepalive = move |_command: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
-                let _source = &retained.owners.source;
+                let _source = (&retained.owners.source, &retained._sources);
             };
             fn require_send_sync_static<T: Send + Sync + 'static>(_: &T) {}
             require_send_sync_static(&keepalive);
@@ -403,7 +434,7 @@ impl<S: Source + Send + Sync + 'static> Frames<S> {
                     self.counters.completed = self.counters.completed.saturating_add(1);
                     let t = self.targets.as_ref().unwrap();
                     self.counters.allocated_payload = t.width * t.height * 8
-                        + self.source.as_ref().unwrap().retained_bytes()
+                        + material.source_payload().unwrap_or(usize::MAX)
                         + material.counters().texture_payload;
                 }
                 _ => {

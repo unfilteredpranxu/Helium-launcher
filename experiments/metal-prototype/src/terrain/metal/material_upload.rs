@@ -11,6 +11,8 @@ mod nonblocking;
 use std::sync::Arc;
 pub struct Material<S: Source> {
     pending: Option<nonblocking::Pending<S>>,
+    members: Vec<Material<S>>,
+    banked: bool,
     texture: Option<Texture>,
     _device: Retained<Device>,
     device_id: Id,
@@ -62,6 +64,8 @@ impl TerrainRenderer {
             let owner = Id::new()?;
             Ok(Material {
                 texture: Some(texture),
+                members: Vec::new(),
+                banked: false,
                 pending: None,
                 _device: self.device.clone(),
                 device_id: self.upload_device,
@@ -87,10 +91,19 @@ impl<S: Source> Material<S> {
         if self.pending.is_some() || self.device_id != renderer.upload_device {
             return Err("pending upload or wrong/recreated material device".into());
         }
+        if self.banked {
+            crate::banks::validate(&self.descriptions())?;
+            for m in &self.members {
+                m.resident(renderer, authority)?;
+            }
+        }
         let stamp = self.record.residency()?;
         let source = self.source.as_ref().ok_or("material source released")?;
         source.check_current(authority)?;
-        if source.description() != self.description || self.description.bank != 0 {
+        if source.description() != self.description
+            || (self.description.bank != 0
+                && self.description.version != crate::upload::BANKED_VERSION)
+        {
             return Err("changed metadata or unsupported nonzero bank; no sprite remapping".into());
         }
         Ok((
@@ -99,16 +112,62 @@ impl<S: Source> Material<S> {
             self.texture.as_ref().ok_or("material released")?.clone(),
         ))
     }
+    pub fn bank_mut(&mut self, bank: u32) -> Result<&mut Self, String> {
+        if self.description.bank == bank {
+            Ok(self)
+        } else {
+            self.members
+                .iter_mut()
+                .find(|m| m.description.bank == bank)
+                .ok_or_else(|| "missing resident bank".into())
+        }
+    }
+    pub(super) fn is_banked(&self) -> bool {
+        self.banked
+    }
+    pub(super) fn descriptions(&self) -> Vec<Description<S::Generation>> {
+        std::iter::once(self)
+            .chain(self.members.iter())
+            .map(|m| m.description)
+            .collect()
+    }
+    pub(super) fn sources(&self) -> Vec<Arc<S>> {
+        std::iter::once(self)
+            .chain(self.members.iter())
+            .filter_map(|m| m.source.clone())
+            .collect()
+    }
+    pub(super) fn source_payload(&self) -> Result<usize, String> {
+        crate::banks::source_bytes(self.sources().iter().map(|s| &**s))
+    }
+    pub(super) fn bindings(&self) -> Result<Vec<(u32, Texture)>, String> {
+        std::iter::once(self)
+            .chain(self.members.iter())
+            .map(|m| {
+                Ok((
+                    m.description.bank,
+                    m.texture.as_ref().ok_or("bank released")?.clone(),
+                ))
+            })
+            .collect()
+    }
     pub fn phase(&self) -> Phase {
         self.record.phase()
     }
     pub fn counters(&self) -> Counters {
-        self.counters
+        let mut c = self.counters;
+        for m in &self.members {
+            c.texture_payload = c.texture_payload.saturating_add(m.counters.texture_payload);
+        }
+        c
     }
     pub fn description(&self) -> Description<S::Generation> {
         self.description
     }
     pub fn release(&mut self) {
+        for m in &mut self.members {
+            m.release();
+        }
         if self.record.phase() != Phase::Invalidated {
             self.counters.invalidations = self.counters.invalidations.saturating_add(1);
         }
@@ -427,5 +486,44 @@ impl TerrainRenderer {
             rgba: &[],
         };
         autoreleasepool(|_| self.draw(mesh, atlas, lightmap, view, options, layout, Some(texture)))
+    }
+}
+
+impl TerrainRenderer {
+    /// V2 bounded set. All source/bank budgets validated before any native allocation.
+    pub fn create_material_set<S: Source>(
+        &self,
+        sources: &[S],
+        authority: &S::Authority,
+        budget: Budget,
+    ) -> Result<Material<S>, String> {
+        let ds: Vec<_> = sources.iter().map(Source::description).collect();
+        crate::banks::validate(&ds)?;
+        let mut total = crate::banks::source_bytes(sources.iter())?;
+        let mut staging = 0;
+        let mut metadata = 0;
+        for s in sources {
+            let p = Plan::prepare(s, authority, None, Update::Full, &self.capabilities, budget)?;
+            total = total
+                .checked_add(p.texture_bytes())
+                .ok_or("set texture overflow")?;
+            staging = staging.max(p.staging_bytes());
+            metadata = metadata.max(p.regions().len() * size_of::<crate::upload::CopyRegion>());
+        }
+        total = total
+            .checked_add(staging.checked_mul(2).ok_or("set staging overflow")?)
+            .and_then(|n| n.checked_add(metadata))
+            .ok_or("set payload overflow")?;
+        if total > budget.payload_bytes {
+            return Err("bank set budget exceeded".into());
+        }
+        let mut materials = Vec::new();
+        for s in sources {
+            materials.push(self.create_material(s, authority, budget)?);
+        }
+        let mut primary = materials.remove(0);
+        primary.members = materials;
+        primary.banked = true;
+        Ok(primary)
     }
 }
