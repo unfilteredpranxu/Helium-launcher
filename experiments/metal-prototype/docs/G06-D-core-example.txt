@@ -1,11 +1,85 @@
-HELIUM G06-D RECORDER CORE — NOT OWNER-TEST READY
-OWNER_SCREEN_CONFIRMED: UNVERIFIED
-No assets, account identifiers, paths, chat or free-form text accepted.
-FIRST CAUSES (retained independently of timeline tail):
-{"test_only":true,"schema_version":1,"event_seq":3,"attempt_id":1,"monotonic_ns":141964,"stage":"Cancelled","emitter":"Game","cause":"Some(MaterialChanged)","first":true,"expected":11,"observed":12}
-TIMELINE TAIL:
-{"test_only":true,"schema_version":1,"event_seq":1,"attempt_id":1,"monotonic_ns":2344,"stage":"HostRequested","emitter":"Game","cause":"None","first":false,"expected":0,"observed":0}
-{"test_only":true,"schema_version":1,"event_seq":2,"attempt_id":1,"monotonic_ns":3485,"stage":"UploadStarted","emitter":"Worker","cause":"None","first":false,"expected":0,"observed":0}
-{"test_only":true,"schema_version":1,"event_seq":3,"attempt_id":1,"monotonic_ns":141964,"stage":"Cancelled","emitter":"Game","cause":"Some(MaterialChanged)","first":true,"expected":11,"observed":12}
-{"test_only":true,"schema_version":1,"event_seq":4,"attempt_id":1,"monotonic_ns":171299,"stage":"Cancelled","emitter":"Swift","cause":"Some(ViewLayoutInvalid)","first":false,"expected":11,"observed":12}
-NEXT ACTION FOR CODEX: finish HUD, recovery, saturation/error reporting and full integration gates.
+TEST_EVENT_ONLY — ACTUAL MACOS SWIFT/C/RUST RECORDER REHEARSAL.
+Source f709821; Actions run 43927386632. Not an iPad, UIKit execution, GPU or Minecraft scene.
+
+HELIUM METAL G06-D DIAGNOSTIC
+SCHEMA 2 | source=f709821676d4fc2c0ccf9f9b49ce40d0fc1a0aab
+app_build=11002
+boot=1794853196059991000 | TEST_ONLY=true
+recorder_status=OK | persisted_sequence=26 | lost_timeline_events=0
+PREVIOUS_BOOT_INCOMPLETE=false | malformed_previous_records=0
+WGpu FALLBACK ACTIVE | PHYSICAL_PIXELS_UNVERIFIED
+Persistence acknowledgement is not a power-loss/fsync guarantee.
+SELF_TEST: typed initialization/serialization running; GPU/UI checks listed separately.
+chronology_complete=true
+write_errors_total=0
+FIRST CAUSES (priority retained, at most 3):
+Attempt 101 FIRST CAUSE Some(ViewLayoutInvalid) emitter=Swift last confirmed stage before cancel retained in timeline
+Last confirmed stage at first cause: None
+Possible GPU work pending at first cause: false
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":3,"attempt_id":101,"world_epoch":99,"monotonic_ns":329250,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":10,"cause":"Some(ViewLayoutInvalid)","first":true,"expected":2360,"observed":0,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+Attempt 102 FIRST CAUSE Some(LightmapChanged) emitter=Swift last confirmed stage before cancel retained in timeline
+Last confirmed stage at first cause: Some(Attached)
+Possible GPU work pending at first cause: false
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":25,"attempt_id":102,"world_epoch":99,"monotonic_ns":351209,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":7,"cause":"Some(LightmapChanged)","first":true,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":14,"gpu_inflight":false,"elapsed_ms":0}
+Attempt 103 FIRST CAUSE Some(ColumnUnloaded) emitter=Swift last confirmed stage before cancel retained in timeline
+Last confirmed stage at first cause: None
+Possible GPU work pending at first cause: false
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":26,"attempt_id":103,"world_epoch":99,"monotonic_ns":352834,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":3,"cause":"Some(ColumnUnloaded)","first":true,"expected":0,"observed":0,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+PREVIOUS BOOT (normalized allowlisted fields only):
+HUMAN TIMELINE (milliseconds since each exact attempt began; attempt 0 uses boot time):
+Attempt 0 +0 ms Recorder / Boot cause=None expected=0 observed=0 possible_gpu_pending=false seq=1
+Attempt 0 +0 ms Swift / ModeSelected cause=None expected=11002 observed=2 possible_gpu_pending=false seq=2
+Attempt 101 +0 ms Swift / Cancelled cause=Some(ViewLayoutInvalid) expected=2360 observed=0 possible_gpu_pending=false seq=3
+Attempt 101 +0 ms Swift / Cancelled cause=Some(WindowNotKey) expected=1 observed=0 possible_gpu_pending=false seq=4
+Attempt 101 +0 ms Swift / Cancelled cause=Some(AppInactive) expected=1 observed=0 possible_gpu_pending=false seq=5
+Attempt 101 +0 ms Swift / Cancelled cause=Some(ModalOpen) expected=1 observed=0 possible_gpu_pending=false seq=6
+Attempt 101 +0 ms Swift / Cancelled cause=Some(ViewDetached) expected=11 observed=12 possible_gpu_pending=false seq=7
+Attempt 101 +0 ms Swift / Cancelled cause=Some(WorkerFailed) expected=11 observed=12 possible_gpu_pending=false seq=8
+Attempt 101 +0 ms Swift / Cancelled cause=Some(Panic) expected=11 observed=12 possible_gpu_pending=false seq=9
+Attempt 101 +0 ms Swift / Cancelled cause=Some(ResourceReload) expected=11 observed=12 possible_gpu_pending=false seq=10
+Attempt 101 +0 ms Swift / Cancelled cause=Some(MemoryPressure) expected=11 observed=12 possible_gpu_pending=false seq=11
+Attempt 101 +0 ms Swift / Cancelled cause=Some(DeviceFailure) expected=11 observed=12 possible_gpu_pending=false seq=12
+Attempt 101 +0 ms Swift / Cancelled cause=Some(FrameFailed) expected=11 observed=12 possible_gpu_pending=false seq=13
+Attempt 101 +0 ms Swift / Cancelled cause=Some(PresentFailed) expected=11 observed=12 possible_gpu_pending=false seq=14
+Attempt 101 +0 ms Swift / Cancelled cause=Some(MaterialChanged) expected=11 observed=12 possible_gpu_pending=false seq=15
+Attempt 101 +0 ms Swift / Cancelled cause=Some(MeshReplaced) expected=11 observed=12 possible_gpu_pending=false seq=16
+Attempt 101 +0 ms Swift / Cancelled cause=Some(WorldChanged) expected=11 observed=12 possible_gpu_pending=false seq=17
+Attempt 101 +0 ms Swift / Cancelled cause=Some(HostExpired) expected=11 observed=12 possible_gpu_pending=false seq=18
+Attempt 101 +0 ms Swift / Cancelled cause=Some(ParentGone) expected=11 observed=12 possible_gpu_pending=false seq=19
+Attempt 101 +0 ms Swift / Cancelled cause=Some(WindowGone) expected=11 observed=12 possible_gpu_pending=false seq=20
+Attempt 101 +0 ms Swift / Cancelled cause=Some(WindowHidden) expected=11 observed=12 possible_gpu_pending=false seq=21
+Attempt 101 +0 ms Swift / Cancelled cause=Some(GpuTimeout) expected=11 observed=12 possible_gpu_pending=false seq=22
+Attempt 102 +0 ms Swift / Attached cause=None expected=2360 observed=1640 possible_gpu_pending=false seq=23
+Attempt 101 +0 ms Swift / Cancelled cause=Some(Panic) expected=0 observed=0 possible_gpu_pending=false seq=24
+Attempt 102 +0 ms Swift / Cancelled cause=Some(LightmapChanged) expected=11 observed=12 possible_gpu_pending=false seq=25
+Attempt 103 +0 ms Swift / Cancelled cause=Some(ColumnUnloaded) expected=0 observed=0 possible_gpu_pending=false seq=26
+CURRENT TIMELINE (machine-readable schema v2):
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":1,"attempt_id":0,"world_epoch":0,"monotonic_ns":255084,"stage_code":1,"stage":"Boot","emitter_code":5,"emitter":"Recorder","cause_code":0,"cause":"None","first":false,"expected":0,"observed":0,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":2,"attempt_id":0,"world_epoch":0,"monotonic_ns":307709,"stage_code":2,"stage":"ModeSelected","emitter_code":3,"emitter":"Swift","cause_code":0,"cause":"None","first":false,"expected":11002,"observed":2,"test_only":true,"last_confirmed_stage":1,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":3,"attempt_id":101,"world_epoch":99,"monotonic_ns":329250,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":10,"cause":"Some(ViewLayoutInvalid)","first":true,"expected":2360,"observed":0,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":4,"attempt_id":101,"world_epoch":99,"monotonic_ns":330500,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":12,"cause":"Some(WindowNotKey)","first":false,"expected":1,"observed":0,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":5,"attempt_id":101,"world_epoch":99,"monotonic_ns":331292,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":14,"cause":"Some(AppInactive)","first":false,"expected":1,"observed":0,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":6,"attempt_id":101,"world_epoch":99,"monotonic_ns":331959,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":13,"cause":"Some(ModalOpen)","first":false,"expected":1,"observed":0,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":7,"attempt_id":101,"world_epoch":99,"monotonic_ns":337875,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":11,"cause":"Some(ViewDetached)","first":false,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":8,"attempt_id":101,"world_epoch":99,"monotonic_ns":338625,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":18,"cause":"Some(WorkerFailed)","first":false,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":9,"attempt_id":101,"world_epoch":99,"monotonic_ns":339375,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":19,"cause":"Some(Panic)","first":false,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":10,"attempt_id":101,"world_epoch":99,"monotonic_ns":340084,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":24,"cause":"Some(ResourceReload)","first":false,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":11,"attempt_id":101,"world_epoch":99,"monotonic_ns":340792,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":34,"cause":"Some(MemoryPressure)","first":false,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":12,"attempt_id":101,"world_epoch":99,"monotonic_ns":341500,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":28,"cause":"Some(DeviceFailure)","first":false,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":13,"attempt_id":101,"world_epoch":99,"monotonic_ns":342125,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":30,"cause":"Some(FrameFailed)","first":false,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":14,"attempt_id":101,"world_epoch":99,"monotonic_ns":342750,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":31,"cause":"Some(PresentFailed)","first":false,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":15,"attempt_id":101,"world_epoch":99,"monotonic_ns":343375,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":6,"cause":"Some(MaterialChanged)","first":false,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":16,"attempt_id":101,"world_epoch":99,"monotonic_ns":344000,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":2,"cause":"Some(MeshReplaced)","first":false,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":17,"attempt_id":101,"world_epoch":99,"monotonic_ns":344667,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":4,"cause":"Some(WorldChanged)","first":false,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":18,"attempt_id":101,"world_epoch":99,"monotonic_ns":345292,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":15,"cause":"Some(HostExpired)","first":false,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":19,"attempt_id":101,"world_epoch":99,"monotonic_ns":345917,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":21,"cause":"Some(ParentGone)","first":false,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":20,"attempt_id":101,"world_epoch":99,"monotonic_ns":346500,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":22,"cause":"Some(WindowGone)","first":false,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":21,"attempt_id":101,"world_epoch":99,"monotonic_ns":347125,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":23,"cause":"Some(WindowHidden)","first":false,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":22,"attempt_id":101,"world_epoch":99,"monotonic_ns":347792,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":33,"cause":"Some(GpuTimeout)","first":false,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":23,"attempt_id":102,"world_epoch":99,"monotonic_ns":349834,"stage_code":14,"stage":"Attached","emitter_code":3,"emitter":"Swift","cause_code":0,"cause":"None","first":false,"expected":2360,"observed":1640,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":24,"attempt_id":101,"world_epoch":99,"monotonic_ns":350542,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":19,"cause":"Some(Panic)","first":false,"expected":0,"observed":0,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":25,"attempt_id":102,"world_epoch":99,"monotonic_ns":351209,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":7,"cause":"Some(LightmapChanged)","first":true,"expected":11,"observed":12,"test_only":true,"last_confirmed_stage":14,"gpu_inflight":false,"elapsed_ms":0}
+{"schema_version":2,"boot_id":1794853196059991000,"event_seq":26,"attempt_id":103,"world_epoch":99,"monotonic_ns":352834,"stage_code":30,"stage":"Cancelled","emitter_code":3,"emitter":"Swift","cause_code":3,"cause":"Some(ColumnUnloaded)","first":true,"expected":0,"observed":0,"test_only":true,"last_confirmed_stage":0,"gpu_inflight":false,"elapsed_ms":0}
+NEXT ACTION FOR CODEX: use the first cause above; if none, PENDING_DEVICE_CAPTURE.
+Screenshot/recording attached? OWNER INPUT: YES / NO
+No scanout, FPS or continuous gameplay claim.
