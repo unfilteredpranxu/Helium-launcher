@@ -353,3 +353,72 @@ fn host_style_abrupt_kill_recovers_acknowledged_handoff_before_world_reads() {
     drop(lock);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+#[ignore = "subprocess fixture explicitly invoked by fatal_runtime_exit_exposure_remains_a_release_blocker"]
+fn runtime_exit_child_fixture() {
+    let Some(root) = std::env::var_os("HORIZON_RUNTIME_EXIT_CHILD_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    assert!(
+        root.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("horizon-shutdown-fixture-")
+    );
+    let lock = SessionLock::acquire(&root).unwrap();
+    let save = SaveDir::new(root.clone(), LevelShape::OVERWORLD);
+    let dirty = vec![Tag::compound([("fixture", Tag::Int(123))])];
+    let (_release, blocked) = std::sync::mpsc::channel::<()>();
+    let mut owner = Some((save, lock, dirty));
+    let ticket = horizon_threads::retirement::global().submit(move || {
+        blocked.recv().map_err(|e| e.to_string())?;
+        let (save, _, dirty) = owner.as_ref().unwrap();
+        save.save_entities_later(vec![((0, 0), dirty.clone())])
+            .map_err(|e| e.to_string())?;
+        save.flush().map_err(|e| e.to_string())?;
+        drop(owner.take());
+        Ok(())
+    });
+    assert_eq!(
+        ticket.status(),
+        horizon_threads::retirement::Status::Pending
+    );
+    fs::write(
+        root.join("registered-pending-not-admitted"),
+        b"synthetic pending owner; NOT a recoverable handoff",
+    )
+    .unwrap();
+    // Exact unsafe process-lifetime boundary still reachable after fatal
+    // event-loop return: process::exit does not wait for registered owners.
+    std::process::exit(1);
+}
+
+#[test]
+fn fatal_runtime_exit_exposure_remains_a_release_blocker() {
+    let root = temporary();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "save::shutdown::tests::runtime_exit_child_fixture",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("HORIZON_RUNTIME_EXIT_CHILD_ROOT", &root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(1));
+    assert!(root.join("registered-pending-not-admitted").exists());
+    let lock = SessionLock::acquire(&root).unwrap();
+    let save = SaveDir::new(root.clone(), LevelShape::OVERWORLD);
+    assert!(
+        save.load_entities(0, 0).is_empty(),
+        "This exposure test documents missing unadmitted data, NOT a passing release safety gate"
+    );
+    drop(save);
+    drop(lock);
+    fs::remove_dir_all(root).unwrap();
+}

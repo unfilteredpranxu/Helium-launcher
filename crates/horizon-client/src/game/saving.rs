@@ -14,6 +14,18 @@ pub(super) struct ClosingSave {
     started: Instant,
     stage: Stage,
 }
+impl ClosingSave {
+    fn retire_after_error(&mut self) {
+        self.quit = true;
+        self.close = true;
+        self.stage = Stage::Retiring;
+        if let Some(reply) = self.reply.take() {
+            let _ = reply.send(
+                serde_json::json!({"error":"game error; owned shutdown pending"}).to_string(),
+            );
+        }
+    }
+}
 enum Stage {
     Generation,
     Chunks(VecDeque<(i32, i32)>),
@@ -30,6 +42,22 @@ const SNAPSHOTS_PER_FRAME: usize = 16;
 const SNAPSHOT_BUDGET: Duration = Duration::from_millis(2);
 
 impl Game<'_> {
+    /// An ordinary game error still has a live event loop. Keep pumping it
+    /// until the real owned retirement completes; never return the Rust main
+    /// while a normal error path still owns an unsaved authoritative world.
+    pub(super) fn wait_for_owned_exit(&mut self) {
+        if let Some(save) = &mut self.pending_save {
+            save.retire_after_error();
+            return;
+        }
+        self.pending_save = Some(ClosingSave {
+            quit: true,
+            close: true,
+            reply: None,
+            started: Instant::now(),
+            stage: Stage::Retiring,
+        });
+    }
     pub(super) fn begin_closing_save(&mut self, quit: bool) -> Result<()> {
         if let Some(save) = &mut self.pending_save {
             save.quit |= quit;
@@ -307,5 +335,47 @@ impl Game<'_> {
         );
         renderer.render(&loading_frame(&hud))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    #[test]
+    fn interrupted_control_save_cannot_reply_success_or_restart_a_local_save_after_retirement() {
+        let (reply, receive) = std::sync::mpsc::channel();
+        let mut save = ClosingSave {
+            quit: false,
+            close: false,
+            reply: Some(reply),
+            started: Instant::now(),
+            stage: Stage::Generation,
+        };
+        save.retire_after_error();
+        let result: serde_json::Value = serde_json::from_str(&receive.recv().unwrap()).unwrap();
+        assert!(result.get("error").is_some());
+        assert!(result.get("ok").is_none());
+        assert!(
+            !(save.quit && !save.close),
+            "retirement must not enter the control-save-to-local-save retry branch"
+        );
+    }
+    #[test]
+    fn repeated_error_close_reports_once_and_never_creates_a_success_ack() {
+        let (reply, receive) = std::sync::mpsc::channel();
+        let mut save = ClosingSave {
+            quit: true,
+            close: true,
+            reply: Some(reply),
+            started: Instant::now(),
+            stage: Stage::Writes,
+        };
+        save.retire_after_error();
+        save.retire_after_error();
+        assert!(receive.recv().unwrap().contains("error"));
+        assert_eq!(
+            receive.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        );
     }
 }
