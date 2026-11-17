@@ -1172,14 +1172,19 @@ fn run_impl(
     };
     event(Stage::WorkerStarted, None, 0, 0);
     let deadline = job.created + RENDER_DEADLINE;
-    let pause = || -> Result<(), String> {
+    let check_deadline = || -> Result<(), String> {
         if Instant::now() >= deadline {
             event(Stage::Cancelled, Some(Cause::GpuTimeout), 0, 0);
             return Err("native diagnostic deadline; submitted resources retire through G05 completion owners".into());
         }
+        Ok(())
+    };
+    let pause = || -> Result<(), String> {
+        check_deadline()?;
         std::thread::sleep(Duration::from_millis(2));
         Ok(())
     };
+    check_deadline()?;
     let renderer = TerrainRenderer::new().map_err(|e| {
         event(Stage::Cancelled, Some(Cause::DeviceFailure), 0, 0);
         e
@@ -1280,6 +1285,7 @@ fn run_impl(
         material.counters().staging_peak as u64,
         material.counters().source_peak as u64,
     );
+    check_deadline()?;
     let mut frames = renderer.create_frames()?;
     frames
         .begin(
@@ -1354,6 +1360,7 @@ fn run_impl(
             event(Stage::Cancelled, Some(Cause::FrameFailed), 0, 0);
             e
         })?;
+    check_deadline()?;
     event(Stage::DrawableRequested, None, 0, 0);
     let Some(mut presentation) = display
         .present(output, 192 * 1024 * 1024, &job.cancel)
@@ -1378,6 +1385,7 @@ fn run_impl(
     }
     drop(presentation);
     event(Stage::PresentCompleted, None, 0, 0);
+    check_deadline()?;
     Ok(format!(
         "backend=direct-Metal world_epoch={} key={:?} origin={:?} accepted_mesh_sequence={} banks={:?} revision={} vertices={} indices={} native_upload={:?} frame={:?} presentation={:?}; attached_generation={attachment:?}; GPU command completed, scanout unverified",
         job.world_epoch,
