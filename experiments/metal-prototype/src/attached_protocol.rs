@@ -77,10 +77,11 @@ impl Gate {
         self.state.load(Ordering::Acquire) == 2
     }
     pub fn cancelled(&self) -> bool {
-        self.cancel.load(Ordering::Acquire)
-            || self
-                .expires
-                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        self.cancel.load(Ordering::Acquire) || self.expired()
+    }
+    pub fn expired(&self) -> bool {
+        self.expires
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
     }
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);

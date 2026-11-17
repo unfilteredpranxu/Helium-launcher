@@ -177,6 +177,17 @@ pub(crate) fn diagnostic_reveal_allowed(id: u64) -> bool {
 extern "C" fn ready(id: u64) -> bool {
     ENTRY.lock().ok().is_some_and(|e| {
         e.as_ref().is_some_and(|e| {
+            if e.id == id && e.status.expired() {
+                recorder::global().record(
+                    id,
+                    Stage::Cancelled,
+                    Emitter::Swift,
+                    Some(Cause::SnapshotExpired),
+                    0,
+                    0,
+                );
+                return false;
+            }
             e.id == id && !e.cancel.load(Ordering::Acquire) && e.status.published()
         })
     })

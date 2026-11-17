@@ -514,3 +514,36 @@ fn repeated_boots_without_a_new_attempt_keep_the_last_first_cause() {
         std::thread::sleep(Duration::from_millis(250));
     }
 }
+
+#[test]
+fn capture_age_rejection_is_a_cause_but_normal_reveal_timer_removal_is_not() {
+    let r = Recorder::memory();
+    r.begin_world(1, 8);
+    r.record(
+        1,
+        Stage::Cancelled,
+        Emitter::Swift,
+        Some(Cause::SnapshotExpired),
+        0,
+        0,
+    );
+    r.record(
+        1,
+        Stage::Cancelled,
+        Emitter::Swift,
+        Some(Cause::TicketCancelled),
+        0,
+        0,
+    );
+    assert_eq!(r.first(1), Some(Cause::SnapshotExpired));
+    r.begin_world(2, 8);
+    r.record(
+        2,
+        Stage::Removed,
+        Emitter::Swift,
+        Some(Cause::SnapshotExpired),
+        0,
+        0,
+    );
+    assert_eq!(r.first(2), None);
+}

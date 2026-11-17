@@ -664,10 +664,8 @@ impl Recorder {
             && id != 0
             && !matches!(emitter, Emitter::Ticket)
             && cause.is_some_and(|c| {
-                !matches!(
-                    c,
-                    Cause::SnapshotExpired | Cause::NoFreshMesh | Cause::RetryExhausted
-                )
+                !matches!(c, Cause::NoFreshMesh | Cause::RetryExhausted)
+                    && (c != Cause::SnapshotExpired || stage == Stage::Cancelled)
             })
             && !s.first.iter().any(|e| e.attempt == id);
         let Some(seq) = s.seq.checked_add(1) else {
