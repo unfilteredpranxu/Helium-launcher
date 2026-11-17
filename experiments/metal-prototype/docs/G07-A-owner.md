@@ -32,3 +32,11 @@ If the app exits, reopen once before sharing the report to recover prior boot
 events. No assets, player names, seeds, credentials or private paths are collected.
 
 Prompt 13 has **not** started.
+
+
+Qualified software source: `9592281c30b125954303e688828413230b2482f7`.
+[Passing qualification](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44017965266)
+· [single unsigned owner artifact](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44017965266/artifacts/14300539403).
+The artifact includes the original guide and verified.log. This qualification
+proves software/Metal command/link gates; your physical game scene remains
+unverified until the matching video/report. No second installation is needed.
