@@ -714,6 +714,10 @@ impl Controller {
                         0,
                     );
                     f.cancel.store(true, Ordering::Release);
+                    #[cfg(target_os = "ios")]
+                    if let Some(ticket) = &f.attached {
+                        ticket.cancel();
+                    }
                 }
                 if changes.iter().any(Option::is_some) {
                     for (cause, expected, observed) in changes.into_iter().flatten() {
@@ -727,6 +731,10 @@ impl Controller {
                         );
                     }
                     f.cancel.store(true, Ordering::Release);
+                    #[cfg(target_os = "ios")]
+                    if let Some(ticket) = &f.attached {
+                        ticket.cancel();
+                    }
                 }
             }
             match f.receiver.try_recv() {
