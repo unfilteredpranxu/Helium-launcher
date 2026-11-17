@@ -1319,6 +1319,13 @@ pub struct Lod {
     keeps_observed: bool,
 }
 impl Lod {
+    /// Cooperative admission stop only. Terminal worker ownership and joining
+    /// remain with Drop, which the shutdown coordinator runs off the UI thread.
+    pub fn request_stop(&self) {
+        self.shared.stop.store(true, Ordering::Relaxed);
+        self.shared.wake.notify_all();
+        self.shared.mesh_wake.notify_all();
+    }
     pub fn new(source: Arc<dyn LodSource>, context: Arc<WorkerContext>) -> Self {
         Self::assemble(Some(source), Some(context), true)
     }

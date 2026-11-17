@@ -165,10 +165,14 @@ pub trait ChunkGenerator: Send + Sync + 'static {
     fn restore_proto(&self, _proto: &mut Proto, _saved: crate::chunk::SavedProto) {}
     /// Save proto chunks decoration wrote to, so that they come back as they
     /// were: generating them again would lose those writes.
-    fn save_protos(&self, _protos: &[&Proto]) {}
+    fn save_protos(&self, _protos: &[&Proto]) -> Result<(), String> {
+        Ok(())
+    }
     /// Save a column that finished after the player moved away: its
     /// neighbours' decoration is done, so it can't be generated again.
-    fn save_finished(&self, _chunk: Chunk) {}
+    fn save_finished(&self, _chunk: Chunk) -> Result<(), Box<(Chunk, String)>> {
+        Ok(())
+    }
 }
 pub type LodDetail = ((i32, i32), Arc<[crate::lod::Column; 256]>);
 
@@ -241,15 +245,15 @@ impl<G: ChunkGenerator> LodSource for G {
 }
 /// The generator's saving, for the streamer (which doesn't know its type).
 trait Saves: LodSource {
-    fn save_protos(&self, protos: &[&Proto]);
-    fn save_finished(&self, chunk: Chunk);
+    fn save_protos(&self, protos: &[&Proto]) -> Result<(), String>;
+    fn save_finished(&self, chunk: Chunk) -> Result<(), Box<(Chunk, String)>>;
 }
 impl<G: ChunkGenerator> Saves for G {
-    fn save_protos(&self, protos: &[&Proto]) {
-        ChunkGenerator::save_protos(self, protos);
+    fn save_protos(&self, protos: &[&Proto]) -> Result<(), String> {
+        ChunkGenerator::save_protos(self, protos)
     }
-    fn save_finished(&self, chunk: Chunk) {
-        ChunkGenerator::save_finished(self, chunk);
+    fn save_finished(&self, chunk: Chunk) -> Result<(), Box<(Chunk, String)>> {
+        ChunkGenerator::save_finished(self, chunk)
     }
 }
 /// Per-job mesher inputs that change with the dimension or the options.
@@ -460,6 +464,8 @@ pub struct Streaming {
     decorating_finals: HashSet<(i32, i32)>,
     /// Save jobs in flight.
     saving: usize,
+    save_error: Option<String>,
+    failed_chunks: Vec<Chunk>,
     /// Proto chunks checked out to a worker for their light view.
     viewing: FxHashSet<(i32, i32)>,
     /// Vanilla's decoration order around the player, and the centre and
@@ -951,8 +957,9 @@ impl<G: ChunkGenerator> Jobs<G> {
                 Done::Generated(chunk)
             }
             Job::Save(protos) => {
-                let refs: Vec<&Proto> = protos.iter().map(|(_, p)| p).collect();
-                generator.save_protos(&refs);
+                // The owning server durably admitted these before enqueue.
+                // This job only returns their CPU ownership; it cannot submit
+                // an older proto write after a final-chunk barrier.
                 Done::Saved(protos)
             }
             Job::LightView(x, z, proto) => {
@@ -1068,6 +1075,8 @@ impl Streaming {
             decorating: 0,
             decorating_finals: HashSet::new(),
             saving: 0,
+            save_error: None,
+            failed_chunks: Vec::new(),
             viewing: Default::default(),
             decoration_order: DecorationOrder::default(),
             order_area: None,
@@ -1342,6 +1351,15 @@ impl Streaming {
             })
             .collect();
         if !protos.is_empty() {
+            let refs: Vec<_> = protos.iter().map(|(_, proto)| proto).collect();
+            if let Err(error) = self.saves.save_protos(&refs) {
+                self.save_error.get_or_insert(error);
+                for (key, proto) in protos {
+                    self.written.insert(key);
+                    self.protos.insert(key, Some(proto));
+                }
+                return;
+            }
             self.saving += 1;
             // Ahead of every other job: a column generated again meanwhile
             // would not find them saved.
@@ -1363,7 +1381,11 @@ impl Streaming {
         if !self.ranges().chunk_kept(key.0, key.1, self.decorates) {
             if chunk.fresh {
                 self.dropped_new.insert(key);
-                self.saves.save_finished(chunk);
+                if let Err(failed) = self.saves.save_finished(chunk) {
+                    let (chunk, error) = *failed;
+                    self.save_error.get_or_insert(error);
+                    self.failed_chunks.push(chunk);
+                }
             }
             return;
         }
@@ -2265,11 +2287,11 @@ impl Streaming {
     /// otherwise a worker saves them (vanilla's autosave hands its chunks to
     /// the IOWorker too), and those out in jobs are saved later, as they
     /// unload or at the next save.
-    pub fn save(&mut self, world: &mut World, wait: bool) {
+    pub fn save(&mut self, world: &mut World, wait: bool) -> bool {
         if !wait {
             let written: Vec<(i32, i32)> = self.written.drain().collect();
             self.save_checked_out(written);
-            return;
+            return self.save_error.is_none();
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let aborted = self
@@ -2292,8 +2314,10 @@ impl Streaming {
                 }
                 Some(other) => self.deferred.push(other),
                 None => {
-                    log::warn!("Horizon: chunk generation did not finish before saving");
-                    break;
+                    self.save_error.get_or_insert_with(|| {
+                        "chunk generation/save drain timed out; ownership retained".into()
+                    });
+                    return false;
                 }
             }
         }
@@ -2302,10 +2326,17 @@ impl Streaming {
             .iter()
             .filter_map(|k| self.protos.get(k)?.as_ref())
             .collect();
-        if !protos.is_empty() {
-            self.saves.save_protos(&protos);
+        if !protos.is_empty()
+            && let Err(error) = self.saves.save_protos(&protos)
+        {
+            self.save_error.get_or_insert(error);
+            return false;
         }
         self.written.clear();
+        self.save_error.is_none()
+    }
+    pub fn save_failure(&self) -> Option<&str> {
+        self.save_error.as_deref()
     }
     /// Finish generation for a closing world without waiting on the event
     /// loop. No new generation is scheduled while the save screen is shown.
@@ -2339,7 +2370,7 @@ impl Streaming {
         }
         let written: Vec<_> = self.written.drain().collect();
         self.save_checked_out(written);
-        self.saving == 0
+        self.saving == 0 && self.save_error.is_none()
     }
     fn in_range(&self, x: i32, z: i32, margin: i32) -> bool {
         self.ranges().in_range(x, z, margin)

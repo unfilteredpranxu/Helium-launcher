@@ -5,6 +5,8 @@ on:
     paths:
       - 'crates/horizon-metal-bridge/**'
       - 'crates/horizon-client/src/game.rs'
+      - 'crates/horizon-client/src/game/**'
+      - 'crates/horizon-client/tests/generation_saves.rs'
       - 'crates/horizon-client/src/entry.rs'
       - 'crates/horizon-client/src/save.rs'
       - 'crates/horizon-client/src/save/**'
@@ -186,12 +188,12 @@ jobs:
             await github.rest.checks.create({owner:context.repo.owner,repo:context.repo.repo,head_sha:context.sha,name:'Helium production bridge evidence',status:'completed',conclusion:'neutral',output:{title:'Read individual compilation logs; not gameplay runtime proof',summary}});
 
   shutdown-save-qualification:
-    name: Save/shutdown components (P0 release HOLD) - ${{ matrix.os }}
+    name: G07 R3 owned shutdown and replay (publication HOLD) - ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-26]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - if: runner.os == 'Linux'
@@ -205,10 +207,25 @@ jobs:
           CARGO_BUILD_JOBS: '3'
         run: |
           set -euo pipefail
-          cargo +1.95.0 test --locked -p horizon-threads --lib jobs::
-          cargo +1.95.0 test --locked -p horizon-client-lib --no-default-features --lib save::shutdown -- --nocapture
-          cargo +1.95.0 test --locked -p horizon-client-lib --no-default-features --lib lan::playerdata::tests::
-          rustfmt +1.95.0 --check --edition 2024 --config skip_children=true crates/horizon-client/src/save.rs crates/horizon-client/src/save/shutdown.rs crates/horizon-client/src/save/shutdown/tests.rs crates/horizon-client/src/lan/playerdata.rs crates/horizon-client/src/net.rs crates/horizon-client/src/game/integrated.rs
+          mkdir -p "$RUNNER_TEMP/g07r3"
+          cargo +1.95.0 test --locked -p horizon-threads --lib jobs:: 2>&1 | tee "$RUNNER_TEMP/g07r3/threads.log"
+          cargo +1.95.0 test --locked -p horizon-client-lib --no-default-features --lib save:: -- --test-threads=4 2>&1 | tee "$RUNNER_TEMP/g07r3/save.log"
+          cargo +1.95.0 test --locked -p horizon-client-lib --no-default-features --lib lan::playerdata::tests:: 2>&1 | tee "$RUNNER_TEMP/g07r3/player.log"
+          cargo +1.95.0 test --locked -p horizon-client --no-default-features --lib game::integrated::shutdown_tests -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/g07r3/game-exit.log"
+          cargo +1.95.0 test --locked -p horizon-client-render --lib streaming:: 2>&1 | tee "$RUNNER_TEMP/g07r3/streaming.log"
+          rustfmt +1.95.0 --check --edition 2024 --config skip_children=true crates/horizon-client/src/save.rs crates/horizon-client/src/save/journal.rs crates/horizon-client/src/save/journal/tests.rs crates/horizon-client/src/save/shutdown.rs crates/horizon-client/src/save/shutdown/tests.rs crates/horizon-client/src/lan/playerdata.rs crates/horizon-client/src/game.rs crates/horizon-client/src/game/shutdown.rs crates/horizon-client/src/game/saving.rs crates/horizon-client/src/game/integrated.rs crates/horizon-client/src/game/integrated/shutdown_tests.rs crates/horizon-client/src/game/remote.rs crates/horizon-client/src/game/levels.rs crates/horizon-client/src/game/world_loading.rs crates/horizon-client-render/src/streaming.rs crates/horizon-client-render/src/lod.rs crates/horizon-threads/src/retirement.rs
+      - name: Publish synthetic shutdown and real filesystem evidence
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs=require('fs'),path=require('path');
+            const summary=['threads.log','save.log','player.log','game-exit.log','streaming.log'].map(n=>{
+              const p=path.join(process.env.RUNNER_TEMP,'g07r3',n);
+              const s=fs.existsSync(p)?fs.readFileSync(p,'utf8').split('\n').filter(l=>/^(running |test |test result:|error:|failures:)/.test(l)).join('\n'):'NOT RUN';
+              return '### '+n+'\n```text\n'+s.slice(-16000)+'\n```';
+            }).join('\n');
+            await github.rest.checks.create({owner:context.repo.owner,repo:context.repo.repo,head_sha:context.sha,name:'G07 R3 shutdown evidence - '+process.env.RUNNER_OS,status:'completed',conclusion:'neutral',output:{title:'Production ownership components + synthetic temporary disk/kill/replay; NOT UIKit or hardware watchdog prevention',summary}});
 
   attached-ios-game:
     needs: [apple-sdk, production-bridge, diagnostics-qualification, linux-diagnostics, shutdown-save-qualification]

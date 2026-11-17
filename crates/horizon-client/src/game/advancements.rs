@@ -413,11 +413,8 @@ impl Game<'_> {
             .adv
             .progress
             .to_json(&self.adv.tree, horizon_world::DATA_VERSION);
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
         if let Ok(text) = serde_json::to_string_pretty(&json) {
-            let _ = std::fs::write(path, text);
+            let _ = horizon_client::save::write_durable(&path, text.as_bytes());
         }
     }
     /// The player as predicates see it.

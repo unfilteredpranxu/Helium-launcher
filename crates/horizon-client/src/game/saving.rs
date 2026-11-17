@@ -20,6 +20,7 @@ enum Stage {
     Entities(VecDeque<(i32, i32)>),
     Writes,
     Server,
+    Retiring,
     Quit,
 }
 
@@ -49,7 +50,15 @@ impl Game<'_> {
         // server's own stop path aborts its workers, but the window's streaming registration
         // is dropped only after the event loop exits and would otherwise wait for queued work.
         self.streaming.abort_generation();
-        if let Some(integrated) = &self.integrated {
+        if (self.integrated.is_some() || self.remote.is_some()) && self.begin_owned_ui_shutdown() {
+            self.pending_save = Some(ClosingSave {
+                quit,
+                close: true,
+                reply: None,
+                started: Instant::now(),
+                stage: Stage::Retiring,
+            });
+        } else if let Some(integrated) = &self.integrated {
             integrated.request_stop();
             self.pending_save = Some(ClosingSave {
                 quit,
@@ -128,6 +137,28 @@ impl Game<'_> {
         let result = (|| -> Result<bool> {
             match &mut save.stage {
                 Stage::Quit => Ok(true),
+                Stage::Retiring => {
+                    let ticket = self
+                        .exit_retirement
+                        .as_ref()
+                        .ok_or("shutdown ownership missing")?;
+                    match ticket.status() {
+                        horizon_threads::retirement::Status::Pending => Ok(false),
+                        horizon_threads::retirement::Status::Failed => Err(ticket
+                            .error()
+                            .unwrap_or("shutdown failed; owners retained")
+                            .to_owned()
+                            .into()),
+                        horizon_threads::retirement::Status::Complete => {
+                            if !save.quit {
+                                let reason = self.shutdown_disconnect_reason.take();
+                                self.leave_server(reason)?;
+                                self.exit_retirement = None;
+                            }
+                            Ok(true)
+                        }
+                    }
+                }
                 Stage::Server => {
                     let server = self
                         .integrated

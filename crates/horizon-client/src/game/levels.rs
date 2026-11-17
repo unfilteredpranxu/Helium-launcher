@@ -133,6 +133,30 @@ pub(super) struct Levels {
 }
 
 impl Levels {
+    pub(super) fn check_save_failures(&self) -> Result<()> {
+        for level in self.parked.values() {
+            level.save.writes_finished()?;
+            if let Some(error) = level.streaming.save_failure() {
+                return Err(error.to_owned().into());
+            }
+        }
+        Ok(())
+    }
+    pub(super) fn retire_client_io(
+        &mut self,
+        context: Arc<horizon_client::streaming::WorkerContext>,
+    ) -> Vec<(Streaming, Arc<SaveDir>)> {
+        self.parked
+            .values_mut()
+            .map(|level| {
+                let placeholder =
+                    Streaming::new(Arc::new(super::remote::NoTerrain), context.clone(), 1);
+                let stream = std::mem::replace(&mut level.streaming, placeholder);
+                let empty = Arc::new(SaveDir::new(std::path::PathBuf::new(), level.save.shape));
+                (stream, std::mem::replace(&mut level.save, empty))
+            })
+            .collect()
+    }
     /// Clear every parked level and dimensions recorded as heard open.
     pub(super) fn clear(&mut self) {
         self.parked.clear();
@@ -543,7 +567,7 @@ impl Game<'_> {
                         self.tick()
                     } else {
                         let running = running.unwrap_or_else(|| self.clock.world_runs());
-self.tick_weather_effects();
+                        self.tick_weather_effects();
                         let ticked = self.tick_world(running);
                         self.flush_level_effects();
                         ticked

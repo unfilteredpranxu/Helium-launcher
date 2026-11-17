@@ -1559,7 +1559,14 @@ impl Game<'_> {
                 self.player_autosaves.save_after(guest, &self.world_root);
             }
             let directory = playerdata::directory(&self.world_root);
-            self.native_player_save_to_file(guest.uuid, &guest.name, &directory);
+            if horizon_client::save::file_write_result().is_ok()
+                && self
+                    .player_autosaves
+                    .writes_finished()
+                    .is_ok_and(|done| done)
+            {
+                self.native_player_save_to_file(guest.uuid, &guest.name, &directory);
+            }
         }
         self.save_guest_records(host, guest);
     }
@@ -1711,11 +1718,8 @@ impl Game<'_> {
         let json = guest
             .advancements
             .to_json(&self.adv.tree, horizon_world::DATA_VERSION);
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
         if let Ok(text) = serde_json::to_string_pretty(&json) {
-            let _ = std::fs::write(path, text);
+            let _ = horizon_client::save::write_durable(&path, text.as_bytes());
         }
         if let Some(play) = host.play.get(&guest.conn) {
             play.stats

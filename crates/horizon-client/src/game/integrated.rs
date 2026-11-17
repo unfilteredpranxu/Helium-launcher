@@ -8,6 +8,8 @@
 //!
 //! Every single-player world runs this way; LAN guests and dedicated servers
 //! use the same server code.
+#[cfg(test)]
+mod shutdown_tests;
 use super::{
     Dim, Game, Options, PackResources, Resources, UiResources, WorldIcon,
     execution_role::ExecutionRole,
@@ -53,6 +55,7 @@ struct Flags {
     paused: AtomicBool,
     stop: AtomicBool,
     failure: Mutex<Option<String>>,
+    retired_lock: Mutex<Option<horizon_client::save::SessionLock>>,
     /// `IntegratedServer.getPort`: the port it is open to the LAN on, 0
     /// while it is not.
     published: AtomicU16,
@@ -245,6 +248,17 @@ impl Integrated {
     pub fn post(&self, f: impl FnOnce(&mut Game<'_>) + Send + 'static) -> bool {
         self.tasks.send(Box::new(f)).is_ok()
     }
+    pub(super) fn request_checkpoint(&self) {
+        self.post(|game| {
+            if let Err(error) = game.save_game() {
+                game.save
+                    .shutdown_event(horizon_client::save::shutdown::Stage::Failed);
+                if let Some(serving) = &game.serving {
+                    *serving.flags.failure.lock().unwrap() = Some(error.to_string());
+                }
+            }
+        });
+    }
     /// `IntegratedServer.halt(true)`: returns once the world is saved and let go.
     pub fn stop(mut self) -> Result<()> {
         self.halt()
@@ -258,7 +272,7 @@ impl Integrated {
             .as_ref()
             .is_none_or(|thread| thread.is_finished())
     }
-    fn halt(&mut self) -> Result<()> {
+    pub(super) fn halt(&mut self) -> Result<()> {
         self.request_stop();
         if let Some(thread) = self.thread.take() {
             horizon_client::save::shutdown::global().record(
@@ -301,6 +315,32 @@ impl Integrated {
 }
 impl Drop for Integrated {
     fn drop(&mut self) {
+        if self
+            .thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+        {
+            self.request_stop();
+            let mut thread = self.thread.take();
+            let flags = self.flags.clone();
+            horizon_threads::retirement::global().submit(move || {
+                if let Some(thread) = thread.take() {
+                    thread
+                        .join()
+                        .map_err(|_| "integrated server panicked; owners retained".to_owned())?;
+                }
+                if let Some(error) = flags
+                    .failure
+                    .lock()
+                    .map_err(|_| "server failure poisoned")?
+                    .as_ref()
+                {
+                    return Err(error.clone());
+                }
+                Ok(())
+            });
+            return;
+        }
         if let Err(error) = self.halt() {
             log::error!("Horizon: integrated server shutdown: {error}");
         }
@@ -723,6 +763,16 @@ impl Game<'_> {
         let mut was_paused = false;
         while !flags.stop.load(Ordering::Relaxed) {
             self.run_tasks();
+            // Stop simulation promptly after a real save failure. Preserve
+            // the failed data/lock in serve's owned error state, rather than
+            // accumulating more unpersistable generation until an autosave.
+            self.save.writes_finished()?;
+            self.levels.check_save_failures()?;
+            horizon_client::save::file_write_result()?;
+            self.finish_player_autosaves(false)?;
+            if let Some(error) = self.streaming.save_failure() {
+                return Err(error.to_owned().into());
+            }
             if self.agent.hold_server {
                 // Keep servicing control requests so the fixture can release the barrier.
                 // Unlike /tick freeze, no player's queued packets are applied here.
@@ -915,7 +965,8 @@ impl Game<'_> {
         self.native_configs_server_stop();
         self.native_players_leaving();
         // IntegratedServer.stopServer: teardownPublishedState.
-        if let Some(s) = self.serving.take() {
+        let serving = self.serving.take();
+        if let Some(s) = &serving {
             s.flags.published.store(0, Ordering::Relaxed);
         }
         if let Some(mut host) = self.lan.take() {
@@ -943,9 +994,16 @@ impl Game<'_> {
         self.save.flush()?;
         // `WorldCloseFinal` follows a successful final save.
         self.native_lifecycle_world_closed();
-        self.session_lock = None;
-        self.save
-            .shutdown_event(horizon_client::save::shutdown::Stage::LockReleased);
+        if let Some(serving) = serving {
+            // Client retirement owns this handle until its readers/LOD workers
+            // have stopped too. Server completion alone must not release it.
+            *serving
+                .flags
+                .retired_lock
+                .lock()
+                .map_err(|_| "session transfer poisoned")? = self.session_lock.take();
+        }
+
         Ok(())
     }
 }
@@ -1283,7 +1341,24 @@ fn serve(
             return Err(e);
         }
     };
-    server.run_integrated(launch, flags, tasks, ready, opening)
+    let result = server.run_integrated(launch, flags.clone(), tasks, ready, opening);
+    if let Err(error) = &result {
+        server.streaming.abort_generation();
+        *flags.failure.lock().unwrap() = Some(error.to_string());
+        server
+            .save
+            .shutdown_event(horizon_client::save::shutdown::Stage::Failed);
+        let _ = ready.send(Err(error.to_string()));
+        // An error is not permission to drop the only dirty world or release
+        // its lock. Remain an owned failed server until process termination;
+        // published redo records recover on the next exclusive open.
+        if server.session_lock.is_some() {
+            loop {
+                std::thread::park_timeout(Duration::from_secs(1));
+            }
+        }
+    }
+    result
 }
 
 /// What `serve` starts beside the server's own Game.

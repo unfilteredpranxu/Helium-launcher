@@ -4,6 +4,7 @@ use crate::{
     save::{SaveDir, SessionLock},
 };
 use horizon_world::nbt::Tag;
+use std::fs;
 
 fn temporary() -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -149,6 +150,118 @@ fn first_errors_survive_bounded_trace_pressure_without_private_text() {
             .all(|l| l.split_whitespace().all(|n| n.parse::<u64>().is_ok()))
     );
 }
+
+#[test]
+fn coordinator_is_responsive_while_owning_stalled_region_and_session_lock() {
+    use horizon_threads::retirement::{Coordinator, Status};
+    let dir = temporary();
+    let lock = SessionLock::acquire(&dir).unwrap();
+    let (save, gate) = blocked(dir.clone());
+    save.save_entities_later(vec![(
+        (0, 0),
+        vec![Tag::compound([("fixture", Tag::Int(91))])],
+    )])
+    .unwrap();
+    let coordinator = Coordinator::default();
+    let mut owned = Some((save, lock));
+    let submitted = Instant::now();
+    let ticket = coordinator.submit(move || {
+        owned
+            .as_ref()
+            .unwrap()
+            .0
+            .flush()
+            .map_err(|e| e.to_string())?;
+        drop(owned.take());
+        Ok(())
+    });
+    assert!(submitted.elapsed() < Duration::from_millis(100));
+    // Concurrent/repeated quit observers share this exact retirement, rather
+    // than taking a second ownership path or authorizing completion early.
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let ticket = ticket.clone();
+            scope.spawn(move || {
+                for _ in 0..1000 {
+                    assert_eq!(ticket.status(), Status::Pending);
+                }
+            });
+        }
+    });
+    for _ in 0..100 {
+        coordinator.poll();
+        assert_eq!(ticket.status(), Status::Pending);
+        assert!(SessionLock::acquire(&dir).is_err());
+    }
+    release(&gate);
+    let until = Instant::now() + Duration::from_secs(3);
+    while ticket.status() == Status::Pending && Instant::now() < until {
+        std::thread::yield_now();
+    }
+    assert_eq!(ticket.status(), Status::Complete);
+    let lock = SessionLock::acquire(&dir).unwrap();
+    let reopened = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+    assert_eq!(reopened.load_entities(0, 0).len(), 1);
+    drop(reopened);
+    drop(lock);
+    coordinator.poll();
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn failed_retirement_never_releases_failed_writes_or_their_lock() {
+    use horizon_threads::retirement::{Coordinator, Status};
+    let dir = temporary();
+    let lock = SessionLock::acquire(&dir).unwrap();
+    let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+    // Journal admission succeeds, destination storage fails.
+    fs::write(dir.join("entities"), b"not a directory").unwrap();
+    save.save_entities_later(vec![(
+        (0, 0),
+        vec![Tag::compound([("fixture", Tag::Int(8))])],
+    )])
+    .unwrap();
+    let coordinator = Coordinator::default();
+    let mut owned = Some((save, lock));
+    let ticket = coordinator.submit(move || {
+        owned
+            .as_ref()
+            .unwrap()
+            .0
+            .flush()
+            .map_err(|e| e.to_string())?;
+        drop(owned.take());
+        Ok(())
+    });
+    let until = Instant::now() + Duration::from_secs(3);
+    while ticket.status() == Status::Pending && Instant::now() < until {
+        std::thread::yield_now();
+    }
+    assert_eq!(ticket.status(), Status::Failed);
+    assert!(ticket.error().is_some());
+    for _ in 0..20 {
+        coordinator.poll();
+        assert!(SessionLock::acquire(&dir).is_err());
+    }
+    // This LOCAL test coordinator is explicitly retired off the probe thread.
+    // Production's registry has process lifetime and retains failures.
+    let until = Instant::now() + Duration::from_secs(3);
+    while !coordinator.workers_stopped() && Instant::now() < until {
+        std::thread::yield_now();
+    }
+    assert!(coordinator.workers_stopped());
+    drop(ticket);
+    std::thread::spawn(move || drop(coordinator))
+        .join()
+        .unwrap();
+    fs::remove_file(dir.join("entities")).unwrap();
+    let lock = SessionLock::acquire(&dir).unwrap();
+    let reopened = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+    assert_eq!(reopened.load_entities(0, 0).len(), 1);
+    drop(reopened);
+    drop(lock);
+    fs::remove_dir_all(dir).unwrap();
+}
 #[test]
 #[ignore = "subprocess fixture invoked explicitly by the abrupt-kill parent test"]
 fn abrupt_exit_child_fixture() {
@@ -164,15 +277,24 @@ fn abrupt_exit_child_fixture() {
     )])
     .unwrap();
     assert!(!save.try_write_status().unwrap().finished());
+    let _player = crate::save::prepare_dat(
+        dir.join("players/data/fixture.dat"),
+        Tag::compound([("fixture", Tag::Int(4))]),
+    )
+    .unwrap();
+    let _metadata = crate::save::prepare_dat(
+        dir.join("level.dat"),
+        Tag::compound([("Data", Tag::compound([("fixture", Tag::Int(5))]))]),
+    )
+    .unwrap();
     std::fs::write(dir.join("queued-not-durable"), b"synthetic child fixture").unwrap();
     loop {
         std::thread::park();
     }
 }
 #[test]
-fn host_style_abrupt_kill_loses_unacknowledged_memory_without_false_completion() {
-    // Temporary fixture only. This deliberately proves the remaining exposure,
-    // not that the app has a journal/recovery or watchdog prevention mechanism.
+fn host_style_abrupt_kill_recovers_acknowledged_handoff_before_world_reads() {
+    // Temporary fixture only; the region writer is blocked at process death.
     let dir = temporary();
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
@@ -198,12 +320,36 @@ fn host_style_abrupt_kill_loses_unacknowledged_memory_without_false_completion()
     assert!(SessionLock::acquire(&dir).is_err());
     child.kill().unwrap();
     assert!(!child.wait().unwrap().success());
-    assert!(SessionLock::acquire(&dir).is_ok());
+    let lock = SessionLock::acquire(&dir).unwrap();
+    assert_eq!(
+        crate::save::read_dat(&dir.join("players/data/fixture.dat"))
+            .unwrap()
+            .get("fixture"),
+        Some(&Tag::Int(4))
+    );
+    assert_eq!(
+        crate::save::read_dat(&dir.join("level.dat"))
+            .unwrap()
+            .get("Data")
+            .unwrap()
+            .get("fixture"),
+        Some(&Tag::Int(5))
+    );
     let reopened = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
-    assert!(
-        reopened.load_entities(0, 0).is_empty(),
-        "no durable journal exists for this queued-only write"
+    assert_eq!(
+        reopened.load_entities(0, 0),
+        vec![Tag::compound([("fixture", Tag::Int(1))])]
     );
     drop(reopened);
+    drop(lock);
+    let lock = SessionLock::acquire(&dir).unwrap();
+    let reopened = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+    assert_eq!(
+        reopened.load_entities(0, 0).len(),
+        1,
+        "replay must be idempotent"
+    );
+    drop(reopened);
+    drop(lock);
     std::fs::remove_dir_all(dir).unwrap();
 }

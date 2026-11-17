@@ -6,7 +6,7 @@ use crate::{
     save::{
         Level, put, read_dat,
         shutdown::{self, Actor, Stage},
-        uuid_from_tag, write_dat, write_dat_durable,
+        uuid_from_tag, write_dat,
     },
 };
 use horizon_protocol::crypto::uuid_string;
@@ -247,25 +247,30 @@ pub fn save_now(guest: &Guest, world: &Path) -> Result<(), String> {
         .map_err(|e| format!("{} is not saved: {e}", file.display()))
 }
 
-/// An immutable player snapshot. Compression and all filesystem work belong to
-/// the writer; native callbacks are delivered by the server after completion.
+/// An immutable, durably published player snapshot. Admission runs on the
+/// owning server; destination commit runs on its writer. Native callbacks are
+/// delivered only for genuine destination completion, never a superseded handoff.
 struct Snapshot {
     uuid: u128,
     name: String,
     file: PathBuf,
-    tag: Tag,
+    handoff: crate::save::PreparedDat,
 }
 
 pub struct SavedPlayer {
     pub uuid: u128,
     pub name: String,
+    pub written: bool,
 }
 
 fn write_snapshot(snapshot: Snapshot) -> Result<SavedPlayer, String> {
-    write_dat_durable(&snapshot.file, snapshot.tag)
-        .map(|()| SavedPlayer {
+    snapshot
+        .handoff
+        .commit()
+        .map(|written| SavedPlayer {
             uuid: snapshot.uuid,
             name: snapshot.name,
+            written,
         })
         .map_err(|e| format!("{} is not saved: {e}", snapshot.file.display()))
 }
@@ -297,11 +302,20 @@ pub struct Autosaves {
 
 impl Autosaves {
     pub fn enqueue(&mut self, guest: &Guest, world: &Path) {
+        let file = path(world, guest.uuid);
+        let handoff = match crate::save::prepare_dat(file.clone(), player_tag(guest)) {
+            Ok(handoff) => handoff,
+            Err(error) => {
+                shutdown::global().record(0, Actor::Player, Stage::Failed, 1, self.pending);
+                self.error.get_or_insert_with(|| error.to_string());
+                return;
+            }
+        };
         let snapshot = Snapshot {
             uuid: guest.uuid,
             name: guest.name.clone(),
-            file: path(world, guest.uuid),
-            tag: player_tag(guest),
+            file,
+            handoff,
         };
         if self.writer.is_none() {
             let (send, receive) = std::sync::mpsc::channel::<Snapshot>();
@@ -315,10 +329,10 @@ impl Autosaves {
                         shutdown::global().record(
                             0,
                             Actor::Player,
-                            if result.is_ok() {
-                                Stage::Synced
-                            } else {
-                                Stage::Failed
+                            match &result {
+                                Ok(player) if player.written => Stage::Synced,
+                                Ok(_) => Stage::Superseded,
+                                Err(_) => Stage::Failed,
                             },
                             1,
                             0,

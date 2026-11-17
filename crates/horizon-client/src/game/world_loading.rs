@@ -98,6 +98,7 @@ impl WorldRequest {
             creative,
             create,
         } = self;
+        let session_lock = horizon_client::save::SessionLock::acquire(&save_root)?;
         let name = name.as_deref();
         let create = create.as_ref();
         // openWorldLoadLevelData: level data that does not read is RecoverWorldDataScreen's to
@@ -139,7 +140,6 @@ impl WorldRequest {
         }
         horizon_client::save::upgrade_older_world_with(&save_root, upgrade)?;
         horizon_client::save::migrate_legacy(&save_root)?;
-        let session_lock = horizon_client::save::SessionLock::acquire(&save_root)?;
         // RandomSequences: the world's data/minecraft/random_sequences.dat.
         let rand_sequences =
             horizon_client::save::read_dat(&save_root.join("data/minecraft/random_sequences.dat"))

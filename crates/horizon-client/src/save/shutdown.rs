@@ -38,6 +38,7 @@ pub enum Stage {
     LockReleased,
     WaitBegin,
     WaitEnd,
+    Superseded,
 }
 #[derive(Clone, Debug)]
 struct Event {
@@ -171,6 +172,9 @@ pub fn global() -> &'static Trace {
 /// thread. This does not assert how LiveContainer implements process exit.
 pub fn mark_event_thread() {
     let _ = global().main.set(std::thread::current().id());
+}
+pub fn is_event_thread() -> bool {
+    global().main.get() == Some(&std::thread::current().id())
 }
 pub fn new_storage_id() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);

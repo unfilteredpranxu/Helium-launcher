@@ -256,7 +256,7 @@ impl ChatTrust {
 }
 
 /// Streaming needs a generator; a server world never generates.
-struct NoTerrain;
+pub(super) struct NoTerrain;
 impl ChunkGenerator for NoTerrain {
     type Worker = ();
     fn worker(&self) {}
@@ -1244,8 +1244,34 @@ impl Game<'_> {
         Ok(())
     }
 
+    pub(super) fn retire_remote_connection(&mut self) {
+        if let Some(remote) = &self.remote {
+            remote.session.cancel_far_terrain();
+        }
+        if let Some(old) = self
+            .remote
+            .as_mut()
+            .and_then(|remote| remote.heard_level.take())
+        {
+            self.native_client_level_unload(&old);
+        }
+        if self.remote.is_some() {
+            self.native_client_disconnecting();
+        }
+        if let Some(mut remote) = self.remote.take() {
+            remote.session.disconnect();
+        }
+    }
+
     /// Disconnect and return to the multiplayer screen (DisconnectedScreen).
     pub(super) fn leave_server(&mut self, reason: Option<String>) -> Result<()> {
+        if self.window.is_some()
+            && self.exit_retirement.is_none()
+            && (self.integrated.is_some() || self.remote.is_some())
+        {
+            self.shutdown_disconnect_reason = reason;
+            return self.begin_closing_save(false);
+        }
         if reason.is_none() && self.integrated.as_ref().is_some_and(|s| !s.stopped()) {
             return self.begin_closing_save(false);
         }
@@ -1298,13 +1324,15 @@ impl Game<'_> {
         // The shared world is closing: its invite code ends with it.
         self.friends_lan_closed();
         // Single player's server thread saves the world before the title shows.
-        let single_player = match self.integrated.take() {
-            Some(server) => {
-                server.stop()?;
-                true
-            }
-            None => false,
-        };
+        let single_player = self.shutdown_singleplayer
+            || match self.integrated.take() {
+                Some(server) => {
+                    server.stop()?;
+                    true
+                }
+                None => false,
+            };
+        self.shutdown_singleplayer = false;
         // A splitscreen player leaving says nothing of where P1 plays.
         if !self.options.split_guest {
             horizon_client::crash::clear_detail("Server");

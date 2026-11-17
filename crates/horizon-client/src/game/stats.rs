@@ -158,11 +158,8 @@ impl Stats {
     /// `ServerStatsCounter.save`.
     pub(super) fn write(&self, path: &Path) {
         let json = self.to_json();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
         if let Ok(text) = serde_json::to_string_pretty(&json) {
-            let _ = std::fs::write(path, text);
+            let _ = horizon_client::save::write_durable(path, text.as_bytes());
         }
     }
 }

@@ -50,7 +50,7 @@ fn normalize(text: &str) -> Option<String> {
         || rows.iter().any(|r| {
             r.len() != 7
                 || !(1..=7).contains(&r[2])
-                || !(1..=14).contains(&r[3])
+                || !(1..=15).contains(&r[3])
                 || r[6] > 1
                 || r[0] > header[4]
         })
@@ -83,6 +83,7 @@ fn normalize(text: &str) -> Option<String> {
         "Session lock released",
         "WAIT BEGIN",
         "WAIT END",
+        "Superseded handoff (NOT destination commit)",
     ];
     let mut out = format!(
         "trace_sequence={} lost_trace_events={} save_or_worker_errors_total={} elapsed_ms={} main_identity_known={} trace_boot={}\n",
@@ -139,5 +140,11 @@ mod tests {
                 .unwrap();
         assert!(text.contains("Synced component (NOT whole world)"));
         assert!(!text.contains("five_second_probe_near=true"));
+    }
+    #[test]
+    fn superseded_handoff_does_not_claim_destination_sync() {
+        let text = normalize("1 1 0 0 10 1 99\n1 2 2 15 1 0 0\n").unwrap();
+        assert!(text.contains("Superseded handoff (NOT destination commit)"));
+        assert!(!text.contains("Synced component"));
     }
 }

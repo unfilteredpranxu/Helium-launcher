@@ -110,15 +110,17 @@ impl ChunkGenerator for Recorder {
         self.viewed.lock().unwrap().push(proto.clone());
         Some(Chunk::empty(proto.x, proto.z))
     }
-    fn save_protos(&self, protos: &[&Proto]) {
+    fn save_protos(&self, protos: &[&Proto]) -> Result<(), String> {
         let mut saved = self.protos.lock().unwrap();
         for proto in protos {
             let proto = proto.downcast_ref::<Recorded>().unwrap();
             saved.insert((proto.x, proto.z), proto.clone());
         }
+        Ok(())
     }
-    fn save_finished(&self, chunk: Chunk) {
+    fn save_finished(&self, chunk: Chunk) -> Result<(), Box<(Chunk, String)>> {
         self.save_chunk(&chunk);
+        Ok(())
     }
 }
 

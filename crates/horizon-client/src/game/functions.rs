@@ -219,7 +219,7 @@ impl Game<'_> {
             .filter(|id| !self.fns.enabled.contains(id))
             .collect();
         let json = serde_json::json!({"enabled": self.fns.enabled, "disabled": disabled});
-        let _ = std::fs::write(self.datapack_settings_path(), json.to_string());
+        let _ = save::write_durable(&self.datapack_settings_path(), json.to_string().as_bytes());
     }
     pub(super) fn sync_function_registries(&mut self) {
         self.sync_enchantment_registries();

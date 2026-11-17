@@ -368,6 +368,7 @@ mod sheep_dye;
 mod shelf;
 mod shield;
 mod shoulders;
+mod shutdown;
 mod sign_edit;
 mod skin_models;
 mod sniffers;
@@ -3375,6 +3376,9 @@ struct Game<'a> {
     saved_for_exit: bool,
     native_client_stopped: bool,
     pending_save: Option<saving::ClosingSave>,
+    exit_retirement: Option<horizon_threads::retirement::Ticket>,
+    shutdown_singleplayer: bool,
+    shutdown_disconnect_reason: Option<String>,
     /// The last world frame reached the swap chain. A window the compositor
     /// stops showing gets no frames, and the event loop must not spin on it.
     frame_drawn: bool,
@@ -16703,6 +16707,9 @@ impl Game<'_> {
         self.save_game_metadata()?;
         self.finish_player_autosaves(wait)?;
         self.native_world_saved(wait);
+        if wait {
+            self.message = Some(("Saved the game".into(), Instant::now()));
+        }
         if dedicated {
             dedicated::events::record_server("saved", serde_json::json!({}));
         }
@@ -16712,7 +16719,7 @@ impl Game<'_> {
         let saved = self.player_autosaves.completed(wait);
         if !saved.is_empty() {
             let directory = horizon_client::lan::playerdata::directory(&self.world_root);
-            for player in saved {
+            for player in saved.into_iter().filter(|p| p.written) {
                 self.native_player_save_to_file(player.uuid, &player.name, &directory);
             }
         }
@@ -16773,7 +16780,8 @@ impl Game<'_> {
             self.lan = Some(host);
         }
         self.save_world_state();
-        self.message = Some(("Saved the game".into(), Instant::now()));
+        horizon_client::save::file_write_result()?;
+        self.finish_player_autosaves(true)?;
         Ok(())
     }
     /// Save the level in place: its changed chunks, its entities and its raids.
@@ -16781,11 +16789,21 @@ impl Game<'_> {
         self.save_border();
         self.save.save_attachments(&self.world.attachments)?;
         self.save.save_forced_chunks(&self.streaming.forced)?;
-        self.streaming.save(&mut self.world, wait);
-        let keys: Vec<_> = self.world.modified.drain().collect();
+        if !self.streaming.save(&mut self.world, wait) {
+            return Err(self
+                .streaming
+                .save_failure()
+                .unwrap_or("streaming saves remain pending")
+                .to_owned()
+                .into());
+        }
+        let keys: Vec<_> = self.world.modified.iter().copied().collect();
         let chunks = self.with_entities(keys.iter().filter_map(|k| self.world.chunks.get(k)));
         self.save
             .save_later(&chunks, self.pack.assets.registry, world_biomes!(self))?;
+        for key in keys {
+            self.world.modified.remove(&key);
+        }
         // Prepare entities while the chunk writer runs, then use one barrier.
         self.save_entities(false)?;
         self.save_raids();
@@ -18682,6 +18700,9 @@ impl ApplicationHandler for Game<'_> {
         if let Some(native) = self.direct_metal.as_mut() {
             native.invalidate("application suspended");
         }
+        if let Some(server) = &self.integrated {
+            server.request_checkpoint();
+        }
     }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         horizon_client::save::shutdown::mark_event_thread();
@@ -20468,6 +20489,9 @@ impl Game<'_> {
     }
     /// The loop ended: close the pads' output, save the world, write the perf report.
     pub(super) fn shut_down(&mut self) {
+        if self.begin_owned_ui_shutdown() {
+            return;
+        }
         horizon_client::save::shutdown::global().record(
             self.save.shutdown_id(),
             horizon_client::save::shutdown::Actor::Main,
@@ -20490,6 +20514,7 @@ impl Game<'_> {
     /// winit's `about_to_wait`: what happens between frames (stop requests, the closing
     /// save, world entry, the control socket, pads), then the next frame.
     pub(super) fn idle(&mut self, event_loop: &dyn EventLoopCtl) {
+        horizon_threads::retirement::global().poll();
         // A splitscreen player's game has nothing to save: P1's shuts the process down.
         if horizon_threads::stop_requests() > 0
             && !self.options.split_guest
@@ -21155,6 +21180,9 @@ impl<'a> Game<'a> {
             saved_for_exit: false,
             native_client_stopped: false,
             pending_save: None,
+            exit_retirement: None,
+            shutdown_singleplayer: false,
+            shutdown_disconnect_reason: None,
             frame_drawn: true,
             world_icon: None,
             forced_hit: None,
@@ -21395,6 +21423,11 @@ impl WorldRestLoader {
 
 impl Game<'_> {
     fn defer_world_entry(&mut self, entry: PendingWorldEntry) -> Result<bool> {
+        if horizon_threads::retirement::global().pending() {
+            return Err(
+                "previous world cleanup is pending or failed; its ownership is retained".into(),
+            );
+        }
         self.poll_world_rest()?;
         if self.rest_loader.is_none() {
             return Ok(false);

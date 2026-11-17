@@ -52,9 +52,31 @@ use std::{
 pub const VERSION_NAME: &str = horizon_core::VANILLA_VERSION;
 
 mod gateway;
+mod journal;
 #[cfg(test)]
 mod loot_tests;
 pub mod shutdown;
+
+thread_local! {
+    static FILE_WRITE_ERROR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+fn observe_file_write(result: Result<()>) -> Result<()> {
+    if let Err(error) = &result {
+        FILE_WRITE_ERROR.with_borrow_mut(|first| {
+            first.get_or_insert_with(|| error.to_string());
+        });
+        shutdown::global().record(0, shutdown::Actor::Region, shutdown::Stage::Failed, 1, 0);
+    }
+    result
+}
+/// Sticky per-writer-thread failure barrier, including legacy callers which
+/// only log a failed metadata write. Reading this cannot acknowledge failure.
+pub fn file_write_result() -> Result<()> {
+    FILE_WRITE_ERROR.with_borrow(|error| match error {
+        Some(error) => Err(error.clone().into()),
+        None => Ok(()),
+    })
+}
 
 /// Snapshot live block entities and custom names for a save batch without
 /// mutating the world. Each map is visited once, retaining its iteration order
@@ -148,7 +170,7 @@ impl Drop for SessionLock {
 impl SessionLock {
     pub fn acquire(world: &Path) -> Result<Self> {
         use std::io::Write;
-        fs::create_dir_all(world)?;
+        journal::directory(world)?;
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -159,7 +181,9 @@ impl SessionLock {
         file.set_len(0)?;
         file.write_all(&[0x26, 0x03])?;
         file.flush()?;
-        Ok(Self(file))
+        let lock = Self(file);
+        journal::recover_locked(world)?;
+        Ok(lock)
     }
     /// `DirectoryLock.isLocked`: another copy holds the world's `session.lock`.
     /// A world without the file is not locked; one whose file may not be opened
@@ -2068,7 +2092,7 @@ fn cached_region(
     };
     let region = match region {
         Ok(r) => Some(Arc::new(Mutex::new(r))),
-        Err(_) if !create => None,
+        Err(e) if !create && e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.into()),
     };
     cache.regions.insert(key, (region.clone(), now));
@@ -2086,6 +2110,16 @@ fn write_region_records(
     folder: &str,
     records: &[((i32, i32), &Record)],
 ) -> Result<()> {
+    write_region_records_guarded(root, cache, folder, records, None)
+}
+fn write_region_records_guarded(
+    root: &Path,
+    cache: &RegionCache,
+    folder: &str,
+    records: &[((i32, i32), &Record)],
+    tickets: Option<Vec<((i32, i32), journal::Ticket)>>,
+) -> Result<()> {
+    let mut tickets = tickets.map(|tickets| tickets.into_iter().collect::<HashMap<_, _>>());
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as u32);
@@ -2103,22 +2137,56 @@ fn write_region_records(
         // Clearing chunks of a region that doesn't exist changes nothing.
         let create = list.iter().any(|(_, r)| r.is_some());
         let Some(region) = cached_region(cache, (rx, rz), &path, create)? else {
+            // A deletion of an absent region is already committed. Retire its
+            // exact redo ticket without fabricating a newly written file.
+            journal::locked(|| {
+                if let Some(tickets) = &mut tickets {
+                    for (pos, _) in &list {
+                        if let Some(ticket) = tickets.remove(&(pos.x, pos.z))
+                            && journal::current(&ticket)?
+                        {
+                            journal::acknowledge_locked(ticket)?;
+                        }
+                    }
+                }
+                Ok(())
+            })?;
             continue;
         };
         let mut region = region.lock().map_err(|_| "region file poisoned")?;
-        let mut changed = false;
-        for (pos, record) in &list {
-            match record {
-                Some(record) => {
-                    region.write(*pos, record)?;
-                    changed = true;
+        // Acquire the region BEFORE the publication lock. A stalled region
+        // must not prevent a producer from publishing a newer durable handoff.
+        journal::locked(|| {
+            let mut changed = false;
+            let mut acknowledged = Vec::new();
+            for (pos, record) in &list {
+                let key = (pos.x, pos.z);
+                if let Some(tickets) = &mut tickets {
+                    let Some(ticket) = tickets.remove(&key) else {
+                        continue;
+                    };
+                    if !journal::current(&ticket)? {
+                        continue;
+                    }
+                    acknowledged.push(ticket);
                 }
-                None => changed |= region.clear(*pos, timestamp)?,
+                match record {
+                    Some(record) => {
+                        region.write(*pos, record)?;
+                        changed = true;
+                    }
+                    None => changed |= region.clear(*pos, timestamp)?,
+                }
             }
-        }
-        if changed {
-            region.sync()?;
-        }
+            if changed {
+                region.sync()?;
+                sync_folder(&path)?;
+            }
+            for ticket in acknowledged {
+                journal::acknowledge_locked(ticket)?;
+            }
+            Ok(())
+        })?;
     }
     Ok(())
 }
@@ -2357,7 +2425,11 @@ fn upgrade_record<'a>(
 /// Chunk and entity records waiting for the writer thread, by (entities?,
 /// x, z): reads see them before the region files do.
 type PendingWrites = Mutex<HashMap<(Folder, i32, i32), (u64, Record)>>;
-type WriteBatch = (Folder, Vec<((i32, i32), Record, u64)>);
+type WriteBatch = (
+    Folder,
+    Vec<((i32, i32), Record, u64)>,
+    Vec<((i32, i32), journal::Ticket)>,
+);
 /// The region folders of a dimension.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Folder {
@@ -2795,6 +2867,38 @@ impl SaveDir {
     }
     fn queue(&self, folder: Folder, records: Vec<((i32, i32), Record)>, wait: bool) -> Result<()> {
         if !records.is_empty() {
+            // Serialize producer handoffs; every admitted record is durable in
+            // the redo log before it can reach the asynchronous region writer.
+            let mut writer = self.writer.lock().map_err(|_| "writer poisoned")?;
+            let cache = match folder {
+                Folder::Region => &self.regions,
+                Folder::Entities => &self.entity_regions,
+                Folder::Poi => &self.poi_regions,
+            };
+            let records: Vec<_> = records
+                .into_iter()
+                .filter_map(|(key, record)| {
+                    resolve_poi(&self.root, cache, key, &record).map(|r| {
+                        let frozen = r.tag().map_or(Record::Delete, Record::Tag);
+                        (key, frozen)
+                    })
+                })
+                .collect();
+            let mut tickets = Vec::with_capacity(records.len());
+            for (key, record) in &records {
+                match journal::region(&self.root, folder, *key, record) {
+                    Ok(ticket) => tickets.push((*key, ticket)),
+                    Err(error) => {
+                        self.outstanding
+                            .error
+                            .lock()
+                            .map_err(|_| "writer poisoned")?
+                            .get_or_insert_with(|| error.to_string());
+                        self.shutdown_event(shutdown::Stage::Failed);
+                        return Err(error);
+                    }
+                }
+            }
             let mut batch = Vec::with_capacity(records.len());
             {
                 let mut pending = self.pending.lock().map_err(|_| "pending writes poisoned")?;
@@ -2810,9 +2914,8 @@ impl SaveDir {
                 .lock()
                 .map_err(|_| "writer poisoned")? += 1;
             self.shutdown_event(shutdown::Stage::Queued);
-            let mut writer = self.writer.lock().map_err(|_| "writer poisoned")?;
             let writer = writer.get_or_insert_with(|| self.start_writer());
-            if writer.send.send((folder, batch)).is_err() {
+            if writer.send.send((folder, batch, tickets)).is_err() {
                 *self
                     .outstanding
                     .error
@@ -2848,7 +2951,7 @@ impl SaveDir {
         let thread = std::thread::Builder::new()
             .name("horizon-region-writer".into())
             .spawn(move || {
-                for (kind, batch) in receive {
+                for (kind, batch, tickets) in receive {
                     shutdown::global().record(
                         storage_id,
                         shutdown::Actor::Region,
@@ -2883,7 +2986,7 @@ impl SaveDir {
                         .filter_map(|(k, r, _)| Some((*k, resolve_poi(&root, cache, *k, r)?)))
                         .collect();
                     let records: Vec<_> = resolved.iter().map(|(k, r)| (*k, r)).collect();
-                    let result = write_region_records(&root, cache, folder, &records);
+                    let result = journal::apply_region(&root, cache, folder, &records, tickets);
                     if let Err(e) = &result {
                         let message = format!("failed to write {folder} files: {e}");
                         log::warn!("Horizon: {message}");
@@ -3236,28 +3339,73 @@ fn back_up_unreadable_player(path: &Path) {
 }
 /// Write a gzip NBT file the way vanilla does (`<name>_new`, keep `_old`).
 pub fn write_dat(path: &Path, tag: Tag) -> Result<()> {
-    write_dat_as(path, tag, false)
+    observe_file_write(write_dat_as(path, tag, false))
 }
 
 /// [`write_dat`], synced to the disk: the new file before it is renamed into place, and the
 /// folder after, so a power loss leaves the old file or the new one. A hand-over's commit
 /// point (`player-confirm`) replies only once its files are.
 pub fn write_dat_durable(path: &Path, tag: Tag) -> Result<()> {
-    write_dat_as(path, tag, true)
+    observe_file_write(write_dat_as(path, tag, true))
+}
+
+/// A published, immutable redo record, owned before asynchronous writer admission.
+/// A dropped/failed worker cannot erase it. Superseded completion is distinct
+/// from a successful destination commit.
+pub struct PreparedDat {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    ticket: journal::Ticket,
+}
+pub fn prepare_dat(path: PathBuf, tag: Tag) -> Result<PreparedDat> {
+    let bytes = nbt::write_named(
+        &NamedTag {
+            name: "".into(),
+            tag,
+        },
+        Limits::saved(),
+    )
+    .map_err(|e| e.to_string())?;
+    let bytes = Compression::Gzip.encode(&bytes)?;
+    let ticket = journal::file(&path, &bytes)?;
+    Ok(PreparedDat {
+        path,
+        bytes,
+        ticket,
+    })
+}
+impl PreparedDat {
+    pub fn commit(self) -> Result<bool> {
+        let file = self
+            .path
+            .file_name()
+            .ok_or("save filename missing")?
+            .to_string_lossy();
+        let temporary = self.path.with_file_name(format!("{file}_new"));
+        journal::commit_file(self.ticket, || {
+            write_synced(&temporary, &self.bytes)?;
+            if self.path.exists() {
+                let old = self.path.with_file_name(format!("{file}_old"));
+                fs::rename(&self.path, old)?;
+            }
+            fs::rename(&temporary, &self.path)?;
+            sync_folder(&self.path)?;
+            Ok(())
+        })
+    }
 }
 
 /// `bytes` written to `path` through `<name>_new` and a rename, synced to the disk as
 /// [`write_dat_durable`] syncs: never a half-written file in place.
 pub fn write_durable(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
     let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("data");
     let temporary = path.with_file_name(format!("{file}_new"));
-    write_synced(&temporary, bytes)?;
-    fs::rename(&temporary, path)?;
-    sync_folder(path)?;
-    Ok(())
+    observe_file_write(journal::replace_file(path, bytes, || {
+        write_synced(&temporary, bytes)?;
+        fs::rename(&temporary, path)?;
+        sync_folder(path)?;
+        Ok(())
+    }))
 }
 
 fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -3279,10 +3427,7 @@ fn sync_folder(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn write_dat_as(path: &Path, tag: Tag, durable: bool) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
+fn write_dat_as(path: &Path, tag: Tag, _durable: bool) -> Result<()> {
     let bytes = nbt::write_named(
         &NamedTag {
             name: "".into(),
@@ -3297,24 +3442,20 @@ fn write_dat_as(path: &Path, tag: Tag, durable: bool) -> Result<()> {
         .and_then(|n| n.to_str())
         .unwrap_or("data.dat");
     let temporary = path.with_file_name(format!("{file}_new"));
-    if durable {
+    journal::replace_file(path, &compressed, || {
         write_synced(&temporary, &compressed)?;
-    } else {
-        fs::write(&temporary, compressed)?;
-    }
-    if path.exists() {
-        let old = match file.strip_suffix(".dat") {
-            Some(stem) => path.with_file_name(format!("{stem}.dat_old")),
-            None => path.with_file_name(format!("{file}_old")),
-        };
-        // Util.safeReplaceFile: no backup, no replacement.
-        fs::rename(path, old).map_err(|e| format!("{}: {e}", path.display()))?;
-    }
-    fs::rename(temporary, path)?;
-    if durable {
+        if path.exists() {
+            let old = match file.strip_suffix(".dat") {
+                Some(stem) => path.with_file_name(format!("{stem}.dat_old")),
+                None => path.with_file_name(format!("{file}_old")),
+            };
+            // Util.safeReplaceFile: no backup, no replacement.
+            fs::rename(path, old).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        fs::rename(temporary, path)?;
         sync_folder(path)?;
-    }
-    Ok(())
+        Ok(())
+    })
 }
 /// `SavedDataStorage`: `{data: ..., DataVersion}` under `data/minecraft/`.
 fn saved_data_path(world: &Path, name: &str) -> PathBuf {
@@ -5199,7 +5340,7 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
     fn proto_heap_bytes(&self, proto: &crate::streaming::Proto) -> ([usize; 6], [usize; 16]) {
         self.inner.proto_heap_bytes(proto)
     }
-    fn save_protos(&self, protos: &[&crate::streaming::Proto]) {
+    fn save_protos(&self, protos: &[&crate::streaming::Proto]) -> std::result::Result<(), String> {
         self.save
             .tables
             .get_or_init(|| Arc::new(SaveTables::new(&self.registry)));
@@ -5207,26 +5348,22 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
             .iter()
             .filter_map(|p| self.inner.saved_proto(p))
             .collect();
-        if let Err(e) = self
-            .save
+        self.save
             .save_protos(&saved, self.registry.registry, &self.biomes)
-        {
-            log::warn!("Horizon: failed to save proto chunks: {e}");
-        }
+            .map_err(|error| error.to_string())
     }
-    fn save_finished(&self, mut chunk: Chunk) {
+    fn save_finished(&self, chunk: Chunk) -> std::result::Result<(), Box<(Chunk, String)>> {
         self.save
             .tables
             .get_or_init(|| Arc::new(SaveTables::new(&self.registry)));
         let key = (chunk.x, chunk.z);
-        let entities = std::mem::take(&mut chunk.entities);
+        let mut frozen = chunk.clone();
+        let entities = std::mem::take(&mut frozen.entities);
         let saved = self
             .save
-            .save_later(&[Arc::new(chunk)], self.registry.registry, &self.biomes)
+            .save_later(&[Arc::new(frozen)], self.registry.registry, &self.biomes)
             .and_then(|_| self.save.save_entities_later(vec![(key, entities)]));
-        if let Err(e) = saved {
-            log::warn!("Horizon: failed to save chunk {} {}: {e}", key.0, key.1);
-        }
+        saved.map_err(|error| Box::new((chunk, error.to_string())))
     }
     fn decorates(&self) -> bool {
         self.inner.decorates()
