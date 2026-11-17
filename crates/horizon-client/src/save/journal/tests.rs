@@ -1,4 +1,40 @@
 use super::*;
+
+#[test]
+fn unreadable_poi_cannot_be_acknowledged_as_an_empty_successful_handoff() {
+    let root = temporary();
+    let lock = SessionLock::acquire(&root).unwrap();
+    directory(&root.join("poi")).unwrap();
+    let path = root.join("poi/r.0.0.mca");
+    // A short/missing region header is permitted by upstream. Use a valid
+    // sector entry pointing at an invalid zero-length payload instead.
+    let mut original = vec![0; 3 * 4096];
+    original[..4].copy_from_slice(&513u32.to_be_bytes());
+    fs::write(&path, &original).unwrap();
+    let save = SaveDir::new(root.clone(), crate::chunk::LevelShape::OVERWORLD);
+    assert!(
+        save.tables
+            .set(Arc::new(SaveTables::for_heightmaps(
+                crate::assets::Properties::for_tests(&[(true, false, false, false)]),
+            )))
+            .is_ok()
+    );
+    let chunk = Arc::new(Chunk::empty(0, 0));
+    assert!(save.save_poi(&[chunk.clone()], false).is_err());
+    assert!(save.writes_finished().is_err());
+    assert!(
+        save.writes_finished().is_err(),
+        "admission failure is sticky"
+    );
+    assert!(save.flush().is_err());
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(chunk.x, 0); // The failed handoff did not consume its caller's data.
+    assert!(SessionLock::acquire(&root).is_err());
+    drop(save);
+    drop(lock);
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn temporary() -> PathBuf {
     std::env::temp_dir().join(format!(
         "horizon-redo-fixture-{}-{}",

@@ -2271,8 +2271,8 @@ enum Record {
     Tag(Arc<NamedTag>),
     /// A chunk to encode on the writer thread.
     Chunk(Arc<Chunk>, Arc<Encoding>),
-    /// A chunk's points of interest, made on the writer thread against the
-    /// saved ones (`resolve_poi`).
+    /// A chunk's points of interest, resolved against the saved claims on the
+    /// producer before its immutable durable handoff (`resolve_poi`).
     Poi(Arc<Chunk>, Arc<SaveTables>),
     Delete,
 }
@@ -2307,22 +2307,17 @@ fn resolve_poi(
     cache: &RegionCache,
     (x, z): (i32, i32),
     record: &Record,
-) -> Option<Record> {
+) -> Result<Option<Record>> {
     let Record::Poi(chunk, tables) = record else {
-        return Some(record.clone());
+        return Ok(Some(record.clone()));
     };
-    let old = read_region_record(root, cache, "poi", x, z)
-        .and_then(|old| {
-            old.map(|mut old| {
-                upgrade_record(Folder::Poi, &mut old, || None)?;
-                Ok(old)
-            })
-            .transpose()
+    let old = read_region_record(root, cache, "poi", x, z).and_then(|old| {
+        old.map(|mut old| {
+            upgrade_record(Folder::Poi, &mut old, || None)?;
+            Ok(old)
         })
-        .unwrap_or_else(|e| {
-            log::warn!("Horizon: could not read the poi record of chunk {x} {z}: {e}");
-            None
-        });
+        .transpose()
+    })?;
     let tag = match (encode_poi(chunk, tables), old) {
         (Some(mut tag), Some(old)) => {
             keep_claims(&mut tag, &old);
@@ -2330,9 +2325,9 @@ fn resolve_poi(
         }
         (Some(tag), None) => tag,
         (None, Some(_)) => poi_root(Compound::new()),
-        (None, None) => return None,
+        (None, None) => return Ok(None),
     };
-    Some(Record::Tag(Arc::new(tag)))
+    Ok(Some(Record::Tag(Arc::new(tag))))
 }
 fn read_region_record(
     root: &Path,
@@ -2875,15 +2870,28 @@ impl SaveDir {
                 Folder::Entities => &self.entity_regions,
                 Folder::Poi => &self.poi_regions,
             };
-            let records: Vec<_> = records
-                .into_iter()
-                .filter_map(|(key, record)| {
-                    resolve_poi(&self.root, cache, key, &record).map(|r| {
-                        let frozen = r.tag().map_or(Record::Delete, Record::Tag);
-                        (key, frozen)
-                    })
-                })
-                .collect();
+            let mut frozen = Vec::with_capacity(records.len());
+            for (key, record) in records {
+                match resolve_poi(&self.root, cache, key, &record) {
+                    Ok(Some(record)) => {
+                        frozen.push((key, record.tag().map_or(Record::Delete, Record::Tag)));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        // An unreadable existing POI is not an absent POI.
+                        // Refuse admission and keep the authoritative world
+                        // dirty/owned rather than erase unknown saved claims.
+                        self.outstanding
+                            .error
+                            .lock()
+                            .map_err(|_| "writer poisoned")?
+                            .get_or_insert_with(|| error.to_string());
+                        self.shutdown_event(shutdown::Stage::Failed);
+                        return Err(error);
+                    }
+                }
+            }
+            let records = frozen;
             let mut tickets = Vec::with_capacity(records.len());
             for (key, record) in &records {
                 match journal::region(&self.root, folder, *key, record) {
@@ -2980,12 +2988,13 @@ impl SaveDir {
                             p.get(&(kind, k.0, k.1)).is_none_or(|p| p.0 <= seq)
                         })
                     };
-                    let resolved: Vec<_> = batch
+                    // Every admitted record was resolved/frozen on its owning
+                    // producer before its redo record was synced.
+                    let records: Vec<_> = batch
                         .iter()
                         .filter(|(k, _, seq)| newest(k, *seq))
-                        .filter_map(|(k, r, _)| Some((*k, resolve_poi(&root, cache, *k, r)?)))
+                        .map(|(k, r, _)| (*k, r))
                         .collect();
-                    let records: Vec<_> = resolved.iter().map(|(k, r)| (*k, r)).collect();
                     let result = journal::apply_region(&root, cache, folder, &records, tickets);
                     if let Err(e) = &result {
                         let message = format!("failed to write {folder} files: {e}");
