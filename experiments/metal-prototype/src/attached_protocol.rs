@@ -8,6 +8,7 @@ pub(crate) struct Gate {
     cancel: Arc<AtomicBool>,
     claimed: AtomicBool,
     native_confirmed: AtomicBool,
+    expires: Option<std::time::Instant>,
 }
 impl Gate {
     pub fn new(cancel: Arc<AtomicBool>) -> Self {
@@ -16,6 +17,13 @@ impl Gate {
             cancel,
             claimed: AtomicBool::new(false),
             native_confirmed: AtomicBool::new(false),
+            expires: None,
+        }
+    }
+    pub fn expiring(cancel: Arc<AtomicBool>, expires: std::time::Instant) -> Self {
+        Self {
+            expires: Some(expires),
+            ..Self::new(cancel)
         }
     }
     pub fn start(&self) -> bool {
@@ -70,6 +78,9 @@ impl Gate {
     }
     pub fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Acquire)
+            || self
+                .expires
+                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
     }
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);
@@ -151,6 +162,22 @@ mod tests {
         assert!(!old.published());
         assert!(new.start());
         assert!(!new.published());
+    }
+    #[test]
+    fn delayed_publication_checks_capture_expiry_without_another_game_frame() {
+        let mut g = gate();
+        assert!(g.start());
+        assert!(g.claim_display());
+        g.native_completed(); // simulated terminal command, not GPU evidence
+        assert!(g.finish(true));
+        assert!(g.publish());
+        // Virtual boundary: callback arrives after expiry, no producer poll or
+        // cancellation store. The actual ready callback uses published().
+        g.expires = Some(std::time::Instant::now());
+        assert!(!g.published());
+        assert!(!g.verification_ready());
+        let expired = Gate::expiring(Arc::new(AtomicBool::new(false)), std::time::Instant::now());
+        assert!(!expired.start());
     }
     #[test]
     fn injected_worker_failures_and_detachment_never_authorize_reveal() {

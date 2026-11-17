@@ -1006,10 +1006,11 @@ impl Controller {
                 self.error("actual game window unavailable".into());
                 return;
             };
-            match helium_metal_prototype::attached::submit_attempt(
+            match helium_metal_prototype::attached::submit_capture_attempt(
                 window.as_ref(),
                 cancel.clone(),
                 attempt,
+                created + CAPTURE_MAX_AGE,
                 move |layer| run_impl(job, Some(layer)),
             ) {
                 Ok((ticket, receiver)) => {

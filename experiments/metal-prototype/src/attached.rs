@@ -253,6 +253,26 @@ pub fn submit_attempt<T: Send + 'static>(
     id: u64,
     job: impl FnOnce(Layer) -> Result<T, String> + Send + 'static,
 ) -> Result<(Ticket, Receiver<Result<T, String>>), String> {
+    submit_with_expiry(window, cancel, id, None, job)
+}
+/// Historical capture only: expiry is checked again by the exact Rust ready
+/// callback immediately before Swift reveals, independently of game frame polls.
+pub fn submit_capture_attempt<T: Send + 'static>(
+    window: &impl HasWindowHandle,
+    cancel: Arc<AtomicBool>,
+    id: u64,
+    expires: std::time::Instant,
+    job: impl FnOnce(Layer) -> Result<T, String> + Send + 'static,
+) -> Result<(Ticket, Receiver<Result<T, String>>), String> {
+    submit_with_expiry(window, cancel, id, Some(expires), job)
+}
+fn submit_with_expiry<T: Send + 'static>(
+    window: &impl HasWindowHandle,
+    cancel: Arc<AtomicBool>,
+    id: u64,
+    expires: Option<std::time::Instant>,
+    job: impl FnOnce(Layer) -> Result<T, String> + Send + 'static,
+) -> Result<(Ticket, Receiver<Result<T, String>>), String> {
     if !objc2_foundation::NSThread::isMainThread_class() {
         return Err("attachment request requires main thread".into());
     }
@@ -273,7 +293,10 @@ pub fn submit_attempt<T: Send + 'static>(
     ) -> bool = unsafe { std::mem::transmute(request) };
 
     let (send, recv) = mpsc::sync_channel(1);
-    let status = Arc::new(Gate::new(cancel.clone()));
+    let status = Arc::new(match expires {
+        Some(deadline) => Gate::expiring(cancel.clone(), deadline),
+        None => Gate::new(cancel.clone()),
+    });
     let state = status.clone();
     {
         let mut e = ENTRY.lock().map_err(|_| "native registry poisoned")?;
