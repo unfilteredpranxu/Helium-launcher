@@ -107,6 +107,7 @@ impl Cause {
             "column unloaded" | "displayed column unloaded" => Self::ColumnUnloaded,
             "world replaced" | "world exit" | "world exited" => Self::WorldChanged,
             "application suspended" => Self::AppInactive,
+            "shutdown" => Self::Shutdown,
             "actual game window changed/destroyed" => Self::RendererChanged,
             "resource pack replaced" | "resource packs reloaded" | "resource pack reloaded" => {
                 Self::ResourceReload

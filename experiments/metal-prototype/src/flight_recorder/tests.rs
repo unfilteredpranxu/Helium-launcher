@@ -1,5 +1,9 @@
 use super::*;
 #[test]
+fn exit_cancellation_is_typed_shutdown_not_an_unknown_gpu_failure() {
+    assert_eq!(Cause::reason("shutdown"), Cause::Shutdown);
+}
+#[test]
 fn shutdown_report_refreshes_without_a_new_metal_event_and_refuses_foreign_boot() {
     let path = temp();
     let r = Recorder::persistent_kind(path.clone(), true).unwrap();
