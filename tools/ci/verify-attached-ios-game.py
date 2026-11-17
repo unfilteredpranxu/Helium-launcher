@@ -3,6 +3,7 @@
 MIT; Copyright (c) 2026 Horizon contributors.
 """
 import hashlib
+import os
 import mmap
 from pathlib import Path
 import plistlib
@@ -79,7 +80,7 @@ def verify(app: Path, rust: Path) -> None:
         value = plistlib.load(stream)
     if value["CFBundleExecutable"] != "Horizon" or value["MinimumOSVersion"] != "15.0":
         raise ValueError("wrong actual game bundle contract")
-    value.update(CFBundleIdentifier="dev.helium.g06ctest", CFBundleDisplayName="Helium G06C Test", HeliumNativeMetalTest=True, HeliumMetalDiagnosticsVersion=2, CFBundleVersion="11002")
+    value.update(CFBundleIdentifier="dev.helium.g06ctest", CFBundleDisplayName="Helium G06C Test", HeliumNativeMetalTest=True, HeliumMetalDiagnosticsVersion=2, CFBundleVersion="12001", HeliumDiagnosticSource=os.environ.get("HELIUM_DIAGNOSTIC_SHA", "development-unidentified"))
     with info.open("wb") as stream:
         plistlib.dump(value, stream)
     print("Verified actual opt-in Rust executable == bundle executable; thin arm64 device iOS15.0")

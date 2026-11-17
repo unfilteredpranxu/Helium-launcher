@@ -1,11 +1,13 @@
 name: Helium Metal Upload Validation
 on:
   push:
-    branches: [feature/helium-g05-metal-upload, feature/helium-g05-async-upload, feature/helium-g05-async-draw, feature/helium-g05-metal-presentation, feature/helium-g06-real-world-metal, feature/helium-g06-production-banks, feature/helium-g06-attached-game, feature/helium-g06d-one-build-diagnostics]
+    branches: [feature/helium-g05-metal-upload, feature/helium-g05-async-upload, feature/helium-g05-async-draw, feature/helium-g05-metal-presentation, feature/helium-g06-real-world-metal, feature/helium-g06-production-banks, feature/helium-g06-attached-game, feature/helium-g06d-one-build-diagnostics, feature/helium-g07-immutable-capture]
     paths:
       - 'crates/horizon-metal-bridge/**'
       - 'crates/horizon-client/src/game.rs'
       - 'crates/horizon-client/src/entry.rs'
+      - 'crates/horizon-client/src/game/remote.rs'
+      - 'crates/horizon-client-render/src/gfx/material_snapshot/**'
       - 'packaging/ios/Launcher/**'
       - 'packaging/ios/project.yml'
       - 'packaging/ios/GameInfo.plist'
@@ -24,6 +26,11 @@ on:
       - 'experiments/metal-prototype/Cargo.lock'
       - '.github/workflows/helium-metal-upload.yml'
   workflow_dispatch:
+    inputs:
+      publish_owner_ipa:
+        description: Publish the single owner IPA only after qualification
+        type: boolean
+        default: false
 concurrency:
   group: helium-metal-${{ github.ref }}
   cancel-in-progress: true
@@ -216,9 +223,14 @@ jobs:
           HORIZON_GAME_PREBUILT=1 xcodebuild -project packaging/ios/HorizonIOS.xcodeproj -target HorizonGame -configuration Release -sdk iphoneos -arch arm64 CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= CODE_SIGNING_REQUIRED=NO DEBUG_INFORMATION_FORMAT=dwarf CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/attached-game/build" build > "$RUNNER_TEMP/attached-game/xcode.log" 2>&1 || { tail -80 "$RUNNER_TEMP/attached-game/xcode.log"; exit 1; }
           app="$RUNNER_TEMP/attached-game/build/HorizonGame.app"
           python3 tools/ci/verify-attached-ios-game.py "$app" target/aarch64-apple-ios/release/horizon-client 2>&1 | tee "$RUNNER_TEMP/attached-game/verified.log"
+      - name: Package the one qualified owner IPA
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_owner_ipa
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/attached-game/build/HorizonGame.app"
           mkdir -p "$RUNNER_TEMP/attached-game/package/Payload"
           cp -a "$app" "$RUNNER_TEMP/attached-game/package/Payload/"
-          (cd "$RUNNER_TEMP/attached-game/package" && zip -qry ../Helium-G06D-game-unsigned.ipa Payload)
+          (cd "$RUNNER_TEMP/attached-game/package" && zip -qry ../Helium-G07A-game-unsigned.ipa Payload)
       - name: Publish actual game link evidence
         if: always()
         uses: actions/github-script@v7
@@ -231,12 +243,12 @@ jobs:
             }).join('\n');
             await github.rest.checks.create({owner:context.repo.owner,repo:context.repo.repo,head_sha:context.sha,name:'Helium attached GAME link evidence',status:'completed',conclusion:'neutral',output:{title:'Actual game link and Swift symbols; NOT device/world runtime evidence',summary}});
       - uses: actions/upload-artifact@v4
-        if: success()
+        if: success() && github.event_name == 'workflow_dispatch' && inputs.publish_owner_ipa
         with:
-          name: Helium-G06D-instrumented-game-unsigned
+          name: Helium-G07A-historical-game-unsigned
           path: |
-            ${{ runner.temp }}/attached-game/Helium-G06D-game-unsigned.ipa
-            experiments/metal-prototype/docs/G06-D-owner.md
+            ${{ runner.temp }}/attached-game/Helium-G07A-game-unsigned.ipa
+            experiments/metal-prototype/docs/G07-A-owner.md
             ${{ runner.temp }}/attached-game/verified.log
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
@@ -307,6 +319,6 @@ jobs:
           cargo +1.95.0 test --locked -p horizon-client-render --lib gfx::material_snapshot::
           python3 experiments/metal-prototype/tools/test_section_bridge.py
           cargo +1.95.0 fmt --manifest-path experiments/metal-prototype/Cargo.toml --check
-          rustfmt +1.95.0 --check --edition 2024 --config skip_children=true crates/horizon-metal-bridge/src/runtime.rs crates/horizon-metal-bridge/src/lib.rs crates/horizon-client/src/game.rs crates/horizon-client/src/entry.rs crates/horizon-client-render/src/gfx/material_snapshot.rs
+          rustfmt +1.95.0 --check --edition 2024 --config skip_children=true crates/horizon-metal-bridge/src/runtime.rs crates/horizon-metal-bridge/src/lib.rs crates/horizon-client/src/game.rs crates/horizon-client/src/entry.rs crates/horizon-client-render/src/gfx/material_snapshot.rs crates/horizon-client-render/src/gfx/material_snapshot/tests.rs crates/horizon-client/src/game/remote.rs
           python3 tools/check_public_tree.py
           git diff --check

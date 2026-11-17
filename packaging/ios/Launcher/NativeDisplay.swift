@@ -106,7 +106,7 @@ public func nativeDisplayRequest(_ id: UInt64, _ pointer: UnsafeMutableRawPointe
     metal.allowsNextDrawableTimeout=true; metal.presentsWithTransaction=false; metal.maximumDrawableCount=3
     metal.contentsScale=window.screen.scale; metal.drawableSize=pixels
     let label=UILabel(frame:CGRect(x:8,y:8,width:parent.bounds.width-16,height:44))
-    label.text=NSLocalizedString("Native diagnostic snapshot · 5 seconds · wgpu producer active",comment:"Native diagnostic")
+    label.text=NSLocalizedString("HELIUM G07-A · HISTORICAL NATIVE FRAME · 5 s · wgpu producer/fallback active",comment:"Native diagnostic")
     label.textColor = .yellow; label.backgroundColor = .black; label.numberOfLines=2; label.font = .systemFont(ofSize:12)
     view.addSubview(label)
     nativeTargets[id]=target; view.invalid={ cause,old,new in cancelNative(id,cause,old,new) }; parent.addSubview(view)
@@ -126,6 +126,10 @@ public func nativeDisplayPublish(_ id:UInt64) {
     DispatchQueue.main.async {
         guard let target=nativeTargets[id] else {diagnosticEvent(id,30,16);return}
         let cause=target.invalidCause();guard cause==0, target.ready(id) else {cancelNative(id,cause==0 ? 16 : cause);return}
+        let values=diagnosticValues()
+        if values.count==32, let label=target.view.subviews.first as? UILabel {
+            label.text="HELIUM G07-A · HISTORICAL NATIVE FRAME · capture rev \(values[20]), current rev \(values[29]) · 5 s\nwgpu producer/fallback active"
+        }
         target.view.alpha=1
         diagnosticEvent(id,28)
         LauncherLog.write("native captured frame revealed generation=\(id); scanout unverified")

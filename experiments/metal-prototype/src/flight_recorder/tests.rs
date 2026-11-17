@@ -1,4 +1,85 @@
 use super::*;
+#[test]
+fn pressure_aggregation_is_persisted_with_first_cause_and_distinct_transitions() {
+    let path = temp();
+    let r = Recorder::persistent_kind(path.clone(), true).unwrap();
+    r.begin_world(1, 1);
+    r.record(
+        1,
+        Stage::Cancelled,
+        Emitter::Game,
+        Some(Cause::MaterialChanged),
+        47,
+        48,
+    );
+    for _ in 0..300 {
+        for (id, emitter) in [(1, Emitter::Game), (0, Emitter::Swift)] {
+            r.record(
+                id,
+                Stage::Cancelled,
+                emitter,
+                Some(Cause::MemoryPressure),
+                0,
+                0,
+            );
+        }
+    }
+    r.record(
+        1,
+        Stage::Removed,
+        Emitter::Swift,
+        Some(Cause::ViewDetached),
+        1,
+        0,
+    );
+    assert!(r.wait_ack(Duration::from_secs(5)));
+    let text = fs::read_to_string(path.join("Helium-Metal-Report.txt")).unwrap();
+    assert!(text.contains("notices=600"));
+    assert!(text.contains("ViewDetached"));
+    assert!(text.contains("MaterialChanged"));
+    assert!(text.contains("chronology_complete=true"));
+    assert!(text.contains("PHYSICAL_SCANOUT_UNVERIFIED"));
+    assert_eq!(r.first(1), Some(Cause::MaterialChanged));
+}
+#[test]
+fn alternating_memory_emitters_do_not_evict_attempt_history() {
+    let r = Recorder::memory();
+    assert!(r.begin_world(1, 7));
+    r.record(
+        1,
+        Stage::Cancelled,
+        Emitter::Game,
+        Some(Cause::LightmapChanged),
+        32,
+        33,
+    );
+    for n in 0..1000 {
+        r.record(
+            1,
+            Stage::Cancelled,
+            if n % 2 == 0 {
+                Emitter::Game
+            } else {
+                Emitter::Swift
+            },
+            Some(Cause::MemoryPressure),
+            0,
+            0,
+        );
+    }
+    assert_eq!(r.first(1), Some(Cause::LightmapChanged));
+    assert!(!r.retry_safe(1));
+    assert_eq!(
+        r.status()[7],
+        0,
+        "duplicate pressure notices must not rotate history"
+    );
+    let s = r.state.lock().unwrap();
+    assert_eq!(s.pressure.len(), 1);
+    assert_eq!(s.pressure[0].count, 1000);
+    assert_eq!(s.pressure[0].seen.len(), 2);
+    assert!(s.pressure[0].last_ns >= s.pressure[0].first_ns);
+}
 fn temp() -> PathBuf {
     std::env::temp_dir().join(format!(
         "helium-recorder-test-{}",

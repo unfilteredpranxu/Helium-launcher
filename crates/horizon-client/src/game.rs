@@ -20670,7 +20670,7 @@ impl<'a> Game<'a> {
         );
         let mut game = Game {
             #[cfg(feature = "helium-direct-metal")]
-            direct_metal: (!options.split_guest)
+            direct_metal: (!options.split_guest && options.execution_role.is_client())
                 .then(horizon_metal_bridge::Controller::from_environment)
                 .flatten(),
             world_biomes: None,

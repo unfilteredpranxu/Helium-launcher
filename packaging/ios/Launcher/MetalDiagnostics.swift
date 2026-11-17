@@ -37,7 +37,7 @@ public func attachMetalHUD(_ pointer:UnsafeMutableRawPointer?) {
         guard let label=debugHUD, let parent=debugParent else {return}
         // Modal launcher always takes precedence; no native layer owns the HUD.
         label.isHidden=parent.window?.rootViewController?.presentedViewController != nil
-        let values=diagnosticValues();let text=MetalDiagnosticModel.hud(values,mode:debugMode)
+        let values=diagnosticValues();let source=Bundle.main.object(forInfoDictionaryKey:"HeliumDiagnosticSource") as? String ?? "development-unidentified";let text=MetalDiagnosticModel.hud(values,mode:debugMode)+"\nSource: \(source) | build \(Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "unknown")"
         if text != lastHUD {lastHUD=text;label.text=text;label.textColor=values.count==32 && (values[4] != 0 || values[8] != 0) ? .systemRed : .yellow}
     }
     let os=ProcessInfo.processInfo.operatingSystemVersion

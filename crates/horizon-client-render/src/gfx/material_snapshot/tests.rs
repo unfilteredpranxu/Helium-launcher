@@ -1,4 +1,87 @@
 use super::*;
+#[test]
+fn g06_live_rejection_is_distinct_from_immutable_cow_ownership() {
+    // Synthetic pixels through the real producer refresh. Not device/game evidence.
+    for (material, light) in [(47, 32), (47, 81)] {
+        let mut state = prepared(513, 512).capture_materials(2, 513, false);
+        state.animation_revision = material;
+        Arc::get_mut(state.snapshot.as_mut().unwrap())
+            .unwrap()
+            .revision = material;
+        state.light_ready = true;
+        state.light_revision = light;
+        let old = state.snapshot().unwrap().clone();
+        let ticket = state.ticket().unwrap();
+        let old_bytes: Vec<_> = old.banks().iter().map(|b| b.pixels().to_vec()).collect();
+        let light_copy = [255; 1024];
+        state.observe_lightmap(&light_copy, &[254; 1024]);
+        assert_eq!(state.light_revision(), Ok(light + 1));
+        assert!(state.check_ticket(ticket).is_ok()); // light-only, separate revision
+        for _ in 0..4 {
+            let frames = [113; 20];
+            state.refresh(
+                [refresh::Job {
+                    bank: 0,
+                    words: [0, 0, 0, 0, 2],
+                    frames: &frames,
+                }]
+                .into_iter(),
+            );
+            assert!(state.check_ticket(ticket).is_err());
+            assert!(state.current(&old).is_err());
+            assert_eq!(light_copy, [255; 1024]);
+            for (bank, bytes) in old.banks().iter().zip(&old_bytes) {
+                assert_eq!(bank.pixels(), bytes);
+            }
+            // Unchanged bank payload remains shared; edited bank was copied.
+            assert_eq!(
+                old.banks()[1].pixels().as_ptr(),
+                state.snapshot().unwrap().banks()[1].pixels().as_ptr()
+            );
+            assert_ne!(
+                old.banks()[0].pixels().as_ptr(),
+                state.snapshot().unwrap().banks()[0].pixels().as_ptr()
+            );
+        }
+        state.release();
+        assert!(state.current(&old).is_err());
+        assert_eq!(old.banks()[0].pixels(), old_bytes[0]);
+    }
+}
+#[test]
+fn pinned_worker_reads_identical_mips_after_twenty_to_eighty_ms_of_producer_updates() {
+    // Synthetic inputs through actual State::refresh, synchronized before the
+    // worker reads. Wall delay labels CPU lifetime coverage, never GPU evidence.
+    for delay in [20, 50, 80] {
+        let mut state = prepared(513, 512).capture_materials(2, 513, false);
+        let pinned = state.snapshot().unwrap().clone();
+        let expected: Vec<_> = pinned.banks().iter().map(|b| b.pixels().to_vec()).collect();
+        let (send, recv) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            recv.recv().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+            for (bank, bytes) in pinned.banks().iter().zip(expected) {
+                assert_eq!(bank.pixels(), bytes);
+            }
+        });
+        for revision in 0..4 {
+            state.observe_lightmap(&[255; 1024], &[revision; 1024]);
+            let frames = [revision; 20];
+            state.refresh(
+                [refresh::Job {
+                    bank: 0,
+                    words: [0, 0, 0, 0, 2],
+                    frames: &frames,
+                }]
+                .into_iter(),
+            );
+        }
+        state.release();
+        send.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(state.counters().retained_capacity, 0);
+    }
+}
 // Handcrafted source pixels passed through actual production mip generation.
 fn prepared(layers: u32, split: u32) -> PreparedTextures {
     let pixels: Vec<_> = (0..layers)

@@ -112,6 +112,7 @@ impl Cause {
                 Self::ResourceReload
             }
             "native memory pressure" => Self::MemoryPressure,
+            "capture lifetime expired" => Self::SnapshotExpired,
             "launcher covered" => Self::LauncherCovered,
             "production frame unavailable" => Self::ProducerUnavailable,
             "displayed producer state changed" => Self::BankStale,
@@ -182,6 +183,10 @@ pub enum Stage {
     TextureLayout = 40,
     UploadSubmitted = 41,
     MemoryCounters = 42,
+    CaptureValidated = 43,
+    HistoricalCaptureReady = 44,
+    CurrentMaterial = 45,
+    CurrentLight = 46,
 }
 impl Stage {
     pub fn from_code(n: u32) -> Option<Self> {
@@ -228,6 +233,10 @@ impl Stage {
             40 => Self::TextureLayout,
             41 => Self::UploadSubmitted,
             42 => Self::MemoryCounters,
+            43 => Self::CaptureValidated,
+            44 => Self::HistoricalCaptureReady,
+            45 => Self::CurrentMaterial,
+            46 => Self::CurrentLight,
             _ => return None,
         })
     }
@@ -333,6 +342,16 @@ impl Event {
         })
     }
 }
+#[derive(Clone, Default)]
+struct PressureEpisode {
+    first_ns: u128,
+    last_ns: u128,
+    count: u64,
+    emitters: u64,
+    // One terminal notice per exact attempt/emitter; alternating sources cannot
+    // defeat aggregation. Safety actions execute outside and before this recorder.
+    seen: Vec<(u64, Emitter)>,
+}
 #[derive(Clone)]
 struct State {
     boot: u64,
@@ -350,6 +369,10 @@ struct State {
     pending: Vec<(u64, bool)>,
     ended: Vec<u64>,
     started: Vec<(u64, u128)>,
+    pressure: VecDeque<PressureEpisode>,
+    pressure_episodes_evicted: u64,
+    current: [u64; 3],
+    historical: bool,
 }
 pub struct Recorder {
     state: Arc<Mutex<State>>,
@@ -383,6 +406,10 @@ impl Recorder {
                 pending: Vec::with_capacity(3),
                 ended: Vec::with_capacity(3),
                 started: Vec::with_capacity(3),
+                pressure: VecDeque::new(),
+                pressure_episodes_evicted: 0,
+                current: [0; 3],
+                historical: false,
             })),
             start: Instant::now(),
             ack: Arc::new(AtomicU64::new(0)),
@@ -467,6 +494,8 @@ impl Recorder {
         s.fields[0] = 0;
         s.fields[1] = 0;
         s.fields[8] = 0;
+        s.current = [0; 3];
+        s.historical = false;
         true
     }
     pub fn known(&self, id: u64) -> bool {
@@ -531,14 +560,16 @@ impl Recorder {
         if id != 0 && matches!(stage, Stage::Removed | Stage::Retired) && !ended {
             s.ended.push(id);
         }
-        if s.events.back().is_some_and(|e| {
-            e.attempt == id
-                && e.stage == stage
-                && e.emitter == emitter
-                && e.cause == cause
-                && e.expected == expected
-                && e.observed == observed
-        }) {
+        if cause != Some(Cause::MemoryPressure)
+            && s.events.back().is_some_and(|e| {
+                e.attempt == id
+                    && e.stage == stage
+                    && e.emitter == emitter
+                    && e.cause == cause
+                    && e.expected == expected
+                    && e.observed == observed
+            })
+        {
             return;
         }
         if id == 0
@@ -578,6 +609,56 @@ impl Recorder {
         {
             s.blocked.push(id);
         }
+        if cause == Some(Cause::MemoryPressure) {
+            let now = self.start.elapsed().as_nanos();
+            if s.pressure
+                .back()
+                .is_none_or(|p| now.saturating_sub(p.last_ns) >= 5_000_000_000)
+            {
+                if s.pressure.len() == 16 {
+                    s.pressure.pop_front();
+                    s.pressure_episodes_evicted = s.pressure_episodes_evicted.saturating_add(1);
+                }
+                s.pressure.push_back(PressureEpisode {
+                    first_ns: now,
+                    ..Default::default()
+                });
+            }
+            let episode = s.pressure.back_mut().unwrap();
+            episode.last_ns = now;
+            episode.count = episode.count.saturating_add(1);
+            episode.emitters |= 1 << emitter as u32;
+            let duplicate = episode.seen.contains(&(id, emitter));
+            if !duplicate {
+                episode.seen.push((id, emitter));
+            }
+            if duplicate {
+                // Persist aggregate counters without manufacturing timeline events/loss.
+                s.seq = s.seq.saturating_add(1);
+                return;
+            }
+        }
+        if s.attempts.last().is_some_and(|a| a.0 == id) {
+            match stage {
+                Stage::CurrentMaterial => {
+                    s.current[0] = expected;
+                    s.current[1] = observed;
+                }
+                Stage::CurrentLight => {
+                    s.current[2] = observed;
+                }
+                Stage::CaptureValidated => {
+                    s.historical = true;
+                }
+                _ => {}
+            }
+            if matches!(stage, Stage::CurrentMaterial | Stage::CurrentLight)
+                && s.events.iter().any(|e| e.attempt == id && e.stage == stage)
+            {
+                s.seq = s.seq.saturating_add(1);
+                return; // latest content observation is summarized, never a high-rate timeline
+            }
+        }
         let first = !ended
             && id != 0
             && !matches!(emitter, Emitter::Ticket)
@@ -601,7 +682,7 @@ impl Recorder {
                 if matches!(
                     e.stage,
                     Stage::Cancelled | Stage::Removed | Stage::RetryWaiting | Stage::RetryExhausted
-                ) || e.stage as u32 >= 35
+                ) || matches!(e.stage as u32, 35..=42 | 45..=46)
                 {
                     e.last_confirmed
                 } else {
@@ -761,8 +842,8 @@ impl Recorder {
             s.fields[10],
             s.write_errors,
             u64::from(s.pending.iter().any(|p| p.0 == id && p.1)),
-            s.fields[13],
-            s.fields[14],
+            s.current[1],
+            s.current[2],
             s.fields[15],
         ]
     }
@@ -872,7 +953,7 @@ impl Store {
         let json = events.iter().map(Event::json).collect::<String>();
         self.replace("helium-metal-events.jsonl", json.as_bytes())?;
         let mut report = format!(
-            "HELIUM METAL G06-D DIAGNOSTIC\nSCHEMA 2 | source={}\napp_build={}\nboot={} | TEST_ONLY={}\nrecorder_status={} | persisted_sequence={} | lost_timeline_events={}\nPREVIOUS_BOOT_INCOMPLETE={} | malformed_previous_records={}\nWGpu FALLBACK ACTIVE | PHYSICAL_PIXELS_UNVERIFIED\nPersistence acknowledgement is not a power-loss/fsync guarantee.\nSELF_TEST: typed initialization/serialization running; GPU/UI checks listed separately.\n",
+            "HELIUM G07-A HISTORICAL NATIVE FRAME DIAGNOSTIC\nSCHEMA 2 | source={}\napp_build={}\nboot={} | TEST_ONLY={}\nrecorder_status={} | persisted_sequence={} | lost_timeline_events={}\nPREVIOUS_BOOT_INCOMPLETE={} | malformed_previous_records={}\nWGpu FALLBACK ACTIVE | PHYSICAL_SCANOUT_UNVERIFIED | PHYSICAL_PIXELS_UNVERIFIED\nPersistence acknowledgement is not a power-loss/fsync guarantee.\nSELF_TEST: typed initialization/serialization running; GPU/UI checks listed separately.\n",
             option_env!("HELIUM_DIAGNOSTIC_SHA").unwrap_or("development-unidentified"),
             s.fields[15],
             s.boot,
@@ -888,6 +969,24 @@ impl Store {
             s.dropped == 0 && s.torn == 0
         ));
         report.push_str(&format!("write_errors_total={}\n", s.write_errors));
+        report.push_str(&format!(
+            "schema2_extension=G07A (stages 43..46, latest revisions in HUD words 29/30)\ncaptured_generation={} captured_material={} captured_light={} world_epoch={}\ncapture_policy={} | current_generation={} | current_material={} | current_light={}\n",
+            s.fields[2], s.fields[4], s.fields[3], s.fields[7], if s.historical {
+                "HISTORICAL"
+            } else {
+                "LIVE-CURRENT"
+            },
+            s.current[0],
+            s.current[1],
+            s.current[2]
+        ));
+        report.push_str(&format!(
+            "memory_pressure_episodes_evicted={}\n",
+            s.pressure_episodes_evicted
+        ));
+        for p in &s.pressure {
+            report.push_str(&format!("MemoryPressure episode first_ns={} last_ns={} notices={} emitter_mask={} (duplicates aggregated; safety action unchanged)\n", p.first_ns, p.last_ns, p.count, p.emitters));
+        }
         report.push_str("FIRST CAUSES (priority retained, at most 3):\n");
         for e in &s.first {
             report.push_str(&format!("Attempt {} FIRST CAUSE {:?} emitter={:?} last confirmed stage before cancel retained in timeline\n",e.attempt,e.cause,e.emitter));
@@ -951,6 +1050,10 @@ impl Store {
             pending: vec![],
             ended: vec![],
             started: vec![],
+            pressure: VecDeque::new(),
+            pressure_episodes_evicted: 0,
+            current: [0; 3],
+            historical: false,
         };
         self.write_snapshot(&s)
     }

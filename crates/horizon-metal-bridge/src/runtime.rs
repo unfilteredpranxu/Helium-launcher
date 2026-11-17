@@ -15,16 +15,19 @@ use horizon_client_render::{
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 fn generation_value(g: Generation) -> u64 {
     g.diagnostic_id()
 }
 type Key = (i32, i32, i32);
 pub const SNAPSHOT_BUDGET: usize = 64 * 1024 * 1024;
+const CAPTURE_MAX_AGE: Duration = Duration::from_secs(10);
+const RENDER_DEADLINE: Duration = Duration::from_secs(5);
+static NEXT_WORLD: AtomicU64 = AtomicU64::new(1);
 const GEOMETRY_BUDGET: usize = 2 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -211,6 +214,8 @@ fn points_visible(view: View, points: impl IntoIterator<Item = [f32; 3]>) -> boo
     !outside.into_iter().any(|v| v)
 }
 struct Flight {
+    created: Instant,
+    world_epoch: u64,
     attempt: u64,
     geometry: Arc<Geometry>,
     source: Vec<BankSource>,
@@ -223,6 +228,8 @@ struct Flight {
 }
 #[cfg(target_os = "ios")]
 struct Shown {
+    created: Instant,
+    world_epoch: u64,
     attempt: u64,
     _ticket: helium_metal_prototype::attached::Ticket,
     source: Vec<BankSource>,
@@ -232,44 +239,69 @@ struct Shown {
 }
 /// One candidate and one worker, never a world mirror or mesh queue. This mode
 /// keeps wgpu as producer/fallback. Attached mode uses a distinct UIKit child layer.
+/// Currency and safety are separate policies. Only the attached historical
+/// diagnostic accepts later content; both policies revoke generation replacement.
+fn revision_changes(
+    historical: bool,
+    captured: upload::Identity<Generation>,
+    light: u64,
+    current: upload::Identity<Generation>,
+    current_light: Result<u64, &'static str>,
+) -> [Option<(Cause, u64, u64)>; 2] {
+    let material = if captured.generation != current.generation {
+        Some((
+            Cause::RendererChanged,
+            generation_value(captured.generation),
+            generation_value(current.generation),
+        ))
+    } else if !historical && captured.revision != current.revision {
+        Some((Cause::MaterialChanged, captured.revision, current.revision))
+    } else {
+        None
+    };
+    let lighting = if historical && current_light.is_err() {
+        Some((Cause::ProducerUnavailable, light, 0))
+    } else if !historical && current_light != Ok(light) {
+        Some((Cause::LightmapChanged, light, current_light.unwrap_or(0)))
+    } else {
+        None
+    };
+    [material, lighting]
+}
 fn producer_changes(
     renderer: &Renderer,
     source: &[BankSource],
     light: u64,
     size: [u32; 2],
+    historical: bool,
 ) -> [Option<(Cause, u64, u64)>; 3] {
     let state = renderer.material_state();
-    let bank = source
-        .iter()
-        .find(|s| s.check_current(renderer).is_err())
-        .map(|s| {
-            let d = s.description();
-            if d.identity.generation != state.generation() {
-                (
-                    Cause::RendererChanged,
-                    generation_value(d.identity.generation),
-                    generation_value(state.generation()),
-                )
-            } else if d.identity.revision != state.animation_revision() {
-                (
-                    Cause::MaterialChanged,
-                    d.identity.revision,
-                    state.animation_revision(),
-                )
-            } else {
-                (
-                    Cause::BankStale,
-                    d.identity.revision,
-                    state.animation_revision(),
-                )
-            }
-        });
-    let lighting = (state.light_revision() != Ok(light)).then(|| {
-        (
-            Cause::LightmapChanged,
-            light,
-            state.light_revision().unwrap_or(0),
-        )
+    let Some(first) = source.first() else {
+        return [Some((Cause::BankStale, 1, 0)), None, None];
+    };
+    let [version, lighting] = revision_changes(
+        historical,
+        first.description().identity,
+        light,
+        upload::Identity {
+            generation: state.generation(),
+            revision: state.animation_revision(),
+        },
+        state.light_revision(),
+    );
+    let bank = version.or_else(|| {
+        let stale = if historical {
+            // Immutable captured bytes are still owned. Snapshot availability and
+            // supported mode remain hard requirements, even within one generation.
+            renderer.validate_material_snapshot_mode().is_err() || state.snapshot().is_err()
+        } else {
+            source.iter().any(|s| s.check_current(renderer).is_err())
+        };
+        stale.then_some((
+            Cause::BankStale,
+            first.description().identity.revision,
+            state.animation_revision(),
+        ))
     });
     let actual = [renderer.config.width, renderer.config.height];
     let viewport = (actual != size).then(|| {
@@ -313,17 +345,19 @@ impl Controller {
     /// Local runtime session counter, never a save ID or pointer identity.
     pub fn world_changed(&mut self) {
         self.invalidate("world replaced");
-        match self.world_epoch.checked_add(1) {
-            Some(epoch) => {
+        match NEXT_WORLD.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1)) {
+            Ok(epoch) => {
                 self.world_epoch = epoch;
-                log::info!("Helium native world session epoch={epoch}");
+                log::info!("Helium native RENDER CLIENT world session epoch={epoch}");
             }
-            None => {
+            Err(_) => {
+                self.world_epoch = 0;
                 self.finished = true;
                 self.error("world epochs exhausted; restart diagnostic session".into());
             }
         }
     }
+
     pub fn from_environment() -> Option<Self> {
         let mode = match selected_mode() {
             Ok(m) => m,
@@ -394,6 +428,10 @@ impl Controller {
             .map(|f| f.attempt)
             .unwrap_or(self.last_attempt);
         recorder::global().record(id, Stage::Cancelled, Emitter::Game, Some(cause), 0, 0);
+        if cause == Cause::MemoryPressure {
+            self.finished = true;
+            self.retry_forbidden = true;
+        }
         if self.attempts > 0 && !cause.recoverable() {
             self.retry_forbidden = true;
         }
@@ -488,7 +526,14 @@ impl Controller {
                 return;
             }
         }
-        if self.candidate.as_ref().is_some_and(|c| c.key != key) {
+        // Bounded best-of-this-update selection: retain one useful real section,
+        // preferring more accepted geometry instead of the first edge quad.
+        if self.mode == Mode::AttachedOneSection && mesh.solid.len() < 24 {
+            return;
+        }
+        if self.candidate.as_ref().is_some_and(|c| {
+            c.key != key && c.vertices.len() >= mesh.solid.len().saturating_mul(24)
+        }) {
             self.counters.busy += 1;
             return;
         }
@@ -568,6 +613,10 @@ impl Controller {
         if self.mode == Mode::Disabled {
             return;
         }
+        if frame.title {
+            self.invalidate("world exited");
+            return;
+        }
         #[cfg(target_os = "ios")]
         if self
             .displayed
@@ -578,8 +627,27 @@ impl Controller {
         }
         #[cfg(target_os = "ios")]
         if let Some(d) = &self.displayed {
-            let changes = producer_changes(renderer, &d.source, d.light_revision, d.size);
-            if changes.iter().any(Option::is_some) {
+            recorder::global().record(
+                d.attempt,
+                Stage::CurrentMaterial,
+                Emitter::Game,
+                None,
+                generation_value(renderer.material_state().generation()),
+                renderer.material_state().animation_revision(),
+            );
+            recorder::global().record(
+                d.attempt,
+                Stage::CurrentLight,
+                Emitter::Game,
+                None,
+                d.light_revision,
+                renderer.material_state().light_revision().unwrap_or(0),
+            );
+            let changes = producer_changes(renderer, &d.source, d.light_revision, d.size, true);
+            if changes.iter().any(Option::is_some)
+                || d.world_epoch != self.world_epoch
+                || d.created.elapsed() >= CAPTURE_MAX_AGE
+            {
                 for (cause, expected, observed) in changes.into_iter().flatten() {
                     recorder::global().record(
                         d.attempt,
@@ -590,7 +658,13 @@ impl Controller {
                         observed,
                     );
                 }
-                self.invalidate("displayed producer state changed");
+                self.invalidate(if d.world_epoch != self.world_epoch {
+                    "world replaced"
+                } else if d.created.elapsed() >= CAPTURE_MAX_AGE {
+                    "capture lifetime expired"
+                } else {
+                    "displayed producer state changed"
+                });
             }
         }
         self.camera = (!frame.title).then(|| {
@@ -605,7 +679,42 @@ impl Controller {
         });
         if let Some(f) = &self.flight {
             if !f.cancel.load(Ordering::Acquire) {
-                let changes = producer_changes(renderer, &f.source, f.light_revision, f.size);
+                let historical = self.mode == Mode::AttachedOneSection;
+                let changes =
+                    producer_changes(renderer, &f.source, f.light_revision, f.size, historical);
+                if historical {
+                    recorder::global().record(
+                        f.attempt,
+                        Stage::CurrentMaterial,
+                        Emitter::Game,
+                        None,
+                        generation_value(renderer.material_state().generation()),
+                        renderer.material_state().animation_revision(),
+                    );
+                    recorder::global().record(
+                        f.attempt,
+                        Stage::CurrentLight,
+                        Emitter::Game,
+                        None,
+                        f.light_revision,
+                        renderer.material_state().light_revision().unwrap_or(0),
+                    );
+                }
+                if f.created.elapsed() >= CAPTURE_MAX_AGE || f.world_epoch != self.world_epoch {
+                    recorder::global().record(
+                        f.attempt,
+                        Stage::Cancelled,
+                        Emitter::Game,
+                        Some(if f.world_epoch != self.world_epoch {
+                            Cause::WorldChanged
+                        } else {
+                            Cause::SnapshotExpired
+                        }),
+                        0,
+                        0,
+                    );
+                    f.cancel.store(true, Ordering::Release);
+                }
                 if changes.iter().any(Option::is_some) {
                     for (cause, expected, observed) in changes.into_iter().flatten() {
                         recorder::global().record(
@@ -625,8 +734,18 @@ impl Controller {
                     #[allow(unused_mut)]
                     let mut f = self.flight.take().unwrap();
                     let valid = !f.cancel.load(Ordering::Acquire)
-                        && f.source.iter().all(|s| s.check_current(renderer).is_ok())
-                        && renderer.material_state().light_revision() == Ok(f.light_revision);
+                        && f.world_epoch != 0
+                        && f.world_epoch == self.world_epoch
+                        && f.created.elapsed() < CAPTURE_MAX_AGE
+                        && producer_changes(
+                            renderer,
+                            &f.source,
+                            f.light_revision,
+                            f.size,
+                            self.mode == Mode::AttachedOneSection,
+                        )
+                        .iter()
+                        .all(Option::is_none);
                     self.finished = true;
                     self.retry_at = Instant::now() + std::time::Duration::from_secs(2);
                     match result {
@@ -635,7 +754,7 @@ impl Controller {
                             if let Some(t) = f.attached.take() {
                                 recorder::global().record(
                                     f.attempt,
-                                    Stage::ProducerRevalidated,
+                                    Stage::HistoricalCaptureReady,
                                     Emitter::Game,
                                     None,
                                     0,
@@ -643,6 +762,8 @@ impl Controller {
                                 );
                                 t.publish();
                                 self.displayed = Some(Shown {
+                                    created: f.created,
+                                    world_epoch: f.world_epoch,
                                     attempt: f.attempt,
                                     _ticket: t,
                                     source: f.source,
@@ -680,7 +801,7 @@ impl Controller {
             }
             return;
         }
-        if self.finished || frame.title {
+        if self.finished || frame.title || self.world_epoch == 0 {
             #[cfg(target_os = "ios")]
             if self.finished
                 && !self.retirement_recorded
@@ -792,6 +913,19 @@ impl Controller {
                 return;
             }
         };
+        // All banks were validated against one exclusively borrowed owning renderer
+        // on this thread; they must share the same Arc snapshot/version.
+        let identity = source[0].description().identity;
+        let retention = source[0].retention_key();
+        if source.iter().any(|s| {
+            s.description().identity != identity
+                || s.retention_key() != retention
+                || s.check_current(renderer).is_err()
+        }) {
+            self.error("inconsistent capture bank provenance".into());
+            return;
+        }
+        let created = Instant::now();
         let geometry = Arc::new(g);
         let cancel = Arc::new(AtomicBool::new(false));
         let Some(attempt) = recorder::global().allocate(self.world_epoch) else {
@@ -845,7 +979,18 @@ impl Controller {
             validation[0].description().identity.revision,
             renderer.material_state().animation_revision(),
         );
+        if self.mode == Mode::AttachedOneSection {
+            recorder::global().record(
+                attempt,
+                Stage::CaptureValidated,
+                Emitter::Game,
+                None,
+                generation_value(identity.generation),
+                identity.revision,
+            );
+        }
         let job = Job {
+            created,
             attempt,
             world_epoch: self.world_epoch,
             source,
@@ -869,6 +1014,8 @@ impl Controller {
             ) {
                 Ok((ticket, receiver)) => {
                     self.flight = Some(Flight {
+                        created,
+                        world_epoch: self.world_epoch,
                         attempt,
                         geometry,
                         source: validation,
@@ -905,6 +1052,8 @@ impl Controller {
             }) {
             Ok(_) => {
                 self.flight = Some(Flight {
+                    created,
+                    world_epoch: self.world_epoch,
                     attempt,
                     geometry,
                     source: validation,
@@ -938,6 +1087,7 @@ impl Drop for Controller {
     }
 }
 struct Job {
+    created: Instant,
     attempt: u64,
     world_epoch: u64,
     source: Vec<BankSource>,
@@ -948,8 +1098,9 @@ struct Job {
     size: [u32; 2],
 }
 /// Versioned revocable CPU lease, NOT production global GPU authority. The live
-/// Renderer authorizes before dispatch and rechecks after completion on its thread.
-/// Worker success describes historical GPU bytes until that final check passes.
+/// Renderer validates the full immutable version before dispatch. Attached mode
+/// rechecks hard lifecycle authority after completion, NOT live content currency.
+/// Detached mode retains strict producer revision checks.
 struct LeasedSource {
     bank: BankSource,
     geometry: Arc<Geometry>,
@@ -1020,7 +1171,7 @@ fn run_impl(
         )
     };
     event(Stage::WorkerStarted, None, 0, 0);
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = job.created + RENDER_DEADLINE;
     let pause = || -> Result<(), String> {
         if Instant::now() >= deadline {
             event(Stage::Cancelled, Some(Cause::GpuTimeout), 0, 0);
@@ -1253,6 +1404,62 @@ mod tests {
         gfx::material_snapshot::State,
         mesher::{OPAQUE_LAYER, TerrainVertex},
     };
+    #[test]
+    fn normal_content_updates_during_worker_preserve_only_historical_authority() {
+        let generation = State::new().generation();
+        for (light, next_light, revision, next_revision, stage_ms) in [
+            (32, 33, 47, 47, 32), // observed WorkerStarted
+            (81, 82, 47, 47, 50), // observed UploadStarted
+            (81, 81, 47, 48, 19), // observed DrawSubmitted
+            (32, 33, 47, 48, 80), // mixed animation + light
+        ] {
+            let captured = upload::Identity {
+                generation,
+                revision,
+            };
+            let current = upload::Identity {
+                generation,
+                revision: next_revision,
+            };
+            let strict = revision_changes(false, captured, light, current, Ok(next_light));
+            assert!(
+                strict.iter().any(Option::is_some),
+                "strict G06 rejection at {stage_ms}ms"
+            );
+            let historical = revision_changes(true, captured, light, current, Ok(next_light));
+            assert!(historical.iter().all(Option::is_none));
+            // A real replacement still cancels regardless of content policy.
+            let replaced = upload::Identity {
+                generation: State::new().generation(),
+                ..current
+            };
+            assert_eq!(
+                revision_changes(true, captured, light, replaced, Ok(next_light))[0]
+                    .unwrap()
+                    .0,
+                Cause::RendererChanged
+            );
+            assert_eq!(
+                revision_changes(true, captured, light, current, Err("released"))[1]
+                    .unwrap()
+                    .0,
+                Cause::ProducerUnavailable
+            );
+        }
+    }
+    #[test]
+    fn independent_controllers_and_world_replacement_never_share_epochs() {
+        let mut client = Controller::new(Mode::AttachedOneSection);
+        let mut other = Controller::new(Mode::AttachedOneSection);
+        assert_eq!(client.world_epoch, 0); // no world, admission forbidden
+        client.world_changed();
+        other.world_changed();
+        assert_ne!(client.world_epoch, other.world_epoch);
+        let previous = client.world_epoch;
+        client.world_changed();
+        assert_ne!(client.world_epoch, previous);
+        assert_ne!(client.world_epoch, other.world_epoch);
+    }
     // Handcrafted actual SectionMesh type, NOT production mesher output/category D.
     fn mesh() -> SectionMesh {
         let mut m = SectionMesh::default();
@@ -1411,9 +1618,10 @@ mod tests {
         c.camera = Some(([0.; 3], [[0.; 4]; 4]));
         c.world_changed();
         assert!(c.camera.is_none());
-        assert_eq!(c.world_epoch, 1);
+        let first = c.world_epoch;
+        assert_ne!(first, 0);
         c.world_changed();
-        assert_eq!(c.world_epoch, 2);
+        assert!(c.world_epoch > first);
         c.candidate = Some(geometry((1, 2, 3), 1));
         c.remove_columns([(1, 3)].into_iter());
         assert!(c.candidate.is_none());
@@ -1478,6 +1686,13 @@ mod ownership_tests {
             "replacement",
             "suspend",
             "pack reload",
+            "world replaced",
+            "in-flight section replaced",
+            "resource pack reloaded",
+            "actual game window changed/destroyed",
+            "launcher covered",
+            "application suspended",
+            "native memory pressure",
         ] {
             let source = handcrafted_bridge_bank();
             let geometry = geometry(&source);
@@ -1485,6 +1700,8 @@ mod ownership_tests {
             let (_send, receiver) = mpsc::sync_channel(1);
             let mut owner = Controller::new(Mode::OneSectionDiagnostic);
             owner.flight = Some(Flight {
+                created: Instant::now(),
+                world_epoch: 1,
                 attempt: 0,
                 geometry: geometry.clone(),
                 source: vec![source],
@@ -1551,6 +1768,7 @@ mod ownership_tests {
             + geometry.vertices.capacity()
             + geometry.indices.capacity() * 4;
         let job = Job {
+            created: Instant::now(),
             attempt: 0,
             world_epoch: 0, // handcrafted test, NOT an actual game session
             source: banks,

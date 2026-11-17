@@ -1028,6 +1028,10 @@ impl Game<'_> {
         );
         streaming.remote = true;
         streaming.radius = self.settings.render_distance;
+        #[cfg(feature = "helium-direct-metal")]
+        if let Some(native) = self.direct_metal.as_mut() {
+            native.world_changed();
+        }
         self.streaming = streaming;
         self.world = World::new(self.res.facts().air, 0);
         self.save = Arc::new(SaveDir::new(
@@ -1309,6 +1313,10 @@ impl Game<'_> {
         self.adv = Default::default();
         self.stats = Default::default();
         self.score.board = Default::default();
+        #[cfg(feature = "helium-direct-metal")]
+        if let Some(native) = self.direct_metal.as_mut() {
+            native.invalidate("world exited");
+        }
         self.streaming = Streaming::new(Arc::new(NoTerrain), self.worker_context(), 1);
         self.streaming.paused = true;
         self.world = World::new(self.res.facts().air, 0);
@@ -2352,6 +2360,10 @@ impl Game<'_> {
             );
             streaming.remote = true;
             streaming.radius = self.streaming.radius;
+            #[cfg(feature = "helium-direct-metal")]
+            if let Some(native) = self.direct_metal.as_mut() {
+                native.world_changed();
+            }
             self.streaming = streaming;
             let (time, day, weather) = (
                 self.world.game_time,
