@@ -55,7 +55,6 @@ struct Flags {
     paused: AtomicBool,
     stop: AtomicBool,
     failure: Mutex<Option<String>>,
-    retired_lock: Mutex<Option<horizon_client::save::SessionLock>>,
     /// `IntegratedServer.getPort`: the port it is open to the LAN on, 0
     /// while it is not.
     published: AtomicU16,
@@ -89,6 +88,9 @@ struct Flags {
     /// dimension and feet), and the lines of the last tick there.
     debug_at: Mutex<Option<(Dim, [i32; 3])>>,
     debug: Mutex<super::debug_lines::ServerDebug>,
+    // Drop LAST: terrain/source Arcs above can own save backends and writers.
+    // Their retirement must finish before the world's OS lock is released.
+    retired_lock: Mutex<Option<horizon_client::save::SessionLock>>,
 }
 
 /// Work the window hands its server thread (`MinecraftServer.execute`).
