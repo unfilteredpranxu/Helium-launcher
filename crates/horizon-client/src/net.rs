@@ -1938,6 +1938,8 @@ mod tests {
             counters: Arc::new(Mutex::new(None)),
             cookies: Cookies::default(),
             debug: false,
+            far: Arc::default(),
+            recorder: Arc::new(Mutex::new(None)),
         };
         let start = std::time::Instant::now();
         session.disconnect();
@@ -2109,6 +2111,8 @@ mod tests {
             counters: Arc::new(Mutex::new(None)),
             cookies: Cookies::default(),
             debug: false,
+            far: Arc::default(),
+            recorder: Arc::new(Mutex::new(None)),
         };
         session.disconnect();
         assert!(peer.recv().is_err());
@@ -2425,6 +2429,7 @@ mod tests {
         let (mut reader, writer) = Connection::local(client).split();
         let (send, events) = channel();
         let session = Session {
+            cancellation: Arc::new(Cancellation::default()),
             events,
             writer: Arc::new(Mutex::new(Some(writer))),
             configuring: Arc::new(AtomicBool::new(false)),

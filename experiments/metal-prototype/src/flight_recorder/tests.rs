@@ -1,5 +1,46 @@
 use super::*;
 #[test]
+fn shutdown_report_refreshes_without_a_new_metal_event_and_refuses_foreign_boot() {
+    let path = temp();
+    let r = Recorder::persistent_kind(path.clone(), true).unwrap();
+    assert!(r.wait_ack(Duration::from_secs(3)));
+    let boot = r.status()[1];
+    let seq = r.status()[5];
+    fs::write(
+        path.join("shutdown-save-numeric.txt"),
+        format!("1 3 0 1 5100 1 {boot}\n20 5 1 5 1 0 0\n30 5 1 7 1 1 1\n"),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let report = fs::read_to_string(path.join("Helium-Metal-Report.txt")).unwrap();
+        if report.contains("five_second_probe_near=true") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "shutdown context did not refresh independently"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(r.status()[5], seq);
+    fs::write(
+        path.join("shutdown-save-numeric.txt"),
+        "1 3 0 0 5100 1 0\n30 5 1 7 1 1 1\n",
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let report = fs::read_to_string(path.join("Helium-Metal-Report.txt")).unwrap();
+        if report.contains("current attribution refused") {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(r.status()[24], 0); // report evidence cannot authorize UIKit reveal
+}
+#[test]
 fn pressure_aggregation_is_persisted_with_first_cause_and_distinct_transitions() {
     let path = temp();
     let r = Recorder::persistent_kind(path.clone(), true).unwrap();

@@ -52,3 +52,8 @@ pub fn bootstrap_diagnostics() {
         let _ = helium_metal_prototype::attached::device_test_mode();
     }
 }
+
+/// Numeric report correlation only; never GPU or save authority.
+pub fn diagnostic_boot_id() -> u64 {
+    helium_metal_prototype::flight_recorder::global().status()[1]
+}

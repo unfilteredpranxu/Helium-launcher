@@ -25,8 +25,13 @@ import Foundation
   assert(helium_diag_flush_test_v2()==2)
   var state=[UInt64](repeating:0,count:32);assert(state.withUnsafeMutableBufferPointer{helium_diag_snapshot_v2($0.baseAddress,32)}==2)
   assert(state[2]==103 && state[4]==3 && state[6]>=state[5] && state[8]==0 && state[15]==1)
+  // Synthetic numeric shutdown context, same real report writer and C ABI.
+  try "1 8 0 1 5100 1 \(state[1])\n10 11 1 5 1 1 0\n20 11 1 7 1 1 1\n".write(toFile:root+"/shutdown-save-numeric.txt",atomically:true,encoding:.utf8)
+  assert(helium_diag_event_v2(0,34,0,0,2)==2)
+  assert(helium_diag_flush_test_v2()==2)
   let report=try String(contentsOfFile:root+"/Helium-Metal-Report.txt",encoding:.utf8)
   assert(report.contains("app_build=12001") && report.contains("recorder_status=OK") && report.contains("ViewLayoutInvalid") && report.contains("LightmapChanged") && report.contains("ColumnUnloaded") && report.contains("PHYSICAL_PIXELS_UNVERIFIED"))
+  assert(report.contains("SHUTDOWN/SAVE P0 HOLD") && report.contains("FILE SAVE/WORKER FAILURE") && report.contains("five_second_probe_near=true"))
   let lines=try String(contentsOfFile:root+"/helium-metal-events.jsonl",encoding:.utf8).split(separator:"\n").map{try JSONSerialization.jsonObject(with:Data($0.utf8)) as! [String:Any]}
   let sequence=lines.map{($0["event_seq"] as! NSNumber).uint64Value}
   assert(zip(sequence,sequence.dropFirst()).allSatisfy{$0 < $1})

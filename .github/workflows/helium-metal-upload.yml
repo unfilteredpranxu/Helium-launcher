@@ -6,6 +6,14 @@ on:
       - 'crates/horizon-metal-bridge/**'
       - 'crates/horizon-client/src/game.rs'
       - 'crates/horizon-client/src/entry.rs'
+      - 'crates/horizon-client/src/save.rs'
+      - 'crates/horizon-client/src/save/**'
+      - 'crates/horizon-client/src/lan/playerdata.rs'
+      - 'crates/horizon-client/src/game/saving.rs'
+      - 'crates/horizon-client/src/game/integrated.rs'
+      - 'crates/horizon-threads/src/**'
+      - 'crates/horizon-client-render/src/lod.rs'
+      - 'crates/horizon-client-render/src/streaming.rs'
       - 'crates/horizon-client/src/game/remote.rs'
       - 'crates/horizon-client-render/src/gfx/material_snapshot/**'
       - 'packaging/ios/Launcher/**'
@@ -177,8 +185,33 @@ jobs:
             }).join('\n');
             await github.rest.checks.create({owner:context.repo.owner,repo:context.repo.repo,head_sha:context.sha,name:'Helium production bridge evidence',status:'completed',conclusion:'neutral',output:{title:'Read individual compilation logs; not gameplay runtime proof',summary}});
 
+  shutdown-save-qualification:
+    name: Save/shutdown components (P0 release HOLD) - ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwayland-dev libxkbcommon-dev libx11-dev libudev-dev libasound2-dev
+      - run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Controlled save durability and shutdown deadline regressions
+        env:
+          CARGO_BUILD_JOBS: '3'
+        run: |
+          set -euo pipefail
+          cargo +1.95.0 test --locked -p horizon-threads --lib jobs::
+          cargo +1.95.0 test --locked -p horizon-client-lib --no-default-features --lib save::shutdown -- --nocapture
+          cargo +1.95.0 test --locked -p horizon-client-lib --no-default-features --lib lan::playerdata::tests::
+          rustfmt +1.95.0 --check --edition 2024 --config skip_children=true crates/horizon-client/src/save.rs crates/horizon-client/src/save/shutdown.rs crates/horizon-client/src/save/shutdown/tests.rs crates/horizon-client/src/lan/playerdata.rs crates/horizon-client/src/net.rs crates/horizon-client/src/game/integrated.rs
+
   attached-ios-game:
-    needs: [apple-sdk, production-bridge, diagnostics-qualification, linux-diagnostics]
+    needs: [apple-sdk, production-bridge, diagnostics-qualification, linux-diagnostics, shutdown-save-qualification]
     runs-on: macos-26
     timeout-minutes: 90
     env:
@@ -227,10 +260,8 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.publish_owner_ipa
         run: |
           set -euo pipefail
-          app="$RUNNER_TEMP/attached-game/build/HorizonGame.app"
-          mkdir -p "$RUNNER_TEMP/attached-game/package/Payload"
-          cp -a "$app" "$RUNNER_TEMP/attached-game/package/Payload/"
-          (cd "$RUNNER_TEMP/attached-game/package" && zip -qry ../Helium-G07A-game-unsigned.ipa Payload)
+          echo 'P0 SHUTDOWN/SAVE HOLD: bounded durable host exit is not qualified; NO OWNER IPA.' >&2
+          exit 1
       - name: Publish actual game link evidence
         if: always()
         uses: actions/github-script@v7

@@ -129,3 +129,5 @@ pub mod attached;
 
 #[cfg(any(target_os = "ios", target_os = "macos", test))]
 mod attached_protocol;
+
+mod shutdown_report;

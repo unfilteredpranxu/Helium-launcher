@@ -261,9 +261,31 @@ impl Integrated {
     fn halt(&mut self) -> Result<()> {
         self.request_stop();
         if let Some(thread) = self.thread.take() {
-            thread
-                .join()
-                .map_err(|_| "the integrated server panicked")?;
+            horizon_client::save::shutdown::global().record(
+                0,
+                horizon_client::save::shutdown::Actor::Server,
+                horizon_client::save::shutdown::Stage::JoinBegin,
+                0,
+                0,
+            );
+            let joined = thread.join();
+            horizon_client::save::shutdown::global().record(
+                0,
+                horizon_client::save::shutdown::Actor::Server,
+                horizon_client::save::shutdown::Stage::JoinEnd,
+                0,
+                0,
+            );
+            joined.map_err(|_| {
+                horizon_client::save::shutdown::global().record(
+                    0,
+                    horizon_client::save::shutdown::Actor::Server,
+                    horizon_client::save::shutdown::Stage::Failed,
+                    0,
+                    0,
+                );
+                "the integrated server panicked"
+            })?;
         }
         match self
             .flags
@@ -882,6 +904,8 @@ impl Game<'_> {
     /// `MinecraftServer.stopServer`: the players are saved and sent away,
     /// then the world is saved.
     fn stop_integrated(&mut self) -> Result<()> {
+        self.save
+            .shutdown_event(horizon_client::save::shutdown::Stage::Requested);
         // Abort background terrain generation/decoration on shutdown, matching vanilla behavior.
         self.streaming.abort_generation();
         // The close request: lifecycle observation stops.
@@ -920,6 +944,8 @@ impl Game<'_> {
         // `WorldCloseFinal` follows a successful final save.
         self.native_lifecycle_world_closed();
         self.session_lock = None;
+        self.save
+            .shutdown_event(horizon_client::save::shutdown::Stage::LockReleased);
         Ok(())
     }
 }

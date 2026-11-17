@@ -331,6 +331,10 @@ impl Drop for Registration {
         // No worker takes a job of it now (a worker counts itself running
         // while it holds the sources' read lock); wait for those that did.
         entry.retired.store(true, Ordering::SeqCst);
+        crate::shutdown_observer::event(
+            crate::shutdown_observer::Target::JobRegistrationDrain,
+            true,
+        );
         let mut sleep = lock(&self.inner.sleep);
         while entry.running.load(Ordering::SeqCst) > 0 {
             sleep = self
@@ -342,6 +346,10 @@ impl Drop for Registration {
         drop(sleep);
         // The source's last reference may go here, outside every lock.
         drop(entry);
+        crate::shutdown_observer::event(
+            crate::shutdown_observer::Target::JobRegistrationDrain,
+            false,
+        );
     }
 }
 

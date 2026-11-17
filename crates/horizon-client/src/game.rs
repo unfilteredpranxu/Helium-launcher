@@ -16701,7 +16701,7 @@ impl Game<'_> {
         self.save_level(wait)?;
         self.save_parked_levels(wait)?;
         self.save_game_metadata()?;
-        let _ = self.finish_player_autosaves(wait);
+        self.finish_player_autosaves(wait)?;
         self.native_world_saved(wait);
         if dedicated {
             dedicated::events::record_server("saved", serde_json::json!({}));
@@ -16732,7 +16732,7 @@ impl Game<'_> {
         self.save_warden_tracker();
         self.sync_level();
         // Level::write can synchronously replace the integrated owner file.
-        let _ = self.finish_player_autosaves(true);
+        self.finish_player_autosaves(true)?;
         let stored_owner = self.store_owner();
         write_level_for_role(
             &mut self.level,
@@ -18671,12 +18671,20 @@ fn autosave_interval(rate: f32) -> i64 {
 }
 impl ApplicationHandler for Game<'_> {
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        horizon_client::save::shutdown::global().record(
+            self.save.shutdown_id(),
+            horizon_client::save::shutdown::Actor::Main,
+            horizon_client::save::shutdown::Stage::Suspended,
+            0,
+            0,
+        );
         #[cfg(feature = "helium-direct-metal")]
         if let Some(native) = self.direct_metal.as_mut() {
             native.invalidate("application suspended");
         }
     }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        horizon_client::save::shutdown::mark_event_thread();
         if self.window.is_some() {
             return;
         }
@@ -18852,6 +18860,7 @@ impl ApplicationHandler for Game<'_> {
     /// applicationWillTerminate without a CloseRequested; vanilla's GLFW
     /// window turns it into a window close, so Minecraft.stop saves the world.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        horizon_client::save::shutdown::mark_event_thread();
         self.shut_down();
     }
 }
@@ -20459,6 +20468,17 @@ impl Game<'_> {
     }
     /// The loop ended: close the pads' output, save the world, write the perf report.
     pub(super) fn shut_down(&mut self) {
+        horizon_client::save::shutdown::global().record(
+            self.save.shutdown_id(),
+            horizon_client::save::shutdown::Actor::Main,
+            horizon_client::save::shutdown::Stage::Exit,
+            0,
+            0,
+        );
+        #[cfg(feature = "helium-direct-metal")]
+        if let Some(native) = self.direct_metal.as_mut() {
+            native.invalidate("shutdown");
+        }
         self.stop_splitscreen();
         self.end_screenshot_sequence(Err("cancelled: the game is closing".into()));
         self.pad_close_output();
@@ -23727,7 +23747,15 @@ fn deep<T>(work: impl FnOnce() -> T) -> T {
 }
 
 impl ApplicationHandler for App {
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        deep(|| {
+            if let App::Ready(game) = self {
+                game.host.suspended(event_loop);
+            }
+        });
+    }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        horizon_client::save::shutdown::mark_event_thread();
         deep(|| self.resumed_here(event_loop))
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -23740,6 +23768,7 @@ impl ApplicationHandler for App {
         deep(|| self.about_to_wait_here(event_loop))
     }
     fn exiting(&mut self, event_loop: &ActiveEventLoop) {
+        horizon_client::save::shutdown::mark_event_thread();
         deep(|| self.exiting_here(event_loop))
     }
     fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {

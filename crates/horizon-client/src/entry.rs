@@ -36,6 +36,12 @@ pub fn main_with(mods: crate::mod_api::Mods) {
     // Bundle/config checks perform no UIKit attachment or GPU work.
     #[cfg(all(target_os = "ios", feature = "helium-direct-metal"))]
     horizon_metal_bridge::bootstrap_diagnostics();
+    #[cfg(all(target_os = "ios", feature = "helium-direct-metal"))]
+    let shutdown_boot = horizon_metal_bridge::diagnostic_boot_id();
+    #[cfg(all(target_os = "ios", not(feature = "helium-direct-metal")))]
+    let shutdown_boot = 0;
+    #[cfg(target_os = "ios")]
+    horizon_client::save::shutdown::initialize(documents.join("logs"), shutdown_boot);
     // `android_main` already moved into the app's files folder.
     #[cfg(target_os = "android")]
     let documents = std::env::current_dir().unwrap_or_default();

@@ -3,7 +3,11 @@
 use super::guest::{Guest, SavedBody};
 use crate::{
     items::ItemStack,
-    save::{Level, put, read_dat, uuid_from_tag, write_dat},
+    save::{
+        Level, put, read_dat,
+        shutdown::{self, Actor, Stage},
+        uuid_from_tag, write_dat, write_dat_durable,
+    },
 };
 use horizon_protocol::crypto::uuid_string;
 use horizon_world::{
@@ -258,7 +262,7 @@ pub struct SavedPlayer {
 }
 
 fn write_snapshot(snapshot: Snapshot) -> Result<SavedPlayer, String> {
-    write_dat(&snapshot.file, snapshot.tag)
+    write_dat_durable(&snapshot.file, snapshot.tag)
         .map(|()| SavedPlayer {
             uuid: snapshot.uuid,
             name: snapshot.name,
@@ -270,6 +274,15 @@ struct PlayerWriter {
     send: std::sync::mpsc::Sender<Snapshot>,
     done: std::sync::mpsc::Receiver<Result<SavedPlayer, String>>,
     thread: std::thread::JoinHandle<()>,
+}
+
+fn join_writer(writer: PlayerWriter, pending: usize) {
+    shutdown::global().record(0, Actor::Player, Stage::JoinBegin, 0, pending);
+    drop(writer.send);
+    if writer.thread.join().is_err() {
+        shutdown::global().record(0, Actor::Player, Stage::Failed, 0, pending);
+    }
+    shutdown::global().record(0, Actor::Player, Stage::JoinEnd, 0, pending);
 }
 
 /// One FIFO writer for a server's player autosaves. Synchronous logout writes
@@ -297,7 +310,20 @@ impl Autosaves {
                 .name("horizon-player-writer".into())
                 .spawn(move || {
                     for snapshot in receive {
-                        let _ = complete.send(write_snapshot(snapshot));
+                        shutdown::global().record(0, Actor::Player, Stage::Started, 1, 1);
+                        let result = write_snapshot(snapshot);
+                        shutdown::global().record(
+                            0,
+                            Actor::Player,
+                            if result.is_ok() {
+                                Stage::Synced
+                            } else {
+                                Stage::Failed
+                            },
+                            1,
+                            0,
+                        );
+                        let _ = complete.send(result);
                     }
                 }) {
                 Ok(thread) => self.writer = Some(PlayerWriter { send, done, thread }),
@@ -310,14 +336,14 @@ impl Autosaves {
             match writer.send.send(snapshot) {
                 Ok(()) => {
                     self.pending += 1;
+                    shutdown::global().record(0, Actor::Player, Stage::Queued, 1, self.pending);
                     return;
                 }
                 Err(error) => {
                     let completed = self.completed(true);
                     self.ready.extend(completed);
                     if let Some(writer) = self.writer.take() {
-                        drop(writer.send);
-                        let _ = writer.thread.join();
+                        join_writer(writer, self.pending);
                     }
                     error.0
                 }
@@ -329,7 +355,7 @@ impl Autosaves {
             Ok(player) => self.ready.push(player),
             Err(error) => {
                 log::warn!("Horizon: {error}");
-                self.error = Some(error);
+                self.error.get_or_insert(error);
             }
         }
     }
@@ -337,7 +363,10 @@ impl Autosaves {
     /// Serialize a newer logout snapshot after every queued autosave.
     pub fn save_after(&mut self, guest: &Guest, world: &Path) -> Vec<SavedPlayer> {
         let saved = self.completed(true);
-        save(guest, world);
+        if let Err(error) = save_now(guest, world) {
+            shutdown::global().record(0, Actor::Player, Stage::Failed, 1, self.pending);
+            self.error.get_or_insert(error);
+        }
         saved
     }
 
@@ -345,6 +374,10 @@ impl Autosaves {
     /// for explicit saves, logout, and shutdown. Failures remain visible.
     pub fn completed(&mut self, wait: bool) -> Vec<SavedPlayer> {
         let mut saved = std::mem::take(&mut self.ready);
+        let waiting = wait && self.pending > 0;
+        if waiting {
+            shutdown::global().record(0, Actor::Player, Stage::WaitBegin, 0, self.pending);
+        }
         while self.pending > 0 {
             let done = &self.writer.as_ref().unwrap().done;
             let result = if wait {
@@ -360,28 +393,31 @@ impl Autosaves {
                         Ok(player) => saved.push(player),
                         Err(error) => {
                             log::warn!("Horizon: {error}");
-                            self.error = Some(error);
+                            self.error.get_or_insert(error);
                         }
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.error = Some("the player writer stopped".into());
+                    self.error
+                        .get_or_insert_with(|| "the player writer stopped".into());
                     log::warn!("Horizon: the player writer stopped");
                     self.pending = 0;
                     if let Some(writer) = self.writer.take() {
-                        drop(writer.send);
-                        let _ = writer.thread.join();
+                        join_writer(writer, self.pending);
                     }
                 }
             }
+        }
+        if waiting {
+            shutdown::global().record(0, Actor::Player, Stage::WaitEnd, 0, self.pending);
         }
         saved
     }
 
     pub fn writes_finished(&mut self) -> crate::Result<bool> {
-        match self.error.take() {
-            Some(error) => Err(error.into()),
+        match self.error.as_ref() {
+            Some(error) => Err(error.clone().into()),
             None => Ok(self.pending == 0),
         }
     }
@@ -389,9 +425,11 @@ impl Autosaves {
 
 impl Drop for Autosaves {
     fn drop(&mut self) {
+        // Process every terminal acknowledgement/error before discarding the
+        // receiver. This is still a blocking drain, NOT a main-thread exit fix.
+        let _ = self.completed(true);
         if let Some(writer) = self.writer.take() {
-            drop(writer.send);
-            let _ = writer.thread.join();
+            join_writer(writer, self.pending);
         }
     }
 }
@@ -637,6 +675,22 @@ mod tests {
     }
 
     #[test]
+    fn failed_player_write_never_becomes_complete_by_polling_the_error_twice() {
+        let dir = world("shutdown-sticky-error");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("players"), b"not a directory").unwrap();
+        let mut saves = Autosaves::default();
+        saves.enqueue(&holding(1, "minecraft:diamond", 5), &dir);
+        assert!(saves.completed(true).is_empty());
+        assert!(saves.writes_finished().is_err());
+        assert!(
+            saves.writes_finished().is_err(),
+            "reading an error is not retrying or saving the failed snapshot"
+        );
+        drop(saves);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[test]
     fn autosave_failures_recover_and_drop_drains_writes() {
         let dir = world("async-error");
         std::fs::create_dir_all(&dir).unwrap();
@@ -646,7 +700,7 @@ mod tests {
         assert!(saves.completed(true).is_empty());
         assert!(saves.writes_finished().is_err());
         assert!(saves.completed(false).is_empty());
-        assert!(saves.writes_finished().unwrap());
+        assert!(saves.writes_finished().is_err());
         drop(saves);
         std::fs::remove_file(dir.join("players")).unwrap();
         let mut saves = Autosaves::default();
@@ -683,7 +737,7 @@ mod tests {
         let saved = saves.completed(true);
         assert_eq!(saved.iter().map(|p| p.uuid).collect::<Vec<_>>(), vec![2]);
         assert!(saves.writes_finished().is_err());
-        assert!(saves.writes_finished().unwrap());
+        assert!(saves.writes_finished().is_err());
         save(&g, &reference);
         assert_eq!(
             read_dat(&path(&good, 2)).unwrap(),
@@ -692,7 +746,8 @@ mod tests {
         std::fs::remove_file(bad.join("players")).unwrap();
         saves.enqueue(&g, &bad);
         assert_eq!(saves.completed(true).len(), 1);
-        assert!(saves.writes_finished().unwrap());
+        // UUID 2 succeeding does not retry failed UUIDs 1 and 3.
+        assert!(saves.writes_finished().is_err());
         for dir in [bad, good, reference] {
             std::fs::remove_dir_all(dir).unwrap();
         }
@@ -718,7 +773,8 @@ mod tests {
         saves.enqueue(&holding(2, "minecraft:emerald", 9), &dir);
         assert!(saves.writer.is_some());
         assert_eq!(saves.completed(true).len(), 1);
-        assert!(saves.writes_finished().unwrap());
+        // Restarting transport does not acknowledge the unknown lost completion.
+        assert!(saves.writes_finished().is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -2886,6 +2886,10 @@ impl Ranges<'_> {
 }
 impl Drop for Streaming {
     fn drop(&mut self) {
+        horizon_threads::shutdown_observer::event(
+            horizon_threads::shutdown_observer::Target::StreamingDrain,
+            true,
+        );
         self.abort_generation();
         // Saves in flight hold proto chunks nothing else would save.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -2897,6 +2901,10 @@ impl Drop for Streaming {
                 None => break,
             }
         }
+        horizon_threads::shutdown_observer::event(
+            horizon_threads::shutdown_observer::Target::StreamingDrain,
+            false,
+        );
         // `jobs` leaves the pool after this, once its running jobs are
         // done; the jobs still queued go with the queue.
     }

@@ -447,15 +447,23 @@ impl Recorder {
                     s.previous = old;
                     s.torn = torn;
                 }
+                let mut shutdown_stamp = None;
                 loop {
                     let Some(shared) = state.upgrade() else { break };
                     let snapshot = shared.lock().unwrap_or_else(|p| p.into_inner()).clone();
                     drop(shared);
-                    if snapshot.seq > ack.load(Ordering::Acquire) || failed.load(Ordering::Acquire)
+                    let observed_shutdown =
+                        std::fs::metadata(store.path.join("shutdown-save-numeric.txt"))
+                            .and_then(|m| m.modified())
+                            .ok();
+                    if snapshot.seq > ack.load(Ordering::Acquire)
+                        || failed.load(Ordering::Acquire)
+                        || observed_shutdown != shutdown_stamp
                     {
                         match store.write_snapshot(&snapshot) {
                             Ok(()) => {
                                 ack.store(snapshot.seq, Ordering::Release);
+                                shutdown_stamp = observed_shutdown;
                                 failed.store(false, Ordering::Release);
                             }
                             Err(_) => {
@@ -1015,7 +1023,8 @@ impl Store {
         for e in events {
             report.push_str(&e.json());
         }
-        report.push_str("NEXT ACTION FOR CODEX: use the first cause above; if none, PENDING_DEVICE_CAPTURE.\nScreenshot/recording attached? OWNER INPUT: YES / NO\nNo scanout, FPS or continuous gameplay claim.\n");
+        report.push_str(&crate::shutdown_report::read(&self.path, s.boot));
+        report.push_str("NEXT ACTION FOR CODEX: P0 SHUTDOWN/SAVE HOLD. Resolve owned durable shutdown/recovery before any new owner run. Native revision cancellations remain a separate finding.\nScreenshot/recording attached? OWNER INPUT: YES / NO\nNo scanout, FPS or continuous gameplay claim.\n");
         if report.len() > 256 * 1024 {
             return Err(io::Error::other("report capacity"));
         }

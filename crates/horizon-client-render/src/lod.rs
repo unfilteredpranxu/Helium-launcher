@@ -3147,6 +3147,10 @@ impl Snapshot {
 }
 impl Drop for Lod {
     fn drop(&mut self) {
+        horizon_threads::shutdown_observer::event(
+            horizon_threads::shutdown_observer::Target::LodJoin,
+            true,
+        );
         // Under each pool's own lock: a worker between its stop check and its
         // wait must not miss the wake, or join() hangs.
         let jobs = self.shared.jobs.lock();
@@ -3162,6 +3166,10 @@ impl Drop for Lod {
         for thread in self.mesh_threads.drain(..) {
             let _ = thread.join();
         }
+        horizon_threads::shutdown_observer::event(
+            horizon_threads::shutdown_observer::Target::LodJoin,
+            false,
+        );
     }
 }
 /// The columns of a tile's `detail_masks` entry that have their detail.

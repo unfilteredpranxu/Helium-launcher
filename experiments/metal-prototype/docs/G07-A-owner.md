@@ -1,42 +1,37 @@
-# G07-A owner session — Prompt 12/25
+# G07-A Revision 2 — owner testing on hold (Prompt 12/25)
 
-Use only a **qualified Helium-G07A-historical-game-unsigned** artifact linked in
-G07-A.md. No artifact is qualified merely by these instructions existing.
+**NO NEW OWNER IPA. Do not install or run the previously linked build 12001 for
+this combined test. Its recommendation is withdrawn following the new process-
+exit watchdog evidence. No replacement build is qualified for shutdown/save safety.**
 
-1. Back up your existing test container's resources, saves and settings before
-   signing/upgrading with your trusted method. Do not uninstall to upgrade without
-   that backup. Identity remains `dev.helium.g06ctest`, Files display name
-   **Helium G06C Test**, diagnostics marker 2; build **12001**. This is unsigned.
-2. Install once, open the guest app, verify **AUTO-ARMED**, **HISTORICAL CAPTURE**,
-   build 12001 and the full source SHA in the independent HUD. A pre-existing
-   explicit `off` file remains honored; no new configuration is needed.
-3. Open a **disposable world** with your legitimately prepared Minecraft 26.3
-   resources. Look toward nearby solid terrain for 30–60 seconds; keep orientation,
-   world and foreground stable and dismiss the launcher. The wgpu producer remains
-   active. At most one real native section is frozen, for at most five seconds of
-   reveal (ten seconds from capture). This is not continuously playable Metal.
-4. Record one video if the yellow/black **HISTORICAL NATIVE FRAME** appears.
-   Ordinary wgpu terrain is not native evidence. GPU completion and UIKit reveal
-   alone do not establish physical scanout. Do not interpret an incomplete boot
-   as proof of an OS crash.
-5. Share just **Files → guest application container → Documents → logs →
-   Helium-Metal-Report.txt**. In LiveContainer this is the **guest** container;
-   its Files location need not match a standalone installation. JSONL beside it
-   is optional. No personal ZIP or ordinary logs need uploading or splicing.
+The new evidence is FRONTBOARD 0x8BADF00D, process-exit, five-second graceful-exit
+failure under LiveContainer. It is separate from earlier light/material revision
+cancellations and does not establish a Metal/OOM crash or corrupted save.
+No action is taken on your world, backups, app container or existing installation.
+Do not reproduce the crash or stress a real world to gather more logs.
 
-LiveContainer previously showed the G06-D HUD on the owner's A16; standalone
-SideInstaller did not previously show it. G07-A has not been physically tested in
-either host. No cross-host success is inferred. Reports remain marked
-`PHYSICAL_SCANOUT_UNVERIFIED` until the owner supplies matching visual evidence.
-If the app exits, reopen once before sharing the report to recover prior boot
-events. No assets, player names, seeds, credentials or private paths are collected.
+The source investigation and remaining P0 blocker are in [G07-A.md](G07-A.md).
+An owned nonblocking shutdown/recovery contract must be implemented and qualified
+before a new owner build is distributed. Prompt 13 has **not** started.
 
-Prompt 13 has **not** started.
+Only AFTER that hold is explicitly cleared, the acceptance plan is one combined
+short session, not a second crash investigation:
 
+1. Back up original resources/saves/settings using your trusted method before any
+   upgrade. Do not uninstall or migrate a container without that backup.
+2. Install one specifically qualified unsigned build using your own signer. Verify
+   exact source/build, AUTO-ARMED and HISTORICAL CAPTURE in the HUD. Use the isolated
+   dev.helium.g06ctest guest and already legitimately prepared 26.3 resources.
+3. Use a disposable world only. Look at nearby solid terrain for 30–60 seconds,
+   keep orientation/foreground stable, and record the yellow/black native snapshot
+   if it appears. wgpu remains active. GPU completion is not proof of scanout.
+4. Use ordinary Save & Quit, wait for confirmed completion, and relaunch once to
+   check the disposable progress. Do not force-kill, fill storage or provoke a crash.
+   Native-frame acceptance and save/exit/relaunch acceptance are independent.
+5. Share ONE report: Files → guest application container → Documents → logs →
+   Helium-Metal-Report.txt, plus the matching video. LiveContainer's guest Files
+   location need not match standalone SideInstaller. No config editing, personal
+   diagnostic ZIP, log splicing or private Minecraft assets are requested.
 
-Qualified software source: `9592281c30b125954303e688828413230b2482f7`.
-[Passing qualification](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44017965266)
-· [single unsigned owner artifact](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44017965266/artifacts/14300539403).
-The artifact includes the original guide and verified.log. This qualification
-proves software/Metal command/link gates; your physical game scene remains
-unverified until the matching video/report. No second installation is needed.
+G07 physical A16/iPadOS 27.3 scene and save/exit behavior remain untested. This plan
+is inactive while the P0 hold above remains. Do not perform it with build 12001.

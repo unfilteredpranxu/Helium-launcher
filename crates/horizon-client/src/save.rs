@@ -54,6 +54,7 @@ pub const VERSION_NAME: &str = horizon_core::VANILLA_VERSION;
 mod gateway;
 #[cfg(test)]
 mod loot_tests;
+pub mod shutdown;
 
 /// Snapshot live block entities and custom names for a save batch without
 /// mutating the world. Each map is visited once, retaining its iteration order
@@ -2398,6 +2399,9 @@ struct Outstanding {
 /// One dimension folder (`dimensions/minecraft/<name>`). Region files are
 /// read lazily by worker threads.
 pub struct SaveDir {
+    shutdown_id: u64,
+    #[cfg(test)]
+    shutdown_gate: Option<Arc<(Mutex<bool>, Condvar)>>,
     pub root: PathBuf,
     regions: Arc<RegionCache>,
     entity_regions: Arc<RegionCache>,
@@ -2496,6 +2500,9 @@ impl SaveDir {
     /// The saves of a level of `shape` at `root` (its dimension folder).
     pub fn new(root: PathBuf, shape: LevelShape) -> Self {
         Self {
+            shutdown_id: shutdown::new_storage_id(),
+            #[cfg(test)]
+            shutdown_gate: None,
             root,
             regions: Default::default(),
             entity_regions: Default::default(),
@@ -2802,6 +2809,7 @@ impl SaveDir {
                 .count
                 .lock()
                 .map_err(|_| "writer poisoned")? += 1;
+            self.shutdown_event(shutdown::Stage::Queued);
             let mut writer = self.writer.lock().map_err(|_| "writer poisoned")?;
             let writer = writer.get_or_insert_with(|| self.start_writer());
             if writer.send.send((folder, batch)).is_err() {
@@ -2834,10 +2842,28 @@ impl SaveDir {
         );
         let pending = self.pending.clone();
         let outstanding = self.outstanding.clone();
+        let storage_id = self.shutdown_id;
+        #[cfg(test)]
+        let gate = self.shutdown_gate.clone();
         let thread = std::thread::Builder::new()
             .name("horizon-region-writer".into())
             .spawn(move || {
                 for (kind, batch) in receive {
+                    shutdown::global().record(
+                        storage_id,
+                        shutdown::Actor::Region,
+                        shutdown::Stage::Started,
+                        batch.len(),
+                        1,
+                    );
+                    #[cfg(test)]
+                    if let Some(gate) = &gate {
+                        let (lock, wake) = &**gate;
+                        let mut ready = lock.lock().unwrap();
+                        while !*ready {
+                            ready = wake.wait(ready).unwrap();
+                        }
+                    }
                     let cache = match kind {
                         Folder::Region => &regions,
                         Folder::Entities => &entity_regions,
@@ -2861,12 +2887,23 @@ impl SaveDir {
                     if let Err(e) = &result {
                         let message = format!("failed to write {folder} files: {e}");
                         log::warn!("Horizon: {message}");
-                        *outstanding.error.lock().unwrap() = Some(message);
+                        outstanding.error.lock().unwrap().get_or_insert(message);
                         // `reportChunkSaveFailure` for each chunk of the batch.
                         for (k, _, _) in &batch {
                             crate::chunk_io::report_save_failure(&root, k.0, k.1, e);
                         }
                     }
+                    shutdown::global().record(
+                        storage_id,
+                        shutdown::Actor::Region,
+                        if result.is_ok() {
+                            shutdown::Stage::Synced
+                        } else {
+                            shutdown::Stage::Failed
+                        },
+                        batch.len(),
+                        1,
+                    );
                     // Keep failed snapshots readable; never report them as durable.
                     if result.is_ok()
                         && let Ok(mut pending) = pending.lock()
@@ -2888,6 +2925,7 @@ impl SaveDir {
     }
     /// Wait until every queued write is on disk.
     pub fn flush(&self) -> Result<()> {
+        self.shutdown_event(shutdown::Stage::Drain);
         let mut count = self
             .outstanding
             .count
@@ -2901,6 +2939,65 @@ impl SaveDir {
                 .map_err(|_| "writer poisoned")?;
         }
         self.write_result()
+    }
+    /// A bounded WORKER-side drain. Expiry is not completion: the caller must
+    /// keep SaveDir, its snapshots and the session-lock owner alive. This neither
+    /// detaches a writer nor provides recovery after SIGKILL.
+    pub fn flush_until(&self, deadline: std::time::Instant) -> Result<bool> {
+        self.shutdown_event(shutdown::Stage::Drain);
+        let mut count = self
+            .outstanding
+            .count
+            .lock()
+            .map_err(|_| "writer poisoned")?;
+        while *count > 0 {
+            self.write_result()?;
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                shutdown::global().record(
+                    self.shutdown_id,
+                    shutdown::Actor::Region,
+                    shutdown::Stage::Deadline,
+                    usize::MAX,
+                    *count,
+                );
+                return Ok(false);
+            }
+            count = self
+                .outstanding
+                .done
+                .wait_timeout(count, left)
+                .map_err(|_| "writer poisoned")?
+                .0;
+        }
+        self.write_result()?;
+        Ok(true)
+    }
+    /// A nonblocking status observation. None means contention/poison: never
+    /// translate that into a successful save. This covers region/POI/entities,
+    /// not player files, level metadata, locks or all-world durability.
+    pub fn try_write_status(&self) -> Option<shutdown::WriteStatus> {
+        let count = self.outstanding.count.try_lock().ok()?;
+        let pending = self.pending.try_lock().ok()?;
+        let error = self.outstanding.error.try_lock().ok()?;
+        Some(shutdown::WriteStatus {
+            outstanding_batches: *count,
+            pending_records: pending.len(),
+            failed: error.is_some(),
+        })
+    }
+    pub fn shutdown_id(&self) -> u64 {
+        self.shutdown_id
+    }
+    pub fn shutdown_event(&self, stage: shutdown::Stage) {
+        let status = self.try_write_status();
+        shutdown::global().record(
+            self.shutdown_id,
+            shutdown::Actor::Region,
+            stage,
+            status.map_or(usize::MAX, |s| s.pending_records),
+            status.map_or(usize::MAX, |s| s.outstanding_batches),
+        );
     }
     /// Poll durability without holding up the event loop. Errors remain visible
     /// to every waiter, including a later synchronous shutdown.
@@ -3008,8 +3105,18 @@ impl Drop for SaveDir {
     /// Finish queued writes before the world is let go.
     fn drop(&mut self) {
         if let Some(writer) = self.writer.get_mut().ok().and_then(Option::take) {
+            self.shutdown_event(shutdown::Stage::JoinBegin);
             drop(writer.send);
-            let _ = writer.thread.join();
+            if writer.thread.join().is_err() {
+                shutdown::global().record(
+                    self.shutdown_id,
+                    shutdown::Actor::Region,
+                    shutdown::Stage::Failed,
+                    0,
+                    0,
+                );
+            }
+            self.shutdown_event(shutdown::Stage::JoinEnd);
         }
     }
 }

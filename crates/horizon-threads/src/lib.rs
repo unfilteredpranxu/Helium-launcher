@@ -7,6 +7,7 @@ pub mod boot_paint;
 pub mod heap_census;
 pub mod jobs;
 pub mod process_memory;
+pub mod shutdown_observer;
 
 use std::sync::{
     OnceLock,
@@ -890,4 +891,3 @@ fn available_memory() -> Option<usize> {
 fn available_memory() -> Option<usize> {
     None
 }
-
