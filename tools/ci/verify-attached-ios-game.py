@@ -73,8 +73,16 @@ def verify(app: Path, rust: Path) -> None:
         with binary.open("rb") as stream, mmap.mmap(stream.fileno(),0,access=mmap.ACCESS_READ) as data:
             if data.find(marker)<0: raise ValueError("diagnostic writer absent")
     for path in app.rglob("*"):
-        if path.name in {"horizon-resources.json", "level.dat", "helium-metal-test.txt"} or path.suffix == ".jar":
+        if path.name in {"horizon-resources.json", "level.dat", "helium-metal-test.txt", "options.txt", "servers.dat", "usercache.json", "accounts.json", "tokens.json", "embedded.mobileprovision", "_CodeSignature"} or path.suffix in {".jar", ".class", ".jimage"}:
             raise ValueError("asset/save/config must NOT be bundled: " + path.name)
+    for executable in (binary, framework):
+        dependencies = subprocess.check_output(["xcrun", "otool", "-L", str(executable)], text=True).lower()
+        if any(name in dependencies for name in ("libjvm", "libjli", "java.framework")):
+            raise ValueError("Java/JVM dependency in native executable")
+        signing = subprocess.run(["codesign", "-dv", "--verbose=4", str(executable)], capture_output=True, text=True)
+        metadata = signing.stdout + signing.stderr
+        if "Authority=" in metadata or not ("not signed at all" in metadata or "Signature=adhoc" in metadata):
+            raise ValueError("expected unsigned (or linker-only ad-hoc) binary without signing identity")
     info = app / "Info.plist"
     with info.open("rb") as stream:
         value = plistlib.load(stream)
@@ -86,6 +94,7 @@ def verify(app: Path, rust: Path) -> None:
     print("Verified actual opt-in Rust executable == bundle executable; thin arm64 device iOS15.0")
     print("Executable bytes:", binary.stat().st_size, "SHA256:", digest(binary))
     print("Five ABI v1 host exports defined; proprietary assets/saves/config absent; isolated bundle ID applied")
+    print("No Java/JVM linkage, provisioning profile or distribution signature; diagnostics ABI v2 retained")
     print("Configuration file absent: isolated marker v2 AUTO-ARMS; normal apps remain OFF. Device/world runtime remains UNVERIFIED.")
 
 

@@ -649,6 +649,7 @@ impl Recorder {
                 }
                 Stage::CaptureValidated => {
                     s.historical = true;
+                    s.current = [expected, observed, s.fields[3]];
                 }
                 _ => {}
             }

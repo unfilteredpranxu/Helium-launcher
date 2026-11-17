@@ -152,4 +152,36 @@ mod tests {
         assert!(new.start());
         assert!(!new.published());
     }
+    #[test]
+    fn injected_worker_failures_and_detachment_never_authorize_reveal() {
+        // CPU host protocol only. These labels are injection locations, not
+        // synthetic claims that a Metal command was submitted or completed.
+        for stage in [
+            "device",
+            "upload",
+            "bank-completion",
+            "draw",
+            "draw-completion",
+            "drawable",
+            "presentation",
+            "present-completion",
+            "host-revalidation",
+        ] {
+            let g = gate();
+            assert!(g.start());
+            assert!(g.claim_display());
+            if stage == "host-revalidation" {
+                g.native_completed();
+            }
+            g.cancel(); // injected failure or detached Swift view
+            assert!(!g.finish(true), "{stage}");
+            assert!(!g.publish(), "{stage}");
+            assert!(!g.published(), "{stage}");
+            let later = gate();
+            g.native_completed(); // stale callback cannot authorize another gate
+            assert!(later.start());
+            assert!(!later.finish(true), "{stage}");
+            assert!(!later.publish());
+        }
+    }
 }
