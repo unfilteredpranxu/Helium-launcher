@@ -54,6 +54,7 @@ struct Flags {
     /// `Minecraft.pause`: a single-player pause screen is open.
     paused: AtomicBool,
     stop: AtomicBool,
+    checkpoint_queued: AtomicBool,
     failure: Mutex<Option<String>>,
     retained_failure: AtomicBool,
     /// `IntegratedServer.getPort`: the port it is open to the LAN on, 0
@@ -92,6 +93,26 @@ struct Flags {
     // Drop LAST: terrain/source Arcs above can own save backends and writers.
     // Their retirement must finish before the world's OS lock is released.
     retired_lock: Mutex<Option<horizon_client::save::SessionLock>>,
+}
+
+/// One checkpoint per integrated server, even if scene notifications repeat.
+struct CheckpointRequest(Arc<Flags>);
+
+impl CheckpointRequest {
+    fn claim(flags: &Arc<Flags>) -> Option<Self> {
+        if flags.stop.load(Ordering::Acquire)
+            || flags.checkpoint_queued.swap(true, Ordering::AcqRel)
+        {
+            return None;
+        }
+        Some(Self(flags.clone()))
+    }
+}
+
+impl Drop for CheckpointRequest {
+    fn drop(&mut self) {
+        self.0.checkpoint_queued.store(false, Ordering::Release);
+    }
 }
 
 /// Work the window hands its server thread (`MinecraftServer.execute`).
@@ -255,14 +276,28 @@ impl Integrated {
         self.tasks.send(Box::new(f)).is_ok()
     }
     pub(super) fn request_checkpoint(&self) {
-        self.post(|game| {
-            if let Err(error) = game.save_game() {
+        let Some(request) = CheckpointRequest::claim(&self.flags) else {
+            return;
+        };
+        let background = horizon_ios_launcher::BackgroundCheckpoint::begin();
+        self.post(move |game| {
+            let result = game.save_game().and_then(|()| game.save.flush());
+            if let Err(error) = &result {
                 game.save
                     .shutdown_event(horizon_client::save::shutdown::Stage::Failed);
                 if let Some(serving) = &game.serving {
-                    *serving.flags.failure.lock().unwrap() = Some(error.to_string());
+                    serving
+                        .flags
+                        .failure
+                        .lock()
+                        .unwrap()
+                        .get_or_insert_with(|| error.to_string());
                 }
             }
+            if let Some(background) = background {
+                background.finish(result.is_ok());
+            }
+            drop(request);
         });
     }
     /// `IntegratedServer.halt(true)`: returns once the world is saved and let go.

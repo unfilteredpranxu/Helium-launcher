@@ -126,3 +126,15 @@ fn retained_server_failure_is_reported_without_waiting_for_the_failed_owner_to_e
     drop(SessionLock::acquire(&root).unwrap());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn repeated_background_requests_share_one_checkpoint_and_allow_future_requests() {
+    let flags = Arc::new(Flags::default());
+    let first = CheckpointRequest::claim(&flags).unwrap();
+    assert!(CheckpointRequest::claim(&flags).is_none());
+    drop(first);
+    let second = CheckpointRequest::claim(&flags).unwrap();
+    flags.stop.store(true, Ordering::Release);
+    drop(second);
+    assert!(CheckpointRequest::claim(&flags).is_none());
+}

@@ -243,6 +243,54 @@ pub fn open_folder(path: &std::path::Path) -> bool {
 }
 
 #[cfg(target_os = "ios")]
+fn generated_boot_event(event: &'static str) {
+    use std::io::Write;
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(home).join("Documents/horizon-boot.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        if file.metadata().is_ok_and(|m| m.len() < 4096) {
+            let _ = writeln!(file, "{event}");
+        }
+    }
+}
+
+/// Optional OS time for a checkpoint. Drop ends an abandoned request, including
+/// a server queue destroyed before it dispatched the save. No UIKit objects
+/// cross the thread boundary.
+pub struct BackgroundCheckpoint {
+    generation: u64,
+    end: extern "C" fn(u64, u8),
+}
+
+impl BackgroundCheckpoint {
+    pub fn begin() -> Option<Self> {
+        #[cfg(target_os = "ios")]
+        return ios::begin_checkpoint();
+        #[cfg(not(target_os = "ios"))]
+        None
+    }
+
+    pub fn finish(mut self, durable: bool) {
+        (self.end)(self.generation, if durable { 1 } else { 2 });
+        self.generation = 0;
+    }
+}
+
+impl Drop for BackgroundCheckpoint {
+    fn drop(&mut self) {
+        if self.generation != 0 {
+            (self.end)(self.generation, 0);
+        }
+    }
+}
+
+#[cfg(target_os = "ios")]
 mod ios {
     use std::ffi::{CStr, CString, c_char, c_void};
 
@@ -288,6 +336,17 @@ mod ios {
             .then(|| CString::new(framework.into_os_string().into_encoded_bytes()).ok())?
     }
 
+    pub(super) fn begin_checkpoint() -> Option<super::BackgroundCheckpoint> {
+        let begin = symbol(c"helium_checkpoint_begin")?;
+        let end = symbol(c"helium_checkpoint_end")?;
+        // SAFETY: These are the dedicated fixed-width Swift C exports. The
+        // begin call validates main-thread use and end dispatches to main.
+        let begin: extern "C" fn() -> u64 = unsafe { std::mem::transmute(begin) };
+        let end: extern "C" fn(u64, u8) = unsafe { std::mem::transmute(end) };
+        let generation = begin();
+        (generation != 0).then_some(super::BackgroundCheckpoint { generation, end })
+    }
+
     pub fn present() -> bool {
         call(SYMBOL)
     }
@@ -324,18 +383,29 @@ mod ios {
 
     /// Load the launcher framework and find `symbol_name` in it.
     fn symbol(symbol_name: &CStr) -> Option<*mut c_void> {
-        let Some(path) = framework() else {
-            log::info!("Horizon: no launcher framework in this bundle");
-            return None;
-        };
-        // SAFETY: dlopen and dlsym on a framework Xcode built and signed into this bundle; the handle
-        // stays loaded for the process, as the launcher does.
-        unsafe {
-            let handle = libc::dlopen(path.as_ptr(), libc::RTLD_NOW);
+        static HANDLE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+        let handle = *HANDLE.get_or_init(|| {
+            let Some(path) = framework() else {
+                log::info!("Horizon: no launcher framework in this bundle");
+                super::generated_boot_event("launcher-framework-missing");
+                return None;
+            };
+            super::generated_boot_event("launcher-framework-load-attempted");
+            // SAFETY: this is the absolute in-bundle framework path. A
+            // successful handle remains retained for the process lifetime.
+            let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW) };
             if handle.is_null() {
                 log::warn!("Horizon: the launcher framework did not load");
-                return None;
+                super::generated_boot_event("launcher-framework-load-failed");
+                None
+            } else {
+                super::generated_boot_event("launcher-framework-loaded");
+                Some(handle as usize)
             }
+        });
+        let handle = handle? as *mut c_void;
+        // SAFETY: the framework handle stays valid for the process lifetime.
+        unsafe {
             let symbol = libc::dlsym(handle, symbol_name.as_ptr());
             if symbol.is_null() {
                 log::warn!("Horizon: the launcher framework has no {symbol_name:?}");

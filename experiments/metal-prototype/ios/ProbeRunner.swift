@@ -1,6 +1,7 @@
 // MIT; see the repository LICENSE and preserved Horizon attribution.
 import Foundation
 import UIKit
+import HeliumRustProbe
 
 enum ProbeMode: String, CaseIterable, Identifiable, Sendable {
     case g01, g02

@@ -1,0 +1,4 @@
+module HeliumRustProbe {
+    header "../../helium_metal_prototype.h"
+    export *
+}

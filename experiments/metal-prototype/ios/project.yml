@@ -13,7 +13,8 @@ settings:
     ARCHS: arm64
     TARGETED_DEVICE_FAMILY: '1,2'
     MARKETING_VERSION: '0.1.0'
-    CURRENT_PROJECT_VERSION: 1
+    CURRENT_PROJECT_VERSION: 13001
+    HELIUM_DIAGNOSTIC_SHA: development-unidentified
     CODE_SIGN_STYLE: Automatic
     # Cargo needs its own target/cache directories; applies only to this test app.
     ENABLE_USER_SCRIPT_SANDBOXING: NO
@@ -22,9 +23,29 @@ targets:
     type: application
     platform: iOS
     sources:
+      - path: ProbeApplication.swift
+      - path: ../../../packaging/ios/Assets.xcassets
+    dependencies:
+      - target: HeliumProbeKit
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.helium.metalprobe
+        INFOPLIST_FILE: ProbeInfo.plist
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/RustBridge
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        LD_RUNPATH_SEARCH_PATHS:
+          - $(inherited)
+          - '@executable_path/Frameworks'
+  HeliumProbeKit:
+    type: framework
+    platform: iOS
+    sources:
       - path: MetalProbeApp.swift
       - path: ProbeRunner.swift
       - path: DisplayProbe.swift
+      - path: ../../../packaging/ios/Launcher/HostEvidence.swift
     preBuildScripts:
       - name: Build experimental Rust static library
         shell: /bin/bash
@@ -41,14 +62,11 @@ targets:
       - sdk: QuartzCore.framework
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.helium.metalprobe
+        PRODUCT_BUNDLE_IDENTIFIER: dev.helium.metalprobe.launcher
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: Helium Metal Probe
-        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: 'UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight'
+        SKIP_INSTALL: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: ''
-        SWIFT_OBJC_BRIDGING_HEADER: $(SRCROOT)/../helium_metal_prototype.h
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/RustBridge
         LIBRARY_SEARCH_PATHS:
           - $(inherited)
           - $(SRCROOT)/../target/aarch64-apple-ios/release

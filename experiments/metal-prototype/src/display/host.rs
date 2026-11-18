@@ -8,11 +8,12 @@ use objc2::{ClassType, rc::Retained, runtime::AnyObject};
 use objc2_quartz_core::CAMetalLayer;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
 };
 struct Token {
     cancelled: AtomicBool,
     status: AtomicI32,
+    progress: AtomicU32,
     running: AtomicBool,
 }
 static TOKEN: Mutex<Option<(u64, Arc<Token>)>> = Mutex::new(None);
@@ -40,6 +41,7 @@ pub extern "C" fn helium_display_create() -> u64 {
         Arc::new(Token {
             cancelled: AtomicBool::new(false),
             status: AtomicI32::new(1),
+            progress: AtomicU32::new(0),
             running: AtomicBool::new(false),
         }),
     ));
@@ -48,6 +50,11 @@ pub extern "C" fn helium_display_create() -> u64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn helium_display_status(id: u64) -> i32 {
     token(id).map_or(-1, |t| t.status.load(Ordering::Acquire))
+}
+/// Monotonic progress for the exact issued handle, independent of terminal status.
+#[unsafe(no_mangle)]
+pub extern "C" fn helium_display_progress(id: u64) -> u32 {
+    token(id).map_or(0, |t| t.progress.load(Ordering::Acquire))
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn helium_display_cancel(id: u64) {
@@ -107,7 +114,9 @@ impl Source for Fixture {
     }
 }
 fn drive(layer: Retained<CAMetalLayer>, t: &Token) -> Result<(), String> {
+    t.progress.fetch_or(1, Ordering::Release);
     let r = TerrainRenderer::new()?;
+    t.progress.fetch_or(2, Ordering::Release);
     // Same private GPU-confirmed reveal gate as the game attachment. This probe
     // is a synthetic fixture; it supplies native test evidence, not a world.
     let gate = Arc::new(crate::attached_protocol::Gate::new(Arc::new(
@@ -165,14 +174,17 @@ fn drive(layer: Retained<CAMetalLayer>, t: &Token) -> Result<(), String> {
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
     let output = frames.take_completed(&r, &material, &t.cancelled, &mut receipt)?;
+    t.progress.fetch_or(4 | 8, Ordering::Release);
     let Some(mut pending) = display.present(output, 64 * 1024 * 1024, &t.cancelled)? else {
         t.status.store(4, Ordering::Release);
         return Ok(());
     };
+    t.progress.fetch_or(16, Ordering::Release);
     t.status.store(2, Ordering::Release);
     while !pending.poll()? {
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
+    t.progress.fetch_or(32, Ordering::Release);
     if t.cancelled.load(Ordering::Acquire) {
         gate.cancel();
         return Err("presentation revoked".into());
@@ -237,6 +249,7 @@ mod tests {
         assert_ne!(id, 0);
         assert_eq!(helium_display_create(), 0);
         assert_eq!(helium_display_status(id), 1);
+        assert_eq!(helium_display_progress(id), 0);
         helium_display_cancel(id);
         helium_display_release(id);
         helium_display_release(id);

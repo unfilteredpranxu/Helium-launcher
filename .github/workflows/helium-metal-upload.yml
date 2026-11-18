@@ -25,6 +25,8 @@ on:
       - 'packaging/ios/project.yml'
       - 'packaging/ios/GameInfo.plist'
       - 'tools/ci/verify-attached-ios-game.py'
+      - 'tools/ci/ios_package.py'
+      - 'tests/test_helium_ios_package.py'
       - 'tests/test_attached_ios_binary.py'
       - 'tools/ci/MetalDiag*'
       - 'crates/horizon-client/Cargo.toml'
@@ -112,7 +114,7 @@ jobs:
           xcrun --sdk iphoneos metal -target air64-apple-ios15.0 -std=ios-metal2.0 -c experiments/metal-prototype/src/terrain/metal/presentation.metal -o "$RUNNER_TEMP/helium-upload/display.air"
           brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
           (cd experiments/metal-prototype/ios && xcodegen generate)
-          xcodebuild -project experiments/metal-prototype/ios/HeliumMetalProbe.xcodeproj -scheme HeliumMetalProbe -configuration Release -sdk iphoneos -derivedDataPath "$RUNNER_TEMP/helium-probe-build" CODE_SIGNING_ALLOWED=NO build > "$RUNNER_TEMP/helium-upload/swift-host.log" 2>&1
+          xcodebuild -project experiments/metal-prototype/ios/HeliumMetalProbe.xcodeproj -scheme HeliumMetalProbe -configuration Release -sdk iphoneos -derivedDataPath "$RUNNER_TEMP/helium-probe-build" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= HELIUM_DIAGNOSTIC_SHA="$GITHUB_SHA" build > "$RUNNER_TEMP/helium-upload/swift-host.log" 2>&1 || { tail -100 "$RUNNER_TEMP/helium-upload/swift-host.log"; exit 1; }
       - name: Probe native Metal uploads and original G01/G02 GPU regressions
         id: gpu
         run: |
@@ -120,6 +122,24 @@ jobs:
           cargo +1.95.0 test --locked --manifest-path experiments/metal-prototype/Cargo.toml \
             -- --ignored --nocapture --test-threads=1 \
             2>&1 | tee "$RUNNER_TEMP/helium-upload/native-runtime.log"
+      - name: Verify final unsigned no-world probe IPA
+        if: github.ref == 'refs/heads/feature/helium-g07-immutable-capture'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/owner-probe"
+          app="$RUNNER_TEMP/helium-probe-build/Build/Products/Release-iphoneos/HeliumMetalProbe.app"
+          cargo +1.95.0 tree --locked --target aarch64-apple-ios --manifest-path experiments/metal-prototype/Cargo.toml > "$RUNNER_TEMP/owner-probe/dependencies.txt"
+          if rg '(^|[[:space:]])(horizon-|wgpu)' "$RUNNER_TEMP/owner-probe/dependencies.txt"; then exit 1; fi
+          python3 tools/ci/ios_package.py probe "$app" "$RUNNER_TEMP/owner-probe/Helium-S1H-Metal-Probe-unsigned.ipa" "$GITHUB_SHA" | tee "$RUNNER_TEMP/helium-upload/probe-package.log"
+      - uses: actions/upload-artifact@v4
+        if: success() && github.ref == 'refs/heads/feature/helium-g07-immutable-capture'
+        with:
+          name: Helium-S1H-no-world-probe-unsigned
+          path: |
+            ${{ runner.temp }}/owner-probe/Helium-S1H-Metal-Probe-unsigned.ipa
+            ${{ runner.temp }}/owner-probe/dependencies.txt
+            ${{ runner.temp }}/helium-upload/probe-package.log
+          if-no-files-found: error
       - name: Report separate runtime outcome
         if: always()
         env:
@@ -127,7 +147,7 @@ jobs:
         run: |
           echo "Native Metal runtime step: $GPU_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
           echo "Only a successful runtime test proves this runner executed Metal; SDK compilation alone does not." >> "$GITHUB_STEP_SUMMARY"
-          echo "No app, IPA, signing, or packaging is performed." >> "$GITHUB_STEP_SUMMARY"
+          echo "The no-world IPA is unsigned. Physical installation and display are unverified." >> "$GITHUB_STEP_SUMMARY"
       - name: Publish readable evidence through the Checks API
         if: always()
         uses: actions/github-script@v7
@@ -137,7 +157,7 @@ jobs:
           script: |
             const fs = require('fs');
             const path = require('path');
-            const names = ['toolchain.log', 'macos-tests.log', 'ios-check.log', 'msl.log', 'swift-host.log', 'native-runtime.log'];
+            const names = ['toolchain.log', 'macos-tests.log', 'ios-check.log', 'msl.log', 'swift-host.log', 'native-runtime.log', 'probe-package.log'];
             const sections = names.map(name => {
               const file = path.join(process.env.RUNNER_TEMP, 'helium-upload', name);
               const data = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : 'NOT RUN / no log';
@@ -280,6 +300,9 @@ jobs:
           HORIZON_GAME_PREBUILT=1 xcodebuild -project packaging/ios/HorizonIOS.xcodeproj -target HorizonGame -configuration Release -sdk iphoneos -arch arm64 CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= CODE_SIGNING_REQUIRED=NO DEBUG_INFORMATION_FORMAT=dwarf CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/attached-game/build" build > "$RUNNER_TEMP/attached-game/xcode.log" 2>&1 || { tail -80 "$RUNNER_TEMP/attached-game/xcode.log"; exit 1; }
           app="$RUNNER_TEMP/attached-game/build/HorizonGame.app"
           python3 tools/ci/verify-attached-ios-game.py "$app" target/aarch64-apple-ios/release/horizon-client 2>&1 | tee "$RUNNER_TEMP/attached-game/verified.log"
+          # Inspect the exact archive and discard it. The gameplay release hold below is independent.
+          trap 'rm -f "$RUNNER_TEMP/attached-game/held.ipa"' EXIT
+          python3 tools/ci/ios_package.py game "$app" "$RUNNER_TEMP/attached-game/held.ipa" "$GITHUB_SHA" | tee "$RUNNER_TEMP/attached-game/package-verifier.log"
       - name: Package the one qualified owner IPA
         if: github.event_name == 'workflow_dispatch' && inputs.publish_owner_ipa
         run: |
@@ -292,7 +315,7 @@ jobs:
         with:
           script: |
             const fs=require('fs'),path=require('path');
-            const summary=['apple.log','default.log','dependency-isolation.log','binary-guard-tests.log','rust-link.log','xcode.log','verified.log'].map(n=>{
+            const summary=['apple.log','default.log','dependency-isolation.log','binary-guard-tests.log','rust-link.log','xcode.log','verified.log','package-verifier.log'].map(n=>{
               const p=path.join(process.env.RUNNER_TEMP,'attached-game',n);
               return '### '+n+'\n```text\n'+(fs.existsSync(p)?fs.readFileSync(p,'utf8').slice(-7500):'NOT RUN')+'\n```';
             }).join('\n');
@@ -331,6 +354,10 @@ jobs:
           HELIUM_DIAGNOSTIC_DIRECTORY="$RUNNER_TEMP/diag-session" "$RUNNER_TEMP/diag-e2e" 2>&1 | tee "$RUNNER_TEMP/diag-evidence/e2e.log"
           cp "$RUNNER_TEMP/diag-session/Helium-Metal-Report.txt" "$RUNNER_TEMP/diag-evidence/TEST_ONLY-report.txt"
           HELIUM_DIAGNOSTIC_DIRECTORY="$RUNNER_TEMP/diag-session" "$RUNNER_TEMP/diag-e2e" --recover 2>&1 | tee "$RUNNER_TEMP/diag-evidence/recovery.log"
+      - name: Test standalone host evidence storage
+        run: |
+          swiftc packaging/ios/Launcher/HostEvidence.swift tools/ci/MetalHostEvidenceTest.swift -o "$RUNNER_TEMP/host-evidence-test"
+          "$RUNNER_TEMP/host-evidence-test" | tee "$RUNNER_TEMP/diag-evidence/host-evidence.log"
       - name: Compile actual UIKit diagnostics host (no shell substitution)
         run: |
           set -euo pipefail
@@ -343,7 +370,7 @@ jobs:
         with:
           script: |
             const fs=require('fs'),path=require('path');
-            const summary=['tests.log','e2e.log','recovery.log','UIKit.log','TEST_ONLY-report.txt'].map(n=>{let p=path.join(process.env.RUNNER_TEMP,'diag-evidence',n);return '### '+n+'\n```text\n'+(fs.existsSync(p)?(n==='TEST_ONLY-report.txt'?fs.readFileSync(p,'utf8').slice(0,22000):fs.readFileSync(p,'utf8').slice(-7000)):'NOT RUN')+'\n```';}).join('\n');
+            const summary=['tests.log','e2e.log','recovery.log','UIKit.log','host-evidence.log','TEST_ONLY-report.txt'].map(n=>{let p=path.join(process.env.RUNNER_TEMP,'diag-evidence',n);return '### '+n+'\n```text\n'+(fs.existsSync(p)?(n==='TEST_ONLY-report.txt'?fs.readFileSync(p,'utf8').slice(0,22000):fs.readFileSync(p,'utf8').slice(-7000)):'NOT RUN')+'\n```';}).join('\n');
             await github.rest.checks.create({owner:context.repo.owner,repo:context.repo.repo,head_sha:context.sha,name:'Helium diagnostics E2E evidence',status:'completed',conclusion:'neutral',output:{title:'Real Swift/C/Rust/report and UIKit compile; synthetic, not physical-device evidence',summary}});
       - uses: actions/upload-artifact@v4
         if: always()
@@ -366,6 +393,7 @@ jobs:
       - name: Mandatory Linux regressions and formatting
         run: |
           set -euo pipefail
+          python3 -m unittest discover -s tests -p 'test_helium_ios_package.py'
           cargo +1.95.0 test --locked --manifest-path experiments/metal-prototype/Cargo.toml
           cargo +1.95.0 test --locked -p horizon-metal-bridge
           cargo +1.95.0 test --locked -p horizon-client-render --lib mesher::

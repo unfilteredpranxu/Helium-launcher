@@ -10,6 +10,8 @@ private var presentationPending = false
 /// being set up.
 @_cdecl("horizon_launcher_present")
 public func horizonLauncherPresent(_ submit: HorizonSubmit?) -> Bool {
+    guard Thread.isMainThread else { return false }
+    HostEvidence.shared.record(.launcherRequested)
     cancelAllNativeTargets()
     Bridge.submit = submit
     Theme.registerFonts()
@@ -26,7 +28,10 @@ private func present(attempts: Int) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { present(attempts: attempts - 1) }
         }
         // Do not leave the resource worker waiting forever if UIKit could not present.
-        else { Task { _ = await Bridge.send("launcher-start") } }
+        else {
+            HostEvidence.shared.record(.launcherUnavailable)
+            Task { _ = await Bridge.send("launcher-start") }
+        }
         return
     }
     // Already up: a second request (Quit Game pressed twice) changes nothing.
@@ -38,6 +43,7 @@ private func present(attempts: Int) {
     host.rootView = AnyView(
         HomeView(onPlay: { [weak host] in
             guard let host else { return }
+            HostEvidence.shared.record(.gameHandoffRequested)
             GameAudio.start()
             let scene = host.view.window?.windowScene
             host.dismiss(animated: true) {
@@ -58,10 +64,12 @@ private func present(attempts: Int) {
         _ = await Bridge.send("launcher-visible true")
         guard root.view.window != nil else {
             presentationPending = false
+            HostEvidence.shared.record(.launcherUnavailable)
             _ = await Bridge.send("launcher-visible false")
             return
         }
         root.present(host, animated: false) {
+            HostEvidence.shared.record(.swiftLauncherAttached)
             presentationPending = false
         }
     }

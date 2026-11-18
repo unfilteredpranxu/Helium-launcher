@@ -2,11 +2,26 @@
 import SwiftUI
 import UIKit
 
-@main
-@MainActor
-struct MetalProbeApp: App {
-    var body: some Scene {
-        WindowGroup { ProbeView() }
+@objc(HeliumProbeSceneDelegate)
+public final class ProbeSceneDelegate: UIResponder, UIWindowSceneDelegate {
+    public var window: UIWindow?
+
+    public func scene(_ scene: UIScene, willConnectTo session: UISceneSession,
+                      options: UIScene.ConnectionOptions) {
+        guard let scene = scene as? UIWindowScene else { return }
+        HostEvidence.shared.record(.sceneConnected)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: ProbeView())
+        self.window = window
+        window.makeKeyAndVisible()
+    }
+
+    public func sceneDidBecomeActive(_ scene: UIScene) { HostEvidence.shared.record(.sceneActive) }
+    public func sceneWillResignActive(_ scene: UIScene) { HostEvidence.shared.record(.sceneInactive) }
+    public func sceneDidEnterBackground(_ scene: UIScene) { HostEvidence.shared.record(.sceneBackground) }
+    public func sceneDidDisconnect(_ scene: UIScene) {
+        HostEvidence.shared.record(.sceneDisconnected)
+        window = nil
     }
 }
 
@@ -78,7 +93,9 @@ struct ProbeView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Helium Direct Metal Test").font(.title).bold()
+                Text("NO-WORLD DEVICE PROBE").font(.title).bold()
+                Text("HARDWARE NOT YET VERIFIED")
+                Text("Files → On My iPad → Helium Metal Probe → logs → Helium-Host.txt")
                 Text("Standalone 256 × 256 indexed terrain and depth probe")
                 Text("G05-D — Native SDR display (GPU completion is not scanout)")
                 NativeDisplayProbe().frame(height: 320)
@@ -134,6 +151,7 @@ struct ProbeView: View {
             }
             .padding()
         }
+        .onAppear { HostEvidence.shared.record(.swiftLauncherAttached) }
         .sheet(item: $sharePayload) { payload in
             ActivitySheet(report: payload.report, image: payload.image)
         }

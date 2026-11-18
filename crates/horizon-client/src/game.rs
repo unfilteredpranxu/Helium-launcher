@@ -23157,6 +23157,7 @@ fn run_window_app<A: ApplicationHandler>(
     }
     #[cfg(not(target_os = "macos"))]
     {
+        crate::entry::boot_stage("ui-event-loop-entering");
         let result = event_loop.run_app(&mut app);
         finish(app, result)
     }
@@ -23843,6 +23844,7 @@ impl ApplicationHandler for App {
         });
     }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        crate::entry::boot_stage("ui-kit-scene-active");
         horizon_client::save::shutdown::mark_event_thread();
         deep(|| self.resumed_here(event_loop))
     }

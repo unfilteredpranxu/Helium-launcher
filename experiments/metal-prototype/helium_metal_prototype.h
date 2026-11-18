@@ -57,6 +57,9 @@ int32_t helium_metal_terrain_test_rgba(uint8_t *rgba_out, size_t rgba_capacity,
 // driver retirement; it MUST NOT execute on the UI thread. No CPU image readback.
 uint64_t helium_display_create(void);
 int32_t helium_display_status(uint64_t handle);
+/* Exact-handle stage bits: worker 1, renderer 2, frame 4, drawable attempt 8,
+ * present submitted 16, present completed 32. Zero if stale. */
+uint32_t helium_display_progress(uint64_t handle);
 void helium_display_cancel(uint64_t handle);
 void helium_display_release(uint64_t handle);
 int32_t helium_display_run(uint64_t handle, void *layer);

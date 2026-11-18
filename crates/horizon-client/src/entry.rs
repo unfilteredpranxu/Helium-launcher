@@ -25,13 +25,13 @@ pub fn main_with(mods: crate::mod_api::Mods) {
     let documents = match into_app_sandbox() {
         Ok(documents) => documents,
         Err(error) => {
-            boot_stage(&format!("no sandbox: {error}"));
+            boot_stage("sandbox-unavailable");
             eprintln!("Horizon: {error}");
             std::process::exit(1);
         }
     };
     #[cfg(target_os = "ios")]
-    boot_stage(&format!("sandbox {}", documents.display()));
+    boot_stage("sandbox-ready");
     // Isolated diagnostic metadata must exist even if startup never reaches a view.
     // Bundle/config checks perform no UIKit attachment or GPU work.
     #[cfg(all(target_os = "ios", feature = "helium-direct-metal"))]
@@ -85,7 +85,7 @@ pub fn main_with(mods: crate::mod_api::Mods) {
     };
     // Before the log opens, so a mod's injection hears its first lines.
     logging::set_line_hook(crate::native_client_hooks::native_log_line);
-    boot_stage(&format!("home {}", home.display()));
+    boot_stage("home-selected");
     if !help {
         logging::init(
             logging::player_dir_override().unwrap_or(home.as_path()),
@@ -308,7 +308,7 @@ pub fn main_with(mods: crate::mod_api::Mods) {
     // run_with holds the process-return boundary after the window loop and
     // only returns once retired storage and native work can safely leave.
     if let Err(error) = game::run_with() {
-        boot_stage(&format!("game loop failed: {error}"));
+        boot_stage("game-loop-failed");
         // A bad command line is the caller's mistake, not a crash: no report.
         let usage = error.is::<game::UsageError>();
         log::error!("Horizon: {error}");
@@ -338,7 +338,7 @@ pub fn main_with(mods: crate::mod_api::Mods) {
 /// A phone cannot be watched with a console and the game's own log may never open (a crash before
 /// `logging::init`, a lock a stale instance holds), so the stages are written straight to the folder
 /// the Files app shows, flushed one by one, to say where a launch stopped.
-fn boot_stage(step: &str) {
+pub(crate) fn boot_stage(step: &str) {
     #[cfg(target_os = "ios")]
     boot::stage(step);
     #[cfg(not(target_os = "ios"))]
@@ -361,7 +361,10 @@ mod boot {
             return;
         };
         let path = std::path::Path::new(&home).join("Documents/horizon-boot.log");
-        let first = !OPENED.swap(true, Ordering::Relaxed);
+        let first = !OPENED.load(Ordering::Relaxed);
+        if first {
+            let _ = std::fs::create_dir_all(path.parent().unwrap());
+        }
         let mut options = std::fs::OpenOptions::new();
         options.create(true).write(true).truncate(first);
         // Later stages append, or every open would rewrite the file from its start.
@@ -369,6 +372,10 @@ mod boot {
         let Ok(mut file) = options.open(&path) else {
             return;
         };
+        OPENED.store(true, Ordering::Relaxed);
+        if file.metadata().is_ok_and(|m| m.len() >= 4096) {
+            return;
+        }
         let start = START.get_or_init(std::time::Instant::now);
         let _ = writeln!(file, "[{:8.3}] {step}", start.elapsed().as_secs_f64());
         let _ = file.flush();
