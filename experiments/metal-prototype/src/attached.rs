@@ -137,11 +137,15 @@ pub fn hud_window(window: &impl HasWindowHandle) -> Result<(), String> {
     f(view.ui_view.as_ptr());
     Ok(())
 }
+/// An attachment or native command still owns resources after cancellation.
+pub fn work_pending() -> bool {
+    crate::upload::native_busy() || ENTRY.lock().map(|e| e.is_some()).unwrap_or(true)
+}
 pub fn can_start() -> bool {
     if !objc2_foundation::NSThread::isMainThread_class() {
         return false;
     }
-    if crate::upload::native_busy() || ENTRY.lock().map(|e| e.is_some()).unwrap_or(true) {
+    if work_pending() {
         return false;
     }
     let Ok(p) = symbol("horizon_diag_host_idle_v2") else {

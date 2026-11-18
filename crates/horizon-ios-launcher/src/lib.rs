@@ -17,6 +17,70 @@ use std::{
     sync::{Mutex, PoisonError},
 };
 
+/// Service the current Apple run loop after the gameplay event handler has
+/// gone away. The scoped timer keeps the default mode runnable even with no
+/// open windows. A timer turn is a status probe, never an exit deadline.
+#[cfg(target_vendor = "apple")]
+pub fn service_retirement(mut complete: impl FnMut() -> bool) {
+    use core_foundation::{
+        date::CFDate,
+        runloop::{CFRunLoop, CFRunLoopTimer, CFRunLoopTimerRef, kCFRunLoopDefaultMode},
+    };
+    use std::time::Duration;
+
+    extern "C" fn tick(_: CFRunLoopTimerRef, _: *mut std::ffi::c_void) {}
+    let run_loop = CFRunLoop::get_current();
+    let interval = Duration::from_millis(50);
+    let seconds = interval.as_secs_f64();
+    let timer = CFRunLoopTimer::new(
+        CFDate::now().abs_time() + seconds,
+        seconds,
+        0,
+        0,
+        tick,
+        std::ptr::null_mut(),
+    );
+    // SAFETY: the system-defined default mode has process lifetime. The
+    // timer callback borrows no Rust state and is valid until removal.
+    let mode = unsafe { kCFRunLoopDefaultMode };
+    run_loop.add_timer(&timer, mode);
+    while !complete() {
+        CFRunLoop::run_in_mode(mode, interval, false);
+    }
+    run_loop.remove_timer(&timer, mode);
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn retirement_services_native_callbacks_on_its_calling_thread() {
+    use core_foundation::{
+        date::CFDate,
+        runloop::{CFRunLoop, CFRunLoopTimer, CFRunLoopTimerRef, kCFRunLoopDefaultMode},
+    };
+    use std::cell::Cell;
+    thread_local! { static FIRED: Cell<bool> = const { Cell::new(false) }; }
+    extern "C" fn mark(_: CFRunLoopTimerRef, _: *mut std::ffi::c_void) {
+        FIRED.set(true);
+    }
+
+    let run_loop = CFRunLoop::get_current();
+    let timer = CFRunLoopTimer::new(
+        CFDate::now().abs_time() + 0.01,
+        0.0,
+        0,
+        0,
+        mark,
+        std::ptr::null_mut(),
+    );
+    // SAFETY: the default run-loop mode is a process-lifetime system constant.
+    let mode = unsafe { kCFRunLoopDefaultMode };
+    run_loop.add_timer(&timer, mode);
+    let limit = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    service_retirement(|| FIRED.get() || std::time::Instant::now() >= limit);
+    run_loop.remove_timer(&timer, mode);
+    assert!(FIRED.get());
+}
+
 /// One line from the launcher, and the way back to it.
 pub struct Request {
     pub line: String,

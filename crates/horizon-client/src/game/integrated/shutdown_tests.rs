@@ -37,6 +37,7 @@ fn blocked_server() -> (Integrated, Sender<()>, std::path::PathBuf) {
         Integrated {
             flags,
             thread: Some(thread),
+            finished: None,
             tasks,
             world_name: String::new(),
         },
@@ -92,6 +93,36 @@ fn synchronous_halt_demonstrates_why_it_must_be_worker_only() {
         .unwrap()
         .unwrap();
     probe.join().unwrap();
+    drop(SessionLock::acquire(&root).unwrap());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn retained_server_failure_is_reported_without_waiting_for_the_failed_owner_to_exit() {
+    let (mut server, release, root) = blocked_server();
+    let flags = server.flags.clone();
+    *flags.failure.lock().unwrap() = Some("fixture save failed".into());
+    flags.retained_failure.store(true, Ordering::Release);
+    let (finished, observed) = channel();
+    server.finished = Some(observed);
+    drop(finished);
+
+    let (reply, result) = channel();
+    let retirement = std::thread::spawn(move || {
+        let error = server.halt().unwrap_err();
+        reply.send((error.to_string(), !server.stopped())).unwrap();
+        server
+    });
+    let observed = result.recv_timeout(Duration::from_secs(3));
+    assert!(SessionLock::is_locked(&root));
+    release.send(()).unwrap();
+    let mut server = retirement.join().unwrap();
+    // Release the stand-in only for fixture cleanup.
+    flags.retained_failure.store(false, Ordering::Release);
+    assert!(server.halt().is_err());
+    drop(server);
+    drop(flags);
+    assert_eq!(observed.unwrap(), ("fixture save failed".into(), true));
     drop(SessionLock::acquire(&root).unwrap());
     std::fs::remove_dir_all(root).unwrap();
 }

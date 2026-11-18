@@ -11,5 +11,8 @@ description = "Shows the SwiftUI launcher (packaging/ios/Launcher) over the game
 libc = "0.2"
 log = "0.4"
 
+[target.'cfg(target_vendor = "apple")'.dependencies]
+core-foundation = "0.9.4"
+
 [lints]
 workspace = true

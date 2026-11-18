@@ -275,6 +275,13 @@ impl Game<'_> {
                 }
                 if save.quit {
                     self.saved_for_exit = true;
+                    // UIKit owns process lifetime and ignores programmatic
+                    // Exit. Keep retired gameplay stopped on future turns.
+                    #[cfg(target_os = "ios")]
+                    {
+                        save.stage = Stage::Quit;
+                        self.pending_save = Some(save);
+                    }
                     Ok(true)
                 } else {
                     if save.close && self.title.is_none() {

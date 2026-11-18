@@ -305,6 +305,8 @@ pub fn main_with(mods: crate::mod_api::Mods) {
     raise_open_file_limit();
     boot_stage("hooks installed");
     boot_stage("game loop");
+    // run_with holds the process-return boundary after the window loop and
+    // only returns once retired storage and native work can safely leave.
     if let Err(error) = game::run_with() {
         boot_stage(&format!("game loop failed: {error}"));
         // A bad command line is the caller's mistake, not a crash: no report.

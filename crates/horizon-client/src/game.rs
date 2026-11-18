@@ -352,6 +352,7 @@ mod render_control;
 mod render_tick;
 mod repro;
 mod respawn_anchor;
+mod runtime_exit;
 mod saves_control;
 mod saving;
 mod scoreboard;
@@ -20529,7 +20530,12 @@ impl Game<'_> {
         }
         if self.pending_save.is_some() {
             match self.poll_closing_save() {
-                Ok(true) => event_loop.exit(),
+                Ok(true) => {
+                    #[cfg(target_os = "ios")]
+                    event_loop.set_control_flow(ControlFlow::Wait);
+                    #[cfg(not(target_os = "ios"))]
+                    event_loop.exit();
+                }
                 Ok(false) => {
                     if let Some(window) = &self.window {
                         window.request_redraw();
@@ -20540,6 +20546,22 @@ impl Game<'_> {
                     ));
                 }
                 Err(error) => {
+                    if self.exit_retirement.as_ref().is_some_and(|ticket| {
+                        ticket.status() == horizon_threads::retirement::Status::Failed
+                    }) {
+                        if self
+                            .error
+                            .as_ref()
+                            .is_none_or(|old| old.to_string() != error.to_string())
+                        {
+                            log::error!(
+                                "Horizon: shutdown failed; world ownership retained: {error}"
+                            );
+                        }
+                        self.error = Some(error);
+                        event_loop.set_control_flow(ControlFlow::Wait);
+                        return;
+                    }
                     self.error = Some(error);
                     self.exit_on_error(event_loop);
                 }
@@ -23117,6 +23139,8 @@ fn run_event_loop(mut game: Game<'_>) -> Result<()> {
         return game.error.take().map_or(Ok(()), Err);
     }
     let mut split = split::Split::new(game);
+    // The backend can fail before the first resumed callback.
+    horizon_client::save::shutdown::mark_event_thread();
     let result = event_loop()?.run_app(&mut split);
     game = split.host;
     narrator::stop();
@@ -23962,6 +23986,10 @@ fn run_loading(
 pub use launch_api::{UsageError, exit_code};
 
 pub fn run_with() -> Result<()> {
+    runtime_exit::run(run_game)
+}
+
+fn run_game() -> Result<()> {
     let Some(mut options) = Options::read()? else {
         return Ok(());
     };
@@ -24037,7 +24065,9 @@ pub fn run_with() -> Result<()> {
     if options.execution_role.is_client()
         || options.execution_role == execution_role::ExecutionRole::DedicatedServer
     {
-        horizon_threads::catch_stop_signals();
+        horizon_threads::catch_stop_signals(
+            options.execution_role == execution_role::ExecutionRole::DedicatedServer,
+        );
     }
     let started = Instant::now();
     // A dedicated server writes its slow ticks to the log with the spans

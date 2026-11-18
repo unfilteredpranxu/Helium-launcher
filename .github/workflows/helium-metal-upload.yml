@@ -14,6 +14,7 @@ on:
       - 'crates/horizon-client/src/game/saving.rs'
       - 'crates/horizon-client/src/game/integrated.rs'
       - 'crates/horizon-threads/src/**'
+      - 'crates/horizon-ios-launcher/**'
       - 'crates/horizon-client-render/src/lod.rs'
       - 'crates/horizon-client-render/src/streaming.rs'
       - 'crates/horizon-client/src/game/remote.rs'
@@ -213,8 +214,11 @@ jobs:
           cargo +1.95.0 test --locked -p horizon-client-lib --no-default-features --lib lan::playerdata::tests:: 2>&1 | tee "$RUNNER_TEMP/g07r3/player.log"
           cargo +1.95.0 test --locked -p horizon-client --no-default-features --lib game::integrated::shutdown_tests -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/g07r3/game-exit.log"
           cargo +1.95.0 test --locked -p horizon-client --no-default-features --lib game::saving::shutdown_tests -- --test-threads=1 2>&1 | tee -a "$RUNNER_TEMP/g07r3/game-exit.log"
+          cargo +1.95.0 test --locked -p horizon-client --no-default-features --lib game::runtime_exit::tests -- --test-threads=1 2>&1 | tee -a "$RUNNER_TEMP/g07r3/game-exit.log"
+          cargo +1.95.0 test --locked -p horizon-ios-launcher --lib 2>&1 | tee -a "$RUNNER_TEMP/g07r3/game-exit.log"
           cargo +1.95.0 test --locked -p horizon-client-render --lib streaming:: 2>&1 | tee "$RUNNER_TEMP/g07r3/streaming.log"
           rustfmt +1.95.0 --check --edition 2024 --config skip_children=true crates/horizon-client/src/save.rs crates/horizon-client/src/save/journal.rs crates/horizon-client/src/save/journal/tests.rs crates/horizon-client/src/save/shutdown.rs crates/horizon-client/src/save/shutdown/tests.rs crates/horizon-client/src/lan/playerdata.rs crates/horizon-client/src/game.rs crates/horizon-client/src/game/shutdown.rs crates/horizon-client/src/game/saving.rs crates/horizon-client/src/game/integrated.rs crates/horizon-client/src/game/integrated/shutdown_tests.rs crates/horizon-client/src/game/remote.rs crates/horizon-client/src/game/levels.rs crates/horizon-client/src/game/world_loading.rs crates/horizon-client-render/src/streaming.rs crates/horizon-client-render/src/lod.rs crates/horizon-threads/src/retirement.rs
+          rustfmt +1.95.0 --check --edition 2024 --config skip_children=true crates/horizon-client/src/game/runtime_exit.rs crates/horizon-ios-launcher/src/lib.rs
       - name: Publish synthetic shutdown and real filesystem evidence
         if: always()
         uses: actions/github-script@v7

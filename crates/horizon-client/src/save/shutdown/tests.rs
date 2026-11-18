@@ -238,6 +238,7 @@ fn failed_retirement_never_releases_failed_writes_or_their_lock() {
         std::thread::yield_now();
     }
     assert_eq!(ticket.status(), Status::Failed);
+    assert_eq!(coordinator.exit_status(), Status::Failed);
     assert!(ticket.error().is_some());
     for _ in 0..20 {
         coordinator.poll();

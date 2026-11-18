@@ -28,6 +28,30 @@ pub const SNAPSHOT_BUDGET: usize = 64 * 1024 * 1024;
 const CAPTURE_MAX_AGE: Duration = Duration::from_secs(10);
 const RENDER_DEADLINE: Duration = Duration::from_secs(5);
 static NEXT_WORLD: AtomicU64 = AtomicU64::new(1);
+static OFFSCREEN_WORKERS: AtomicU64 = AtomicU64::new(0);
+
+/// Also covers commands orphaned by a cancelled worker. Their existing
+/// Metal completion owners hold the shared permit until terminal completion.
+pub fn retirement_pending() -> bool {
+    #[cfg(target_os = "ios")]
+    if helium_metal_prototype::attached::work_pending() {
+        return true;
+    }
+    OFFSCREEN_WORKERS.load(Ordering::Acquire) != 0 || upload::native_busy()
+}
+
+struct OffscreenWorker;
+impl OffscreenWorker {
+    fn reserve() -> Self {
+        OFFSCREEN_WORKERS.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+impl Drop for OffscreenWorker {
+    fn drop(&mut self) {
+        OFFSCREEN_WORKERS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 const GEOMETRY_BUDGET: usize = 2 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -1052,9 +1076,11 @@ impl Controller {
             return;
         }
         let (sender, receiver) = mpsc::sync_channel(1);
+        let worker = OffscreenWorker::reserve();
         match std::thread::Builder::new()
             .name("helium-real-section-metal".into())
             .spawn(move || {
+                let _worker = worker;
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(job)))
                     .unwrap_or_else(|_| Err("native worker panicked".into()));
                 let _ = sender.send(outcome);

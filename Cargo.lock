@@ -1734,6 +1734,7 @@ dependencies = [
 name = "horizon-ios-launcher"
 version = "0.2.8"
 dependencies = [
+ "core-foundation",
  "libc",
  "log",
 ]

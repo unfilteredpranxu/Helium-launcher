@@ -2,7 +2,7 @@
 //! Process-owned asynchronous retirement. Failed work keeps its captured owners;
 //! dropping a UI ticket neither joins a worker nor releases those owners.
 use std::sync::{
-    Arc, Mutex, OnceLock,
+    Arc, Condvar, Mutex, OnceLock,
     atomic::{AtomicU8, Ordering},
 };
 type Body = Box<dyn FnMut() -> Result<(), String> + Send>;
@@ -35,6 +35,7 @@ impl Ticket {
 #[derive(Default)]
 pub struct Coordinator {
     work: Mutex<Vec<Arc<Work>>>,
+    changed: Arc<(Mutex<()>, Condvar)>,
 }
 impl Coordinator {
     pub fn submit(&self, body: impl FnMut() -> Result<(), String> + Send + 'static) -> Ticket {
@@ -49,6 +50,7 @@ impl Coordinator {
             .unwrap_or_else(|p| p.into_inner())
             .push(work.clone());
         let worker = work.clone();
+        let changed = self.changed.clone();
         match std::thread::Builder::new()
             .name("horizon-retirement".into())
             .spawn(move || {
@@ -60,7 +62,7 @@ impl Coordinator {
                     Ok(Ok(())) => {
                         // Drop successful owners here, before publishing completion.
                         owned.take();
-                        worker.state.store(1, Ordering::Release);
+                        publish(&worker, &changed, 1);
                     }
                     other => {
                         let error = match other {
@@ -68,7 +70,7 @@ impl Coordinator {
                             _ => "retirement worker panicked; owners retained".into(),
                         };
                         let _ = worker.error.set(error);
-                        worker.state.store(2, Ordering::Release);
+                        publish(&worker, &changed, 2);
                     }
                 }
             }) {
@@ -77,7 +79,7 @@ impl Coordinator {
                 // The closure/owners were parked BEFORE spawn. A failed spawn
                 // must not destroy them on the submitting UI thread.
                 let _ = work.error.set(error.to_string());
-                work.state.store(2, Ordering::Release);
+                publish(&work, &self.changed, 2);
             }
         }
         Ticket(work)
@@ -108,6 +110,28 @@ impl Coordinator {
             w.iter().any(|v| v.state.load(Ordering::Acquire) != 1)
         })
     }
+    /// After the application loop has returned and dropped its owners, a
+    /// Complete result authorizes controlled process exit. Failed owners still
+    /// hold their data and locks.
+    pub fn exit_status(&self) -> Status {
+        let work = self.work.lock().unwrap_or_else(|p| p.into_inner());
+        let mut status = Status::Complete;
+        for item in work.iter() {
+            match item.state.load(Ordering::Acquire) {
+                2 => return Status::Failed,
+                1 => {}
+                _ => status = Status::Pending,
+            }
+        }
+        status
+    }
+    /// Only for an outer process boundary whose window backend has already
+    /// returned. A running UI loop must use status polling instead.
+    pub fn wait_for_exit_change(&self, observed: Status) {
+        let (lock, changed) = &*self.changed;
+        let guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        drop(changed.wait_while(guard, |_| self.exit_status() == observed));
+    }
     /// Thread quiescence is not save completion; failed owners stay retained.
     pub fn workers_stopped(&self) -> bool {
         self.work.try_lock().is_ok_and(|w| {
@@ -118,6 +142,11 @@ impl Coordinator {
             })
         })
     }
+}
+fn publish(work: &Work, changed: &(Mutex<()>, Condvar), state: u8) {
+    let _guard = changed.0.lock().unwrap_or_else(|p| p.into_inner());
+    work.state.store(state, Ordering::Release);
+    changed.1.notify_all();
 }
 pub fn global() -> &'static Coordinator {
     static GLOBAL: OnceLock<Coordinator> = OnceLock::new();

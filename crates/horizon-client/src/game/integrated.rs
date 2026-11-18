@@ -55,6 +55,7 @@ struct Flags {
     paused: AtomicBool,
     stop: AtomicBool,
     failure: Mutex<Option<String>>,
+    retained_failure: AtomicBool,
     /// `IntegratedServer.getPort`: the port it is open to the LAN on, 0
     /// while it is not.
     published: AtomicU16,
@@ -100,6 +101,9 @@ type Task = Box<dyn FnOnce(&mut Game<'_>) + Send>;
 pub(super) struct Integrated {
     flags: Arc<Flags>,
     thread: Option<JoinHandle<()>>,
+    // Disconnects after server scope destruction, or once a failed live
+    // world has committed to staying owned by the server thread.
+    finished: Option<Receiver<()>>,
     tasks: Sender<Task>,
     /// The world's name (`level.dat`'s `LevelName`), for the pause menu.
     pub world_name: String,
@@ -276,45 +280,44 @@ impl Integrated {
     }
     pub(super) fn halt(&mut self) -> Result<()> {
         self.request_stop();
-        if let Some(thread) = self.thread.take() {
-            horizon_client::save::shutdown::global().record(
-                0,
-                horizon_client::save::shutdown::Actor::Server,
-                horizon_client::save::shutdown::Stage::JoinBegin,
-                0,
-                0,
-            );
-            let joined = thread.join();
-            horizon_client::save::shutdown::global().record(
-                0,
-                horizon_client::save::shutdown::Actor::Server,
-                horizon_client::save::shutdown::Stage::JoinEnd,
-                0,
-                0,
-            );
-            joined.map_err(|_| {
-                horizon_client::save::shutdown::global().record(
-                    0,
-                    horizon_client::save::shutdown::Actor::Server,
-                    horizon_client::save::shutdown::Stage::Failed,
-                    0,
-                    0,
-                );
-                "the integrated server panicked"
-            })?;
-        }
-        match self
-            .flags
-            .failure
-            .lock()
-            .map_err(|_| "server status poisoned")?
-            .as_ref()
-        {
-            Some(error) => Err(error.clone().into()),
-            None => Ok(()),
-        }
+        finish_server(&self.flags, &mut self.thread, &mut self.finished)
     }
 }
+
+fn finish_server(
+    flags: &Flags,
+    thread: &mut Option<JoinHandle<()>>,
+    finished: &mut Option<Receiver<()>>,
+) -> Result<()> {
+    if let Some(finished) = finished.take() {
+        let _ = finished.recv();
+    }
+    // The failed server still owns live data. Keep its handle under the
+    // coordinator and publish the failure instead of waiting on its join.
+    if !flags.retained_failure.load(Ordering::Acquire)
+        && let Some(thread) = thread.take()
+    {
+        let trace = horizon_client::save::shutdown::global();
+        use horizon_client::save::shutdown::{Actor, Stage};
+        trace.record(0, Actor::Server, Stage::JoinBegin, 0, 0);
+        let result = thread.join();
+        trace.record(0, Actor::Server, Stage::JoinEnd, 0, 0);
+        if result.is_err() {
+            trace.record(0, Actor::Server, Stage::Failed, 0, 0);
+            return Err("the integrated server panicked".into());
+        }
+    }
+    if let Some(error) = flags
+        .failure
+        .lock()
+        .map_err(|_| "server status poisoned")?
+        .as_ref()
+    {
+        return Err(error.clone().into());
+    }
+    Ok(())
+}
+
 impl Drop for Integrated {
     fn drop(&mut self) {
         if self
@@ -324,22 +327,10 @@ impl Drop for Integrated {
         {
             self.request_stop();
             let mut thread = self.thread.take();
+            let mut finished = self.finished.take();
             let flags = self.flags.clone();
             horizon_threads::retirement::global().submit(move || {
-                if let Some(thread) = thread.take() {
-                    thread
-                        .join()
-                        .map_err(|_| "integrated server panicked; owners retained".to_owned())?;
-                }
-                if let Some(error) = flags
-                    .failure
-                    .lock()
-                    .map_err(|_| "server failure poisoned")?
-                    .as_ref()
-                {
-                    return Err(error.clone());
-                }
-                Ok(())
+                finish_server(&flags, &mut thread, &mut finished).map_err(|e| e.to_string())
             });
             return;
         }
@@ -538,11 +529,13 @@ impl Game<'_> {
         let (ready_tx, ready) = channel();
         let (tasks, server_tasks) = channel();
         let server_flags = flags.clone();
+        let (finished_tx, finished) = channel();
         let thread = std::thread::Builder::new()
             .name("Server thread".into())
             .spawn(move || {
                 // MinecraftServer.spin's Thread.setPriority(8).
                 horizon_threads::favour_current();
+                let mut finished_tx = Some(finished_tx);
                 let result = serve(
                     &res,
                     pack,
@@ -552,6 +545,7 @@ impl Game<'_> {
                     server_flags.clone(),
                     server_tasks,
                     &ready_tx,
+                    &mut finished_tx,
                 );
                 if let Err(e) = result {
                     log::error!("Horizon: integrated server: {e}");
@@ -562,6 +556,7 @@ impl Game<'_> {
         let handle = Integrated {
             flags,
             thread: Some(thread),
+            finished: Some(finished),
             tasks,
             world_name: String::new(),
         };
@@ -1306,6 +1301,7 @@ fn serve(
     flags: Arc<Flags>,
     tasks: Receiver<Task>,
     ready: &Sender<Ready>,
+    finished: &mut Option<Sender<()>>,
 ) -> Result<()> {
     // The world prepares, and the registries the server sends are read, on
     // helper threads while this one builds the server's own Game: none of
@@ -1355,8 +1351,10 @@ fn serve(
         // its lock. Remain an owned failed server until process termination;
         // published redo records recover on the next exclusive open.
         if server.session_lock.is_some() {
+            flags.retained_failure.store(true, Ordering::Release);
+            drop(finished.take());
             loop {
-                std::thread::park_timeout(Duration::from_secs(1));
+                std::thread::park();
             }
         }
     }
@@ -1435,6 +1433,7 @@ mod tests {
         let server = Integrated {
             flags: Arc::new(Flags::default()),
             thread: None,
+            finished: None,
             tasks,
             world_name: String::new(),
         };
@@ -1484,6 +1483,7 @@ mod tests {
         let server = Integrated {
             flags: flags.clone(),
             thread: Some(std::thread::spawn(move || wait.recv().unwrap())),
+            finished: None,
             tasks,
             world_name: String::new(),
         };
@@ -1504,6 +1504,7 @@ mod tests {
             thread: Some(std::thread::spawn(move || {
                 *saving.failure.lock().unwrap() = Some("disk write failed".into());
             })),
+            finished: None,
             tasks,
             world_name: String::new(),
         };

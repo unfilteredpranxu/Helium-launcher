@@ -312,17 +312,24 @@ static STOP_REQUESTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU3
 
 /// Count stop requests from outside instead of dying on them: vanilla's "Client Shutdown Thread"
 /// (`Main.java`) halts the integrated server when the JVM shuts down, and the JVM does that on
-/// these signals, so a killed game still saves. The caller's event loop turns the first request
-/// into a normal quit; a second one (the save is stuck) ends the process at once.
+/// these signals. The client's event loop coalesces them into one owned quit.
+/// A dedicated server can opt in to its existing second-signal force policy.
 #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
-pub fn catch_stop_signals() {
+pub fn catch_stop_signals(force_second: bool) {
     extern "C" fn handle(_: libc::c_int) {
-        if STOP_REQUESTS.fetch_add(1, Ordering::SeqCst) >= 1 {
+        STOP_REQUESTS.store(1, Ordering::SeqCst);
+    }
+    extern "C" fn handle_with_force(_: libc::c_int) {
+        if STOP_REQUESTS.swap(1, Ordering::SeqCst) != 0 {
             // SAFETY: _exit is async-signal-safe; 130 is the shell's code for a Ctrl-C death.
             unsafe { libc::_exit(130) }
         }
     }
-    let handler = handle as extern "C" fn(libc::c_int);
+    let handler: extern "C" fn(libc::c_int) = if force_second {
+        handle_with_force
+    } else {
+        handle
+    };
     for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
         // SAFETY: the handler only touches an atomic and calls _exit, both async-signal-safe.
         unsafe {
@@ -337,7 +344,7 @@ pub fn catch_stop_signals() {
 
 /// Windows and the other systems keep their default: a closed window is a `CloseRequested`.
 #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
-pub fn catch_stop_signals() {}
+pub fn catch_stop_signals(_force_second: bool) {}
 
 /// The game's global allocator (`#[global_allocator]` in its `main.rs`).
 /// World generation, meshing and the tick allocate and free small blocks on
