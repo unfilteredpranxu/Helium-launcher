@@ -1660,8 +1660,6 @@ impl Streaming {
             ("meshing", self.meshing.len()),
         ]
     }
-    /// Advance streaming: collect finished work, then schedule more.
-    /// Returns meshes ready for upload and columns that were unloaded.
     /// Observe the exact accepted version before the caller uploads or frees it.
     /// Keep the usual update API and allocation cost for callers without an observer.
     pub fn update_and_observe(
@@ -1681,6 +1679,8 @@ impl Streaming {
         (uploads, removed)
     }
 
+    /// Advance streaming: collect finished work, then schedule more.
+    /// Returns meshes ready for upload and columns that were unloaded.
     pub fn update(
         &mut self,
         world: &mut World,

@@ -2490,6 +2490,10 @@ impl Game<'_> {
             return;
         }
         let freed = self.streaming.forget_columns(&mut self.world, gone);
+        #[cfg(feature = "helium-direct-metal")]
+        if let Some(native) = self.direct_metal.as_mut() {
+            native.remove_columns(gone.iter().copied());
+        }
         if let Some(lod) = &mut self.lod {
             for chunk in &freed {
                 lod.observe(chunk.clone(), self.res.facts());
