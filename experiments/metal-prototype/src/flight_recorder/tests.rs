@@ -1,5 +1,32 @@
 use super::*;
 #[test]
+fn synthetic_capture_records_metrics_without_claiming_world_or_reveal() {
+    let path = temp();
+    let r = Recorder::persistent_kind(path.clone(), true).unwrap();
+    assert!(r.begin_world(1, 99));
+    r.record(1, Stage::MeshAccepted, Emitter::Game, None, 24, 36);
+    r.record(1, Stage::WorldSource, Emitter::Game, None, 1, 4);
+    r.record(1, Stage::CaptureMetrics, Emitter::Game, None, 98, 720);
+    r.record(1, Stage::UploadPreparation, Emitter::Worker, None, 0, 42);
+    r.record(
+        1,
+        Stage::Cancelled,
+        Emitter::Game,
+        Some(Cause::Shutdown),
+        0,
+        0,
+    );
+    assert!(r.wait_ack(Duration::from_secs(5)));
+    let report = fs::read_to_string(path.join("Helium-Metal-Report.txt")).unwrap();
+    assert!(
+        report.contains("WORLD SOURCE: SYNTHETIC | OPAQUE/CUTOUT | omitted_translucent_vertices=4")
+    );
+    assert!(!report.contains("WORLD SOURCE: REAL"));
+    assert!(report.contains("Last confirmed stage at first cause: Some(MeshAccepted)"));
+    assert!(report.contains("PHYSICAL_SCANOUT_UNVERIFIED"));
+    assert_eq!(r.status()[24], 0);
+}
+#[test]
 fn exit_cancellation_is_typed_shutdown_not_an_unknown_gpu_failure() {
     assert_eq!(Cause::reason("shutdown"), Cause::Shutdown);
 }

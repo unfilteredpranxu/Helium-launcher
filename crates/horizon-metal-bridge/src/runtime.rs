@@ -11,6 +11,7 @@ use helium_metal_prototype::{
 use horizon_client_render::{
     gfx::{Frame, Renderer, material_snapshot::Generation},
     mesher::SectionMesh,
+    streaming::AcceptedSections,
 };
 use std::{
     sync::{
@@ -28,7 +29,7 @@ pub const SNAPSHOT_BUDGET: usize = 64 * 1024 * 1024;
 const CAPTURE_MAX_AGE: Duration = Duration::from_secs(10);
 const RENDER_DEADLINE: Duration = Duration::from_secs(5);
 static NEXT_WORLD: AtomicU64 = AtomicU64::new(1);
-static OFFSCREEN_WORKERS: AtomicU64 = AtomicU64::new(0);
+static CAPTURE_WORKER: AtomicBool = AtomicBool::new(false);
 
 /// Also covers commands orphaned by a cancelled worker. Their existing
 /// Metal completion owners hold the shared permit until terminal completion.
@@ -37,19 +38,24 @@ pub fn retirement_pending() -> bool {
     if helium_metal_prototype::attached::work_pending() {
         return true;
     }
-    OFFSCREEN_WORKERS.load(Ordering::Acquire) != 0 || upload::native_busy()
+    CAPTURE_WORKER.load(Ordering::Acquire) || upload::native_busy()
 }
 
-struct OffscreenWorker;
-impl OffscreenWorker {
-    fn reserve() -> Self {
-        OFFSCREEN_WORKERS.fetch_add(1, Ordering::AcqRel);
-        Self
+struct CaptureWorker;
+impl CaptureWorker {
+    fn reserve() -> Option<Self> {
+        if upload::native_busy() {
+            return None;
+        }
+        CAPTURE_WORKER
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self)
     }
 }
-impl Drop for OffscreenWorker {
+impl Drop for CaptureWorker {
     fn drop(&mut self) {
-        OFFSCREEN_WORKERS.fetch_sub(1, Ordering::AcqRel);
+        CAPTURE_WORKER.store(false, Ordering::Release);
     }
 }
 const GEOMETRY_BUDGET: usize = 2 * 1024 * 1024;
@@ -109,6 +115,9 @@ struct Geometry {
     origin: [i32; 3],
     generation: Generation,
     sequence: u64,
+    bounds: [[f32; 3]; 2],
+    preparation_us: u64,
+    omitted_translucent_vertices: usize,
     vertices: Vec<u8>,
     indices: Vec<u32>,
 }
@@ -123,7 +132,7 @@ impl Geometry {
     ) -> Result<Option<Self>, String> {
         let origin = section_origin(key, min_y)?;
         let mut indices = Vec::new();
-        let export = adapter::expanded_solid(
+        let export = adapter::expanded_opaque_cutout(
             mesh,
             origin,
             Format::BakedSectionSolid,
@@ -137,6 +146,10 @@ impl Geometry {
         let Some(prepared) = export.solid.mesh() else {
             return Ok(None);
         };
+        let bounds = mesh
+            .bounds
+            .or_else(|| mesh.compute_bounds())
+            .ok_or("missing section bounds")?;
         let mut vertices = Vec::new();
         vertices
             .try_reserve_exact(prepared.vertices.len())
@@ -158,6 +171,9 @@ impl Geometry {
             origin,
             generation,
             sequence,
+            bounds: bounds.map(|p| p.to_array()),
+            preparation_us: 0,
+            omitted_translucent_vertices: mesh.translucent.len(),
             vertices,
             indices,
         }))
@@ -167,6 +183,9 @@ impl Geometry {
             vertices: &self.vertices,
             indices: &self.indices,
         }
+    }
+    fn retained_bytes(&self) -> usize {
+        self.vertices.capacity() + self.indices.capacity() * size_of::<u32>()
     }
 }
 fn production_layers(
@@ -203,10 +222,16 @@ fn camera_view(origin: [i32; 3], camera: [f64; 3], clip: [[f32; 4]; 4]) -> Resul
         clip_from_relative: clip,
     })
 }
-/// Conservative geometry/frustum intersection in Metal's 0..w depth space.
-/// Uses ORIGINAL positions, including model overhang beyond the 16-block section.
-/// A crossing triangle can be visible with no vertex inside; reject only if all
-/// vertices are outside the same plane. This does not prove occlusion visibility.
+/// Test the eight corners of the production mesh bounds in Metal's 0..w depth
+/// range. These bounds include model overhang. Reject only if an entire bound
+/// is outside a clip plane; this cannot establish occlusion or pixel coverage.
+fn bounds_visible(view: View, bounds: [[f32; 3]; 2]) -> bool {
+    points_visible(
+        view,
+        (0..8).map(|corner| std::array::from_fn(|axis| bounds[(corner >> axis) & 1][axis])),
+    )
+}
+
 fn points_visible(view: View, points: impl IntoIterator<Item = [f32; 3]>) -> bool {
     let mut outside = [true; 6];
     for position in points {
@@ -241,8 +266,8 @@ struct Flight {
     created: Instant,
     world_epoch: u64,
     attempt: u64,
-    geometry: Arc<Geometry>,
-    source: Vec<BankSource>,
+    key: Key,
+    authority: CaptureAuthority,
     cancel: Arc<AtomicBool>,
     light_revision: u64,
     size: [u32; 2],
@@ -256,10 +281,14 @@ struct Shown {
     world_epoch: u64,
     attempt: u64,
     _ticket: helium_metal_prototype::attached::Ticket,
-    source: Vec<BankSource>,
+    identity: upload::Identity<Generation>,
     key: Key,
     light_revision: u64,
     size: [u32; 2],
+}
+enum CaptureAuthority {
+    Strict(Vec<BankSource>),
+    Historical(upload::Identity<Generation>),
 }
 /// One candidate and one worker, never a world mirror or mesh queue. This mode
 /// keeps wgpu as producer/fallback. Attached mode uses a distinct UIKit child layer.
@@ -294,18 +323,23 @@ fn revision_changes(
 }
 fn producer_changes(
     renderer: &Renderer,
-    source: &[BankSource],
+    authority: &CaptureAuthority,
     light: u64,
     size: [u32; 2],
-    historical: bool,
 ) -> [Option<(Cause, u64, u64)>; 3] {
     let state = renderer.material_state();
-    let Some(first) = source.first() else {
-        return [Some((Cause::BankStale, 1, 0)), None, None];
+    let (captured, strict) = match authority {
+        CaptureAuthority::Historical(identity) => (*identity, None),
+        CaptureAuthority::Strict(source) => {
+            let Some(first) = source.first() else {
+                return [Some((Cause::BankStale, 1, 0)), None, None];
+            };
+            (first.description().identity, Some(source))
+        }
     };
     let [version, lighting] = revision_changes(
-        historical,
-        first.description().identity,
+        strict.is_none(),
+        captured,
         light,
         upload::Identity {
             generation: state.generation(),
@@ -314,16 +348,16 @@ fn producer_changes(
         state.light_revision(),
     );
     let bank = version.or_else(|| {
-        let stale = if historical {
+        let stale = if let Some(source) = strict {
+            source.iter().any(|s| s.check_current(renderer).is_err())
+        } else {
             // Immutable captured bytes are still owned. Snapshot availability and
             // supported mode remain hard requirements, even within one generation.
             renderer.validate_material_snapshot_mode().is_err() || state.snapshot().is_err()
-        } else {
-            source.iter().any(|s| s.check_current(renderer).is_err())
         };
         stale.then_some((
             Cause::BankStale,
-            first.description().identity.revision,
+            captured.revision,
             state.animation_revision(),
         ))
     });
@@ -341,7 +375,6 @@ pub struct Controller {
     mode: Mode,
     candidate: Option<Geometry>,
     flight: Option<Flight>,
-    sequence: u64,
     world_epoch: u64,
     finished: bool,
     attempts: u32,
@@ -409,7 +442,6 @@ impl Controller {
             mode,
             candidate: None,
             flight: None,
-            sequence: 0,
             world_epoch: 0,
             finished: false,
             attempts: 0,
@@ -475,14 +507,14 @@ impl Controller {
         self.counters.invalidated += 1;
         log::debug!("Helium Direct Metal revoked: {reason}");
     }
-    /// Called ONLY for accepted Streaming::update results before their storage is
-    /// returned to Streaming::free. Streamer has already rejected stale job seqs.
-    pub fn section(&mut self, renderer: &Renderer, key: Key, min_y: i32, mesh: &SectionMesh) {
-        #[cfg(target_os = "ios")]
-        if self.displayed.as_ref().is_some_and(|d| d.key == key) {
-            self.invalidate("displayed section replaced");
-        }
+    /// Select at most one section from the producer's accepted batch. Mesh
+    /// bytes remain borrowed until the winner is copied, before wgpu recycles them.
+    pub fn sections(&mut self, renderer: &Renderer, sections: AcceptedSections<'_>) {
         if self.mode == Mode::Disabled {
+            return;
+        }
+        let mut sections = sections.peekable();
+        if sections.peek().is_none() {
             return;
         }
         if self.finished {
@@ -518,53 +550,75 @@ impl Controller {
                     0,
                 );
             }
-            if self.finished {
-                return;
-            }
         }
-        if self.mode == Mode::AttachedOneSection && self.camera.is_none() {
-            self.counters.busy += 1; // wait for a genuine world camera, never a title/old-world transform
-            return;
-        }
-        self.sequence = match self.sequence.checked_add(1) {
-            Some(n) => n,
-            None => {
-                self.invalidate("mesh sequence exhausted");
-                self.finished = true;
-                return;
-            }
+        let started = Instant::now();
+        let minimum_vertices = if self.mode == Mode::AttachedOneSection {
+            24
+        } else {
+            4
         };
-        if self.flight.as_ref().is_some_and(|f| f.geometry.key == key) {
-            self.invalidate("in-flight section replaced");
-        }
-        if self.flight.is_some() {
-            self.counters.busy += 1;
-            return;
-        }
-        if let Some((camera, clip)) = self.camera.filter(|_| !mesh.solid.is_empty()) {
-            let visible = section_origin(key, min_y)
-                .and_then(|o| camera_view(o, camera, clip))
-                .is_ok_and(|v| points_visible(v, mesh.solid.iter().map(|p| p.pos)));
-            if !visible {
-                self.counters.rejected += 1;
-                return;
+        let mut best = None;
+        let mut best_size = 0;
+        for section in sections {
+            let (key, min_y, revision, mesh) = section.parts();
+            #[cfg(target_os = "ios")]
+            if self.displayed.as_ref().is_some_and(|d| d.key == key) {
+                self.invalidate("displayed section replaced");
             }
+            if self.flight.as_ref().is_some_and(|f| f.key == key) {
+                self.invalidate("in-flight section replaced");
+            }
+            // Replacing a section with an empty, unsupported or out-of-view
+            // result still invalidates the previously accepted version.
+            if self.candidate.as_ref().is_some_and(|c| c.key == key) {
+                self.candidate = None;
+                self.counters.replaced += 1;
+            }
+            if self.finished || self.flight.is_some() {
+                continue;
+            }
+            let vertices = mesh.solid.len();
+            // 4 original 24-byte vertices and 6 expanded u32 indices per quad.
+            if vertices < minimum_vertices
+                || vertices <= best_size
+                || !vertices.is_multiple_of(4)
+                || vertices / 4 > GEOMETRY_BUDGET / 120
+                || (self.mode != Mode::AttachedOneSection && !mesh.translucent.is_empty())
+            {
+                continue;
+            }
+            match self.camera {
+                Some((camera, clip)) => {
+                    let visible = mesh.bounds.is_some_and(|bounds| {
+                        section_origin(key, min_y)
+                            .and_then(|origin| camera_view(origin, camera, clip))
+                            .is_ok_and(|view| bounds_visible(view, bounds.map(|p| p.to_array())))
+                    });
+                    if !visible {
+                        self.counters.rejected += 1;
+                        continue;
+                    }
+                }
+                None if self.mode == Mode::AttachedOneSection => continue,
+                None => {}
+            }
+            best = Some((key, min_y, revision, mesh));
+            best_size = vertices;
         }
-        // Bounded best-of-this-update selection: retain one useful real section,
-        // preferring more accepted geometry instead of the first edge quad.
-        if self.mode == Mode::AttachedOneSection && mesh.solid.len() < 24 {
+        let Some((key, min_y, revision, mesh)) = best else {
             return;
-        }
-        if self.candidate.as_ref().is_some_and(|c| {
-            c.key != key && c.vertices.len() >= mesh.solid.len().saturating_mul(24)
-        }) {
+        };
+        if self
+            .candidate
+            .as_ref()
+            .is_some_and(|c| c.vertices.len() / 24 >= best_size)
+        {
             self.counters.busy += 1;
             return;
         }
         if self.candidate.take().is_some() {
             self.counters.replaced += 1;
         }
-        let start = Instant::now();
         let result = renderer
             .validate_material_snapshot_mode()
             .map_err(str::to_owned)
@@ -578,13 +632,15 @@ impl Controller {
                     min_y,
                     mesh,
                     state.generation(),
-                    self.sequence,
+                    revision,
                     production_layers(snapshot)?,
                 )
             });
-        self.counters.preparation_us += start.elapsed().as_micros();
+        let preparation_us = started.elapsed().as_micros();
+        self.counters.preparation_us += preparation_us;
         match result {
-            Ok(Some(g)) => {
+            Ok(Some(mut g)) => {
+                g.preparation_us = preparation_us as u64;
                 if self.counters.accepted == 0 {
                     log::info!(
                         "Helium native checkpoint: accepted actual Streaming::update SectionMesh key={:?} sequence={} vertices={} indices={}",
@@ -624,7 +680,7 @@ impl Controller {
             if self
                 .flight
                 .as_ref()
-                .is_some_and(|f| (f.geometry.key.0, f.geometry.key.2) == key)
+                .is_some_and(|f| (f.key.0, f.key.2) == key)
             {
                 self.invalidate("column unloaded");
                 self.counters.unloaded += 1;
@@ -667,7 +723,12 @@ impl Controller {
                 d.light_revision,
                 renderer.material_state().light_revision().unwrap_or(0),
             );
-            let changes = producer_changes(renderer, &d.source, d.light_revision, d.size, true);
+            let changes = producer_changes(
+                renderer,
+                &CaptureAuthority::Historical(d.identity),
+                d.light_revision,
+                d.size,
+            );
             if changes.iter().any(Option::is_some)
                 || d.world_epoch != self.world_epoch
                 || d.created.elapsed() >= CAPTURE_MAX_AGE
@@ -704,8 +765,7 @@ impl Controller {
         if let Some(f) = &self.flight {
             if !f.cancel.load(Ordering::Acquire) {
                 let historical = self.mode == Mode::AttachedOneSection;
-                let changes =
-                    producer_changes(renderer, &f.source, f.light_revision, f.size, historical);
+                let changes = producer_changes(renderer, &f.authority, f.light_revision, f.size);
                 if historical {
                     recorder::global().record(
                         f.attempt,
@@ -769,21 +829,17 @@ impl Controller {
                         && f.world_epoch != 0
                         && f.world_epoch == self.world_epoch
                         && f.created.elapsed() < CAPTURE_MAX_AGE
-                        && producer_changes(
-                            renderer,
-                            &f.source,
-                            f.light_revision,
-                            f.size,
-                            self.mode == Mode::AttachedOneSection,
-                        )
-                        .iter()
-                        .all(Option::is_none);
+                        && producer_changes(renderer, &f.authority, f.light_revision, f.size)
+                            .iter()
+                            .all(Option::is_none);
                     self.finished = true;
                     self.retry_at = Instant::now() + std::time::Duration::from_secs(2);
                     match result {
                         Ok(evidence) if valid => {
                             #[cfg(target_os = "ios")]
-                            if let Some(t) = f.attached.take() {
+                            if let (Some(t), CaptureAuthority::Historical(identity)) =
+                                (f.attached.take(), f.authority)
+                            {
                                 recorder::global().record(
                                     f.attempt,
                                     Stage::HistoricalCaptureReady,
@@ -798,8 +854,8 @@ impl Controller {
                                     world_epoch: f.world_epoch,
                                     attempt: f.attempt,
                                     _ticket: t,
-                                    source: f.source,
-                                    key: f.geometry.key,
+                                    identity,
+                                    key: f.key,
                                     light_revision: f.light_revision,
                                     size: f.size,
                                 });
@@ -870,6 +926,13 @@ impl Controller {
         if self.mode == Mode::AttachedOneSection && !helium_metal_prototype::attached::can_start() {
             return;
         }
+        if self.candidate.is_none() {
+            return;
+        }
+        let Some(worker) = CaptureWorker::reserve() else {
+            self.counters.busy += 1;
+            return;
+        };
         let Some(g) = self.candidate.take() else {
             return;
         };
@@ -877,6 +940,7 @@ impl Controller {
             self.error("candidate belongs to old resource/renderer generation".into());
             return;
         }
+        let preparation_started = Instant::now();
         let prepare = (|| {
             let binding = Binding::new(renderer)?;
             let snapshot = renderer
@@ -892,10 +956,6 @@ impl Controller {
                 .iter()
                 .map(|&b| binding.upload_source(renderer, b))
                 .collect::<Result<Vec<_>, _>>()?;
-            let validation = required
-                .iter()
-                .map(|&b| binding.upload_source(renderer, b))
-                .collect::<Result<Vec<_>, _>>()?;
             let light_revision = renderer
                 .material_state()
                 .light_revision()
@@ -907,38 +967,23 @@ impl Controller {
             {
                 return Err("production lightmap uninitialized".into());
             }
-            let clip = renderer
-                .views(frame)
-                .primary()
-                .view_proj(frame.bob * frame.spin)
-                .to_cols_array_2d();
-            let view = camera_view(g.origin, frame.camera.to_array(), clip)?;
-            if !points_visible(
-                view,
-                (0..g.vertices.len() / 24)
-                    .map(|i| g.mesh().vertex(i).map(|v| v.pos).unwrap_or([f32::NAN; 3])),
-            ) {
+            let (camera, clip) = self.camera.ok_or("missing live game camera")?;
+            let view = camera_view(g.origin, camera, clip)?;
+            if !bounds_visible(view, g.bounds) {
                 return Err("candidate outside current camera frustum; waiting for visible accepted section".into());
             }
             log::info!(
-                "Helium native source accepted key={:?} sequence={} generation={:?} light_revision={} camera={:?} size={}x{}",
+                "Helium native source accepted key={:?} sequence={} generation={:?} light_revision={} size={}x{}",
                 g.key,
                 g.sequence,
                 g.generation,
                 light_revision,
-                frame.camera,
                 renderer.config.width,
                 renderer.config.height
             );
-            Ok((
-                source,
-                validation,
-                light_revision,
-                renderer.lightmap_pixels,
-                view,
-            ))
+            Ok((source, light_revision, renderer.lightmap_pixels, view))
         })();
-        let (source, validation, light_revision, lightmap, view) = match prepare {
+        let (source, light_revision, lightmap, view) = match prepare {
             Ok(p) => p,
             Err(e) => {
                 self.error(e);
@@ -958,7 +1003,13 @@ impl Controller {
             return;
         }
         let created = Instant::now();
+        let authority = if self.mode == Mode::AttachedOneSection {
+            CaptureAuthority::Historical(identity)
+        } else {
+            CaptureAuthority::Strict(source.clone())
+        };
         let geometry = Arc::new(g);
+        let key = geometry.key;
         let cancel = Arc::new(AtomicBool::new(false));
         let Some(attempt) = recorder::global().allocate(self.world_epoch) else {
             self.finished = true;
@@ -971,6 +1022,22 @@ impl Controller {
         self.last_attempt = attempt;
         self.retirement_recorded = false;
         self.no_fresh_recorded = false;
+        recorder::global().record(
+            attempt,
+            Stage::WorldSource,
+            Emitter::Game,
+            None,
+            1,
+            geometry.omitted_translucent_vertices as u64,
+        );
+        recorder::global().record(
+            attempt,
+            Stage::CaptureMetrics,
+            Emitter::Game,
+            None,
+            geometry.preparation_us + preparation_started.elapsed().as_micros() as u64,
+            geometry.retained_bytes() as u64,
+        );
         recorder::global().record(
             attempt,
             Stage::MeshAccepted,
@@ -1008,7 +1075,7 @@ impl Controller {
             Stage::MaterialRevision,
             Emitter::Game,
             None,
-            validation[0].description().identity.revision,
+            identity.revision,
             renderer.material_state().animation_revision(),
         );
         if self.mode == Mode::AttachedOneSection {
@@ -1026,7 +1093,7 @@ impl Controller {
             attempt,
             world_epoch: self.world_epoch,
             source,
-            geometry: geometry.clone(),
+            geometry,
             cancel: cancel.clone(),
             lightmap,
             view,
@@ -1043,15 +1110,18 @@ impl Controller {
                 cancel.clone(),
                 attempt,
                 created + CAPTURE_MAX_AGE,
-                move |layer| run_impl(job, Some(layer)),
+                move |layer| {
+                    let _worker = worker;
+                    run_impl(job, Some(layer))
+                },
             ) {
                 Ok((ticket, receiver)) => {
                     self.flight = Some(Flight {
                         created,
                         world_epoch: self.world_epoch,
                         attempt,
-                        geometry,
-                        source: validation,
+                        key,
+                        authority,
                         cancel,
                         light_revision,
                         size: [renderer.config.width, renderer.config.height],
@@ -1076,7 +1146,6 @@ impl Controller {
             return;
         }
         let (sender, receiver) = mpsc::sync_channel(1);
-        let worker = OffscreenWorker::reserve();
         match std::thread::Builder::new()
             .name("helium-real-section-metal".into())
             .spawn(move || {
@@ -1090,8 +1159,8 @@ impl Controller {
                     created,
                     world_epoch: self.world_epoch,
                     attempt,
-                    geometry,
-                    source: validation,
+                    key,
+                    authority,
                     cancel,
                     light_revision,
                     size: [renderer.config.width, renderer.config.height],
@@ -1153,12 +1222,8 @@ impl Source for LeasedSource {
     }
     fn retained_bytes(&self) -> usize {
         self.geometry
-            .indices
-            .capacity()
-            .checked_mul(4)
-            .and_then(|n| n.checked_add(self.geometry.vertices.capacity()))
-            .and_then(|n| n.checked_add(self.bank.retained_bytes()))
-            .unwrap_or(usize::MAX)
+            .retained_bytes()
+            .saturating_add(self.bank.retained_bytes())
     }
     fn retention_key(&self) -> Option<(usize, usize)> {
         self.bank
@@ -1265,6 +1330,7 @@ fn run_impl(
             bank as u64,
             descriptions.len() as u64,
         );
+        let upload_preparation = Instant::now();
         material
             .bank_mut(bank)?
             .begin_upload(&renderer, source, &job.cancel, upload::Update::Full, budget)
@@ -1272,6 +1338,12 @@ fn run_impl(
                 event(Stage::Cancelled, Some(Cause::UploadFailed), bank as u64, 0);
                 e
             })?;
+        event(
+            Stage::UploadPreparation,
+            None,
+            bank as u64,
+            upload_preparation.elapsed().as_micros() as u64,
+        );
         event(
             Stage::UploadSubmitted,
             None,
@@ -1422,7 +1494,12 @@ fn run_impl(
     event(Stage::PresentCompleted, None, 0, 0);
     check_deadline()?;
     Ok(format!(
-        "backend=direct-Metal world_epoch={} key={:?} origin={:?} accepted_mesh_sequence={} banks={:?} revision={} vertices={} indices={} native_upload={:?} frame={:?} presentation={:?}; attached_generation={attachment:?}; GPU command completed, scanout unverified",
+        "backend=direct-Metal world_source={} world_epoch={} key={:?} origin={:?} accepted_mesh_sequence={} banks={:?} revision={} vertices={} indices={} native_upload={:?} frame={:?} presentation={:?}; attached_generation={attachment:?}; GPU command completed, scanout unverified",
+        if job.world_epoch == 0 {
+            "SYNTHETIC"
+        } else {
+            "REAL"
+        },
         job.world_epoch,
         job.geometry.key,
         job.geometry.origin,
@@ -1580,6 +1657,11 @@ mod tests {
             v([2., 0., 0.]),
             [[-2., 0., 0.], [-1.5, 0.5, 0.5]]
         )); // true model overhang
+        assert!(bounds_visible(
+            v([2., 0., 0.]),
+            [[-2., 0., 0.], [16., 16., 16.]]
+        ));
+        assert!(!bounds_visible(v([0., 0., -17.]), [[0.; 3], [16.; 3]]));
         assert!(!points_visible(v([0.; 3]), []));
         assert!(points_visible(
             v([0.; 3]),
@@ -1635,7 +1717,7 @@ mod tests {
         assert!(camera_view([0; 3], [f64::NAN, 0., 0.], clip).is_err());
     }
     #[test]
-    fn unsupported_and_empty_sections_do_not_become_partial_scenes() {
+    fn solid_capture_excludes_blended_geometry_and_rejects_invalid_layers() {
         let state = State::new();
         assert!(
             Geometry::capture(
@@ -1651,9 +1733,23 @@ mod tests {
         );
         let mut m = mesh();
         m.translucent = m.solid.clone();
-        assert!(Geometry::capture((0, 0, 0), 0, &m, state.generation(), 1, 300).is_err());
+        m.translucent[0].pos = [0.5, 0.5, 0.5];
+        let captured = Geometry::capture((0, 0, 0), 0, &m, state.generation(), 1, 300)
+            .unwrap()
+            .unwrap();
+        assert_eq!(captured.vertices, bytemuck::cast_slice::<_, u8>(&m.solid));
+        assert_eq!(captured.indices, [0, 1, 2, 0, 2, 3]);
+        assert_eq!(captured.omitted_translucent_vertices, 4);
         let m = mesh();
         assert!(Geometry::capture((0, 0, 0), 0, &m, state.generation(), 1, 256).is_err());
+    }
+    #[test]
+    fn one_worker_per_process_remains_owned_until_worker_drop() {
+        let worker = CaptureWorker::reserve().expect("first admission");
+        assert!(retirement_pending());
+        assert!(CaptureWorker::reserve().is_none());
+        drop(worker);
+        assert!(CaptureWorker::reserve().is_some());
     }
     #[test]
     fn unload_reload_replacement_and_shutdown_revoke_bounded_ownership() {
@@ -1746,8 +1842,8 @@ mod ownership_tests {
                 created: Instant::now(),
                 world_epoch: 1,
                 attempt: 0,
-                geometry: geometry.clone(),
-                source: vec![source],
+                key: geometry.key,
+                authority: CaptureAuthority::Strict(vec![source]),
                 cancel: cancel.clone(),
                 light_revision: 1,
                 size: [256, 256],
@@ -1831,6 +1927,7 @@ mod ownership_tests {
         };
         let report = run(job).expect("real Metal bridge worker");
         assert!(report.contains("backend=direct-Metal"));
+        assert!(report.contains("world_source=SYNTHETIC"));
         assert!(
             report.contains(&format!("source_retained: {expected}")),
             "shared snapshot must count once: {report}"

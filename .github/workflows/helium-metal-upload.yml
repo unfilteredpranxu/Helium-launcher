@@ -42,6 +42,10 @@ on:
       - '.github/workflows/helium-metal-upload.yml'
   workflow_dispatch:
     inputs:
+      publish_no_world_probe:
+        description: Publish a standalone no-world probe for separate host qualification
+        type: boolean
+        default: false
       publish_owner_ipa:
         description: Publish the single owner IPA only after qualification
         type: boolean
@@ -132,7 +136,7 @@ jobs:
           if rg '(^|[[:space:]])(horizon-|wgpu)' "$RUNNER_TEMP/owner-probe/dependencies.txt"; then exit 1; fi
           python3 tools/ci/ios_package.py probe "$app" "$RUNNER_TEMP/owner-probe/Helium-S1H-Metal-Probe-unsigned.ipa" "$GITHUB_SHA" 2>&1 | tee "$RUNNER_TEMP/helium-upload/probe-package.log"
       - uses: actions/upload-artifact@v4
-        if: success() && github.ref == 'refs/heads/feature/helium-g07-immutable-capture'
+        if: success() && github.event_name == 'workflow_dispatch' && inputs.publish_no_world_probe && github.ref == 'refs/heads/feature/helium-g07-immutable-capture'
         with:
           name: Helium-S1H-no-world-probe-unsigned
           path: |

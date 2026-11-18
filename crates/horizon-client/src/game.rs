@@ -18473,19 +18473,20 @@ impl Game<'_> {
         self.streaming
             .extra
             .extend(waiting.into_iter().map(|chunk| (chunk, 0)));
-        let (uploads, unloaded) =
-            horizon_client::spans::time("streaming", || self.streaming.update(&mut self.world));
-        #[cfg(feature = "helium-direct-metal")]
-        if let Some(native) = self.direct_metal.as_mut() {
-            native.remove_columns(unloaded.iter().map(|c| (c.x, c.z)));
-            if let Some(renderer) = self.renderer.as_ref() {
-                for (key, mesh) in &uploads {
-                    if self.world.chunks.contains_key(&(key.0, key.2)) {
-                        native.section(renderer, *key, self.world.layout().min_y(), mesh);
-                    }
-                }
+        let (uploads, unloaded) = horizon_client::spans::time("streaming", || {
+            #[cfg(feature = "helium-direct-metal")]
+            if let Some(native) = self.direct_metal.as_mut() {
+                return self
+                    .streaming
+                    .update_and_observe(&mut self.world, |sections, removed| {
+                        native.remove_columns(removed.iter().map(|c| (c.x, c.z)));
+                        if let Some(renderer) = self.renderer.as_ref() {
+                            native.sections(renderer, sections);
+                        }
+                    });
             }
-        }
+            self.streaming.update(&mut self.world)
+        });
         self.streaming.extra.truncate(areas);
         self.spawn_fresh_chunks();
         // Before the unloaded chunks' block entities are written and dropped.

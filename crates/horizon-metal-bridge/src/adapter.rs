@@ -29,8 +29,22 @@ pub fn expanded_solid<'v, 'i>(
     limits: Limits,
     indices: &'i mut Vec<u32>,
 ) -> Result<Export<'v, 'i>, String> {
-    if !source.translucent.is_empty() || (source.solid.is_empty() && !source.packed.is_empty()) {
+    if !source.translucent.is_empty() {
         return Err("translucent or packed-only SectionMesh unsupported; nothing exported".into());
+    }
+    expanded_opaque_cutout(source, origin, format, limits, indices)
+}
+
+/// The S2A snapshot explicitly captures only the existing opaque/cutout pass.
+pub(crate) fn expanded_opaque_cutout<'v, 'i>(
+    source: &'v SectionMesh,
+    origin: [i32; 3],
+    format: Format,
+    limits: Limits,
+    indices: &'i mut Vec<u32>,
+) -> Result<Export<'v, 'i>, String> {
+    if source.solid.is_empty() && !source.packed.is_empty() {
+        return Err("packed-only SectionMesh unsupported; nothing exported".into());
     }
     let quads = source.solid.len() / 4;
     if source.sides.quads() != 0 && source.sides.quads() as usize != quads {

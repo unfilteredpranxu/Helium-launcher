@@ -188,6 +188,9 @@ pub enum Stage {
     HistoricalCaptureReady = 44,
     CurrentMaterial = 45,
     CurrentLight = 46,
+    WorldSource = 47,
+    CaptureMetrics = 48,
+    UploadPreparation = 49,
 }
 impl Stage {
     pub fn from_code(n: u32) -> Option<Self> {
@@ -238,6 +241,9 @@ impl Stage {
             44 => Self::HistoricalCaptureReady,
             45 => Self::CurrentMaterial,
             46 => Self::CurrentLight,
+            47 => Self::WorldSource,
+            48 => Self::CaptureMetrics,
+            49 => Self::UploadPreparation,
             _ => return None,
         })
     }
@@ -690,7 +696,7 @@ impl Recorder {
                 if matches!(
                     e.stage,
                     Stage::Cancelled | Stage::Removed | Stage::RetryWaiting | Stage::RetryExhausted
-                ) || matches!(e.stage as u32, 35..=42 | 45..=46)
+                ) || matches!(e.stage as u32, 35..=42 | 45..=49)
                 {
                     e.last_confirmed
                 } else {
@@ -978,7 +984,7 @@ impl Store {
         ));
         report.push_str(&format!("write_errors_total={}\n", s.write_errors));
         report.push_str(&format!(
-            "schema2_extension=G07A (stages 43..46, latest revisions in HUD words 29/30)\ncaptured_generation={} captured_material={} captured_light={} world_epoch={}\ncapture_policy={} | current_generation={} | current_material={} | current_light={}\n",
+            "schema2_extension=G07A/S2A (stages 43..49, latest revisions in HUD words 29/30)\ncaptured_generation={} captured_material={} captured_light={} world_epoch={}\ncapture_policy={} | current_generation={} | current_material={} | current_light={}\n",
             s.fields[2], s.fields[4], s.fields[3], s.fields[7], if s.historical {
                 "HISTORICAL"
             } else {
@@ -988,6 +994,18 @@ impl Store {
             s.current[1],
             s.current[2]
         ));
+        for e in events.iter().filter(|e| e.stage == Stage::WorldSource) {
+            let world_source = if e.expected == 1 && e.world != 0 && !e.test_only {
+                "REAL"
+            } else {
+                "SYNTHETIC"
+            };
+            report.push_str(&format!(
+                "Attempt {} WORLD SOURCE: {world_source} | OPAQUE/CUTOUT | omitted_translucent_vertices={}\n",
+                e.attempt, e.observed
+            ));
+        }
+        report.push_str("S2A metrics (expected/observed): CaptureMetrics=game_thread_us/geometry_capacity_bytes; UploadPreparation=bank/worker_us; MemoryCounters=upload_staging_peak_bytes/retained_source_peak_bytes. Completion timings are host observations.\n");
         report.push_str(&format!(
             "memory_pressure_episodes_evicted={}\n",
             s.pressure_episodes_evicted

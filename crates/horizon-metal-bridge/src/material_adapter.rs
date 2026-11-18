@@ -282,6 +282,7 @@ mod snapshot_tests {
 /// G05: owns the authentic immutable snapshot, not a borrowed byte pointer.
 /// Authority is always the LIVE production renderer; historical owners alone
 /// cannot authorize an upload or receipt after animation/reload/release.
+#[derive(Clone)]
 pub struct BankSource {
     snapshot: std::sync::Arc<horizon_client_render::gfx::material_snapshot::Snapshot>,
     ticket: horizon_client_render::gfx::material_snapshot::Ticket,

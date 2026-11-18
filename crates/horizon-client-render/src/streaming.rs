@@ -19,6 +19,46 @@ use horizon_world::worldgen::decoration_order::DecorationOrder;
 use std::collections::{BinaryHeap, HashSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, TryLockError};
 
+/// A result accepted by the render streamer, borrowed before the mesh can be
+/// uploaded or recycled. Only the streamer can pair mesh bytes with its revision.
+pub struct AcceptedSection<'a> {
+    key: (i32, i32, i32),
+    min_y: i32,
+    revision: u64,
+    mesh: &'a SectionMesh,
+}
+impl<'a> AcceptedSection<'a> {
+    pub fn parts(&self) -> ((i32, i32, i32), i32, u64, &'a SectionMesh) {
+        (self.key, self.min_y, self.revision, self.mesh)
+    }
+}
+
+pub struct AcceptedSections<'a> {
+    uploads: std::slice::Iter<'a, ((i32, i32, i32), SectionMesh)>,
+    revisions: &'a FxHashMap<(i32, i32, i32), u64>,
+    world: &'a World,
+}
+impl<'a> Iterator for AcceptedSections<'a> {
+    type Item = AcceptedSection<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.uploads.find_map(|&(key, ref mesh)| {
+            // A local unload during this same update removes the column and its
+            // compile revision even if a completed mesh was already collected.
+            let revision = *self.revisions.get(&key)?;
+            self.world
+                .chunks
+                .contains_key(&(key.0, key.2))
+                .then_some(AcceptedSection {
+                    key,
+                    min_y: self.world.layout().min_y(),
+                    revision,
+                    mesh,
+                })
+        })
+    }
+}
+
 /// Worker CPU time and job counts by kind, for benchmarks
 /// (`examples/gen_light_bench.rs`). Off unless enabled: a relaxed load per
 /// job then.
@@ -1622,6 +1662,25 @@ impl Streaming {
     }
     /// Advance streaming: collect finished work, then schedule more.
     /// Returns meshes ready for upload and columns that were unloaded.
+    /// Observe the exact accepted version before the caller uploads or frees it.
+    /// Keep the usual update API and allocation cost for callers without an observer.
+    pub fn update_and_observe(
+        &mut self,
+        world: &mut World,
+        observe: impl FnOnce(AcceptedSections<'_>, &[Arc<Chunk>]),
+    ) -> (Vec<((i32, i32, i32), SectionMesh)>, Vec<Arc<Chunk>>) {
+        let (uploads, removed) = self.update(world);
+        observe(
+            AcceptedSections {
+                uploads: uploads.iter(),
+                revisions: &self.compile_started,
+                world,
+            },
+            &removed,
+        );
+        (uploads, removed)
+    }
+
     pub fn update(
         &mut self,
         world: &mut World,
@@ -3194,6 +3253,33 @@ static NO_CHUNKS: std::sync::LazyLock<HashSet<(i32, i32)>> = std::sync::LazyLock
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observation_keeps_the_producer_revision_and_excludes_removed_columns() {
+        let mut world = World::new(horizon_world::registry::BlockStateId(0), 0);
+        let active = (-2, 3, 4);
+        let removed = (9, 3, -1);
+        let no_version = (-2, 4, 4);
+        world.chunks.insert(
+            (active.0, active.2),
+            Arc::new(Chunk::empty(active.0, active.2)),
+        );
+        let uploads = [
+            (removed, SectionMesh::default()),
+            (active, SectionMesh::default()),
+            (no_version, SectionMesh::default()),
+        ];
+        let revisions = [(active, 391), (removed, 394)].into_iter().collect();
+        let mut accepted = AcceptedSections {
+            uploads: uploads.iter(),
+            revisions: &revisions,
+            world: &world,
+        };
+        let (key, min_y, revision, mesh) = accepted.next().unwrap().parts();
+        assert_eq!((key, min_y, revision), (active, -64, 391));
+        assert!(std::ptr::eq(mesh, &uploads[1].1));
+        assert!(accepted.next().is_none());
+    }
 
     #[test]
     fn a_resent_column_keeps_its_sections_but_takes_new_biomes() {
