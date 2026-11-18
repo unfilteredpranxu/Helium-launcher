@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 pub mod adapter;
 mod runtime;
-pub use runtime::{Controller, Mode, enabled};
+pub use runtime::{Controller, Mode, enabled, retirement_pending};
 
 pub fn runtime_snapshot_budget() -> usize {
     runtime::SNAPSHOT_BUDGET

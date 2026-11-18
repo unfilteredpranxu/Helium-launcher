@@ -8,7 +8,7 @@ pub(super) fn run(game: impl FnOnce() -> crate::Result<()>) -> crate::Result<()>
     let mut complete = || match retirement.exit_status() {
         Status::Complete => {
             #[cfg(all(target_vendor = "apple", feature = "helium-direct-metal"))]
-            if horizon_metal_bridge::runtime::retirement_pending() {
+            if horizon_metal_bridge::retirement_pending() {
                 return false;
             }
             true
