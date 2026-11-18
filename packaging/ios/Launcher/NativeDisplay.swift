@@ -121,6 +121,7 @@ private func nativeDisplayRequestImpl(_ id: UInt64, _ pointer: UnsafeMutableRawP
         NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object:nil, queue:.main) { _ in cancelAllNativeTargets(14) }
         NotificationCenter.default.addObserver(forName:UIApplication.didReceiveMemoryWarningNotification,object:nil,queue:.main){_ in cancelAllNativeTargets(34)}
     }
+    if live { setMetalDebugMode("LIVE-TERRAIN") }
     let target=NativeSession(id,parent,cancel,ready,live:live)
     let view=target.view; let metal=view.layer as! CAMetalLayer
     view.isUserInteractionEnabled=false; view.autoresizingMask = live ? [.flexibleLeftMargin, .flexibleWidth, .flexibleHeight] : [.flexibleWidth, .flexibleHeight]; view.alpha=0
@@ -135,7 +136,10 @@ private func nativeDisplayRequestImpl(_ id: UInt64, _ pointer: UnsafeMutableRawP
     nativeTargets[id]=target; view.invalid={ cause,old,new in cancelNative(id,cause,old,new) }; parent.addSubview(view)
     diagnosticEvent(id,14,0,UInt64(pixels.width),UInt64(pixels.height));liftMetalHUD()
     target.timer=Timer.scheduledTimer(withTimeInterval:0.1,repeats:true){[weak target] _ in
-        guard let target=target else {return}; let cause=target.invalidCause();if cause != 0 {cancelNative(id,cause)}
+        guard let target=target else {return}
+        let cause=target.invalidCause()
+        if cause != 0 { cancelNative(id,cause) }
+        else if target.live && target.view.alpha != 0 && !target.ready(id) { cancelNative(id,16) }
     }
     LauncherLog.write("native layer attached generation=\(id) size=\(pixels); transparent until validated")
     Thread.detachNewThread {

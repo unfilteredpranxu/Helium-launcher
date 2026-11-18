@@ -25,6 +25,9 @@ struct MetalDiagnosticModel {
         default:return (-1,"INVALID")}
     }
     static func hud(_ a: [UInt64], mode: String) -> String {
+        if mode == "LIVE-TERRAIN" {
+            return "HELIUM S2B · LIVE TERRAIN MODE\nNative completion and frame timing in game log\nwgpu reference active · PHYSICAL SCANOUT UNVERIFIED"
+        }
         guard a.count == 32, a[0] == 2 else {return "HELIUM G07-A · HISTORICAL CAPTURE\nRECORDER DEGRADED: ABI mismatch\nwgpu producer/fallback active"}
         let stage = a[3] < UInt64(stages.count) ? stages[Int(a[3])] : "INVALID_STAGE"
         let cause = a[4] < UInt64(causes.count) ? causes[Int(a[4])] : "UNKNOWN"

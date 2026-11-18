@@ -369,6 +369,12 @@ fn submit_session<T: Send + 'static>(
                 if live {
                     state.cancel();
                     state.finish(false);
+                    // The game may no longer be producing frames to drain its
+                    // receiver. Hide the exact revoked UIKit session anyway.
+                    if let Ok(p) = symbol("horizon_native_display_cancel") {
+                        let f: extern "C" fn(u64) = unsafe { std::mem::transmute(p) };
+                        f(id);
+                    }
                     let _ = send.send(result);
                     return;
                 }

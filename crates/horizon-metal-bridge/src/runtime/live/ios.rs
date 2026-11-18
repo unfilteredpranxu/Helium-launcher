@@ -67,6 +67,7 @@ pub(in crate::runtime) struct Live {
     banks: Option<Arc<Vec<Bank>>>,
     session: Option<Session>,
     next_start: Instant,
+    pressure_until: Instant,
     next_input: Instant,
     dropped: Arc<AtomicU64>,
     admitted_us: u64,
@@ -81,6 +82,7 @@ impl Live {
             banks: None,
             session: None,
             next_start: Instant::now(),
+            pressure_until: Instant::now(),
             next_input: Instant::now(),
             dropped: Arc::new(AtomicU64::new(0)),
             admitted_us: 0,
@@ -99,7 +101,8 @@ impl Live {
     }
     pub fn memory_pressure(&mut self) {
         self.cancel(true);
-        self.next_start = Instant::now() + Duration::from_secs(5);
+        self.pressure_until = Instant::now() + Duration::from_secs(5);
+        self.next_start = self.pressure_until;
     }
     pub fn remove_columns(&mut self, columns: impl Iterator<Item = (i32, i32)>) {
         for column in columns {
@@ -122,6 +125,9 @@ impl Live {
         let start = Instant::now();
         let state = renderer.material_state();
         self.generation(state.generation());
+        if start < self.pressure_until {
+            return;
+        }
         let Ok(snapshot) = state.snapshot() else {
             return;
         };

@@ -42,6 +42,8 @@ import Foundation
   let hud=MetalDiagnosticModel.hud(state,mode:"TEST_EVENT_ONLY")
   assert(hud.contains("COLUMN_UNLOADED") && hud.contains("wgpu producer/fallback active"))
   var historical=state; historical[20]=47;historical[29]=48;historical[19]=32;historical[30]=33
+  let liveHUD = MetalDiagnosticModel.hud([], mode: "LIVE-TERRAIN")
+  assert(liveHUD.contains("LIVE TERRAIN MODE") && !liveHUD.contains("HISTORICAL"))
   let captureHUD=MetalDiagnosticModel.hud(historical,mode:"AUTO-ARMED")
   assert(captureHUD.contains("HISTORICAL CAPTURE") && captureHUD.contains("48/33"))
   for (bundle,marker,legacy,file,expected) in [("dev.helium.g06ctest",2,false,Optional<Data>.none,Int32(2)),("dev.helium.g06ctest",2,false,Data("off\n".utf8),0),("dev.horizon.game",2,false,nil,0),("dev.horizon.game",nil,false,nil,0),("dev.helium.g06ctest",3,false,nil,-1),("dev.helium.g06ctest",2,false,Data("bad".utf8),-1),("dev.helium.g06ctest",2,false,Data("live-terrain\n".utf8),3),("dev.horizon.game",nil,true,Data("live-terrain".utf8),-1)] {
