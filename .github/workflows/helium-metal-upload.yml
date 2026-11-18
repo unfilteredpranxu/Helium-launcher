@@ -114,7 +114,7 @@ jobs:
           xcrun --sdk iphoneos metal -target air64-apple-ios15.0 -std=ios-metal2.0 -c experiments/metal-prototype/src/terrain/metal/presentation.metal -o "$RUNNER_TEMP/helium-upload/display.air"
           brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
           (cd experiments/metal-prototype/ios && xcodegen generate)
-          xcodebuild -project experiments/metal-prototype/ios/HeliumMetalProbe.xcodeproj -scheme HeliumMetalProbe -configuration Release -sdk iphoneos -derivedDataPath "$RUNNER_TEMP/helium-probe-build" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= HELIUM_DIAGNOSTIC_SHA="$GITHUB_SHA" build > "$RUNNER_TEMP/helium-upload/swift-host.log" 2>&1 || { tail -100 "$RUNNER_TEMP/helium-upload/swift-host.log"; exit 1; }
+          env -u MACOSX_DEPLOYMENT_TARGET xcodebuild -project experiments/metal-prototype/ios/HeliumMetalProbe.xcodeproj -scheme HeliumMetalProbe -configuration Release -sdk iphoneos -derivedDataPath "$RUNNER_TEMP/helium-probe-build" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= HELIUM_DIAGNOSTIC_SHA="$GITHUB_SHA" build > "$RUNNER_TEMP/helium-upload/swift-host.log" 2>&1 || { tail -100 "$RUNNER_TEMP/helium-upload/swift-host.log"; exit 1; }
       - name: Probe native Metal uploads and original G01/G02 GPU regressions
         id: gpu
         run: |
@@ -130,7 +130,7 @@ jobs:
           app="$RUNNER_TEMP/helium-probe-build/Build/Products/Release-iphoneos/HeliumMetalProbe.app"
           cargo +1.95.0 tree --locked --target aarch64-apple-ios --manifest-path experiments/metal-prototype/Cargo.toml > "$RUNNER_TEMP/owner-probe/dependencies.txt"
           if rg '(^|[[:space:]])(horizon-|wgpu)' "$RUNNER_TEMP/owner-probe/dependencies.txt"; then exit 1; fi
-          python3 tools/ci/ios_package.py probe "$app" "$RUNNER_TEMP/owner-probe/Helium-S1H-Metal-Probe-unsigned.ipa" "$GITHUB_SHA" | tee "$RUNNER_TEMP/helium-upload/probe-package.log"
+          python3 tools/ci/ios_package.py probe "$app" "$RUNNER_TEMP/owner-probe/Helium-S1H-Metal-Probe-unsigned.ipa" "$GITHUB_SHA" 2>&1 | tee "$RUNNER_TEMP/helium-upload/probe-package.log"
       - uses: actions/upload-artifact@v4
         if: success() && github.ref == 'refs/heads/feature/helium-g07-immutable-capture'
         with:
@@ -302,7 +302,7 @@ jobs:
           python3 tools/ci/verify-attached-ios-game.py "$app" target/aarch64-apple-ios/release/horizon-client 2>&1 | tee "$RUNNER_TEMP/attached-game/verified.log"
           # Inspect the exact archive and discard it. The gameplay release hold below is independent.
           trap 'rm -f "$RUNNER_TEMP/attached-game/held.ipa"' EXIT
-          python3 tools/ci/ios_package.py game "$app" "$RUNNER_TEMP/attached-game/held.ipa" "$GITHUB_SHA" | tee "$RUNNER_TEMP/attached-game/package-verifier.log"
+          python3 tools/ci/ios_package.py game "$app" "$RUNNER_TEMP/attached-game/held.ipa" "$GITHUB_SHA" 2>&1 | tee "$RUNNER_TEMP/attached-game/package-verifier.log"
       - name: Package the one qualified owner IPA
         if: github.event_name == 'workflow_dispatch' && inputs.publish_owner_ipa
         run: |

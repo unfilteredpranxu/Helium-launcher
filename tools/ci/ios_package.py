@@ -3,7 +3,6 @@ from dataclasses import dataclass
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path, PurePosixPath
 import plistlib
 import re
@@ -226,8 +225,15 @@ def apple_checks(folder, profile):
             symbols = subprocess.check_output(["xcrun", "nm", str(path)], text=True)
             if any(s in symbols for s in ("horizon_client", "horizon_world", "wgpu_core", "_horizon_launcher_present")):
                 raise ValueError("world/game or wgpu symbol in independent probe")
-            if path == library and not all(s in symbols for s in ("_helium_display_run", "_helium_display_status", "_helium_display_progress")):
-                raise ValueError("missing Rust probe bridge")
+            if path == library and not all(s in symbols for s in (
+                "_helium_display_run", "_helium_display_status", "_helium_display_progress",
+                "_OBJC_CLASS_$_HeliumProbeSceneDelegate",
+            )):
+                raise ValueError("missing Rust probe bridge or UIKit scene delegate")
+        elif path == library:
+            symbols = subprocess.check_output(["xcrun", "nm", "-g", str(path)], text=True)
+            if not all(s in symbols for s in ("_helium_checkpoint_begin", "_helium_checkpoint_end")):
+                raise ValueError("missing game checkpoint bridge")
 
 
 def verify_ipa(ipa, profile, source, app_digest, framework_digest, *, apple=False):

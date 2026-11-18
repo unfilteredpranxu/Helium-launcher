@@ -95,6 +95,7 @@ struct ProbeView: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text("NO-WORLD DEVICE PROBE").font(.title).bold()
                 Text("HARDWARE NOT YET VERIFIED")
+                Text(verbatim: buildIdentity).font(.caption.monospaced()).textSelection(.enabled)
                 Text("Files → On My iPad → Helium Metal Probe → logs → Helium-Host.txt")
                 Text("Standalone 256 × 256 indexed terrain and depth probe")
                 Text("G05-D — Native SDR display (GPU completion is not scanout)")
@@ -155,6 +156,13 @@ struct ProbeView: View {
         .sheet(item: $sharePayload) { payload in
             ActivitySheet(report: payload.report, image: payload.image)
         }
+    }
+
+    private var buildIdentity: String {
+        let bundle = Bundle.main
+        let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        let source = bundle.object(forInfoDictionaryKey: "HeliumDiagnosticSource") as? String ?? "?"
+        return "Build \(build) • \(source)"
     }
 
     private func statusColor(for mode: ProbeMode) -> Color {
