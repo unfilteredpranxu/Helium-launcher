@@ -1,6 +1,10 @@
-# G07-A S1 — owner testing remains on hold (Prompt 12/25)
+# G07-A — gameplay owner testing remains on hold (Prompt 12/25)
 
-**NO NEW OWNER IPA. No owner test is authorized yet.** Build 12001's earlier
+**No gameplay IPA or gameplay owner test is authorized.** The separately
+qualified [S1H no-world Metal probe](G07-A-S1H.md) can be used to check
+standalone installation, launch and display without any world access.
+
+Build 12001's earlier
 recommendation remains withdrawn. Do not repeat the crash or stress a real world.
 No owner saves, backups or existing installation were touched during this work.
 
