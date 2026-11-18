@@ -136,7 +136,7 @@ impl<S: Source> Material<S> {
         expected.identity.revision = d.identity.revision;
         if d != expected
             || d.identity.revision <= self.description.identity.revision
-            || source.pixels() != old.pixels()
+            || (!std::ptr::eq(source.pixels(), old.pixels()) && source.pixels() != old.pixels())
         {
             return Err("changed bytes/layout/generation require upload".into());
         }
@@ -150,6 +150,35 @@ impl<S: Source> Material<S> {
         self.source = Some(Arc::new(source));
         self.description = d;
         Ok(())
+    }
+    /// Derive the changed layer span by comparing immutable CPU versions.
+    /// Plan::prepare still verifies every omitted byte against the exact
+    /// completed version before submitting a partial upload.
+    pub fn changed_layers(&self, source: &S) -> Update {
+        let Some(old) = &self.source else {
+            return Update::Full;
+        };
+        let size = old.pixels().len();
+        let count = self.description.allocated as usize;
+        if size != source.pixels().len() || count == 0 || size == 0 || !size.is_multiple_of(count) {
+            return Update::Full;
+        }
+        let stride = size / count;
+        let mut changed = old
+            .pixels()
+            .chunks_exact(stride)
+            .zip(source.pixels().chunks_exact(stride))
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, _)| i);
+        let Some(first) = changed.next() else {
+            return Update::Full;
+        };
+        let last = changed.next_back().unwrap_or(first);
+        Update::Layers {
+            first: first as u32,
+            count: (last - first + 1) as u32,
+        }
     }
     pub fn bank_mut(&mut self, bank: u32) -> Result<&mut Self, String> {
         if self.description.bank == bank {

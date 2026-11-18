@@ -43,6 +43,7 @@ private final class NativeMetalView: UIView {
 }
 private final class NativeSession {
     let id: UInt64
+    let live: Bool
     let started = ProcessInfo.processInfo.systemUptime
     let view: NativeMetalView
     weak var parent: UIView?
@@ -50,13 +51,18 @@ private final class NativeSession {
     let cancel: NativeCancel
     let ready: NativeReady
     var timer: Timer?
-    init(_ id: UInt64, _ parent: UIView, _ cancel: @escaping NativeCancel, _ ready: @escaping NativeReady) {
+    init(_ id: UInt64, _ parent: UIView, _ cancel: @escaping NativeCancel, _ ready: @escaping NativeReady, live: Bool) {
         self.id=id; self.parent=parent; self.window=parent.window; self.cancel=cancel; self.ready=ready
-        view=NativeMetalView(frame: parent.bounds)
+        self.live = live
+        view = NativeMetalView(frame: nativeTerrainRect(parent.bounds, live: live))
     }
     func invalidCause() -> UInt32 {
-        let size=parent.map {p in CGSize(width:(p.bounds.width*(window?.screen.scale ?? 0)).rounded(),height:(p.bounds.height*(window?.screen.scale ?? 0)).rounded())}
-        return MetalDiagnosticModel.invalidHost(age:ProcessInfo.processInfo.systemUptime-started,parent:parent != nil,window:window != nil,attached:parent?.window === window && view.superview === parent,hidden:window?.isHidden != false || parent?.isHidden != false,key:window?.isKeyWindow == true,active:UIApplication.shared.applicationState == .active,modal:window?.rootViewController?.presentedViewController != nil,size:size==view.initialPixels)
+        let size = parent.map { p in
+            let rect = nativeTerrainRect(p.bounds, live: live)
+            let scale = window?.screen.scale ?? 0
+            return CGSize(width: (rect.width * scale).rounded(), height: (rect.height * scale).rounded())
+        }
+        return MetalDiagnosticModel.invalidHost(age:live ? 0 : ProcessInfo.processInfo.systemUptime-started,parent:parent != nil,window:window != nil,attached:parent?.window === window && view.superview === parent,hidden:window?.isHidden != false || parent?.isHidden != false,key:window?.isKeyWindow == true,active:UIApplication.shared.applicationState == .active,modal:window?.rootViewController?.presentedViewController != nil,size:size==view.initialPixels)
     }
     deinit { timer?.invalidate() }
 }
@@ -75,14 +81,31 @@ private func cancelNative(_ id: UInt64,_ cause:UInt32=16,_ expected:UInt64=0,_ o
     diagnosticEvent(id,29,0,UInt64(cause),0)
     LauncherLog.write("native session closed \(id); wgpu fallback visible")
 }
+private func nativeTerrainRect(_ bounds: CGRect, live: Bool) -> CGRect {
+    guard live else { return bounds }
+    let size = CGSize(width: bounds.width / 2, height: bounds.height / 2)
+    return CGRect(x: bounds.maxX - size.width, y: bounds.minY, width: size.width, height: size.height)
+}
+
+@_cdecl("horizon_native_display_request_live")
+public func nativeDisplayRequestLive(_ id: UInt64, _ pointer: UnsafeMutableRawPointer?, _ work: NativeWork?, _ cancel: NativeCancel?, _ ready: NativeReady?) -> Bool {
+    guard Bundle.main.bundleIdentifier == "dev.helium.g06ctest",
+          Bundle.main.object(forInfoDictionaryKey: "HeliumMetalDiagnosticsVersion") as? Int == 2 else { return false }
+    return nativeDisplayRequestImpl(id, pointer, work, cancel, ready, live: true)
+}
 @_cdecl("horizon_native_display_request")
 public func nativeDisplayRequest(_ id: UInt64, _ pointer: UnsafeMutableRawPointer?, _ work: NativeWork?, _ cancel: NativeCancel?, _ ready: NativeReady?) -> Bool {
+    nativeDisplayRequestImpl(id, pointer, work, cancel, ready, live: false)
+}
+
+private func nativeDisplayRequestImpl(_ id: UInt64, _ pointer: UnsafeMutableRawPointer?, _ work: NativeWork?, _ cancel: NativeCancel?, _ ready: NativeReady?, live: Bool) -> Bool {
     guard Thread.isMainThread, nativeTargets.isEmpty, let pointer=pointer, let work=work, let cancel=cancel, let ready=ready else {diagnosticEvent(id,30,38);return false}
     guard let parent=Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? UIView else {diagnosticEvent(id,30,21);return false}
     guard let window=parent.window else {diagnosticEvent(id,30,22);return false}
     let hostCause=MetalDiagnosticModel.invalidHost(age:0,parent:true,window:true,attached:true,hidden:window.isHidden || parent.isHidden,key:window.isKeyWindow,active:UIApplication.shared.applicationState == .active,modal:window.rootViewController?.presentedViewController != nil,size:true)
     guard hostCause==0 else {diagnosticEvent(id,30,hostCause);return false}
-    let pixels=CGSize(width:(parent.bounds.width*window.screen.scale).rounded(),height:(parent.bounds.height*window.screen.scale).rounded())
+    let rect = nativeTerrainRect(parent.bounds, live: live)
+    let pixels = CGSize(width: (rect.width * window.screen.scale).rounded(), height: (rect.height * window.screen.scale).rounded())
     guard pixels.width>0, pixels.height>0, pixels.width<=4096, pixels.height<=4096, pixels.width*pixels.height*12 <= 64*1024*1024 else {
         diagnosticEvent(id,30,10,0,MetalDiagnosticModel.pixels(Double(pixels.width),Double(pixels.height)))
         LauncherLog.write("native attach rejected: physical dimensions \(pixels), policy 1..4096 and <=64MiB three-drawable reservation")
@@ -98,15 +121,15 @@ public func nativeDisplayRequest(_ id: UInt64, _ pointer: UnsafeMutableRawPointe
         NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object:nil, queue:.main) { _ in cancelAllNativeTargets(14) }
         NotificationCenter.default.addObserver(forName:UIApplication.didReceiveMemoryWarningNotification,object:nil,queue:.main){_ in cancelAllNativeTargets(34)}
     }
-    let target=NativeSession(id,parent,cancel,ready)
+    let target=NativeSession(id,parent,cancel,ready,live:live)
     let view=target.view; let metal=view.layer as! CAMetalLayer
-    view.isUserInteractionEnabled=false; view.autoresizingMask=[.flexibleWidth,.flexibleHeight]; view.alpha=0
+    view.isUserInteractionEnabled=false; view.autoresizingMask = live ? [.flexibleLeftMargin, .flexibleWidth, .flexibleHeight] : [.flexibleWidth, .flexibleHeight]; view.alpha=0
     view.initialPixels=pixels; metal.device=MTLCreateSystemDefaultDevice(); metal.pixelFormat = .bgra8Unorm
     metal.colorspace=CGColorSpace(name: CGColorSpace.linearSRGB); metal.framebufferOnly=true
     metal.allowsNextDrawableTimeout=true; metal.presentsWithTransaction=false; metal.maximumDrawableCount=3
     metal.contentsScale=window.screen.scale; metal.drawableSize=pixels
-    let label=UILabel(frame:CGRect(x:8,y:8,width:parent.bounds.width-16,height:44))
-    label.text=NSLocalizedString("HELIUM S2A · HISTORICAL NATIVE TERRAIN · OPAQUE/CUTOUT\nwgpu producer/fallback active",comment:"Native diagnostic")
+    let label=UILabel(frame:CGRect(x:8,y:8,width:rect.width-16,height:44))
+    label.text = live ? "HELIUM S2B · LIVE NATIVE OPAQUE/CUTOUT\nwgpu reference and input remain active" : NSLocalizedString("HELIUM S2A · HISTORICAL NATIVE TERRAIN · OPAQUE/CUTOUT\nwgpu producer/fallback active",comment:"Native diagnostic")
     label.textColor = .yellow; label.backgroundColor = .black; label.numberOfLines=2; label.font = .systemFont(ofSize:12)
     view.addSubview(label)
     nativeTargets[id]=target; view.invalid={ cause,old,new in cancelNative(id,cause,old,new) }; parent.addSubview(view)
@@ -126,6 +149,11 @@ public func nativeDisplayPublish(_ id:UInt64) {
     DispatchQueue.main.async {
         guard let target=nativeTargets[id] else {diagnosticEvent(id,30,16);return}
         let cause=target.invalidCause();guard cause==0, target.ready(id) else {cancelNative(id,cause==0 ? 16 : cause);return}
+        if target.live {
+            target.view.alpha = 1
+            LauncherLog.write("live native terrain revealed; physical scanout unverified")
+            return
+        }
         let values=diagnosticValues()
         if values.count==32, let label=target.view.subviews.first as? UILabel {
             label.text="HELIUM S2A · HISTORICAL NATIVE TERRAIN · OPAQUE/CUTOUT\nCapture rev \(values[20]), current rev \(values[29]) · 5 s · wgpu producer/fallback active"

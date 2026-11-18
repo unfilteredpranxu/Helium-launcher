@@ -21,6 +21,7 @@ struct MetalDiagnosticModel {
         guard file.count <= 64, let value = String(data:file,encoding:.utf8) else {return (-1,"INVALID")}
         switch value {case "off", "off\n":return (0,"OFF")
         case "attached-one-section", "attached-one-section\n":return (2,"CONFIG-ARMED")
+        case "live-terrain", "live-terrain\n":return isolated ? (3,"LIVE-TERRAIN") : (-1,"INVALID")
         default:return (-1,"INVALID")}
     }
     static func hud(_ a: [UInt64], mode: String) -> String {

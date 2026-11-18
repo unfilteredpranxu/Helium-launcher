@@ -41,6 +41,15 @@ impl Layer {
             .display(self.layer.clone())?
             .with_attachment(self.gate.clone()))
     }
+    /// Live mode reveals once, after polling the first exact drawable command.
+    pub fn reveal_live(&self) -> Result<(), String> {
+        if self.gate.publish() {
+            let p = symbol("horizon_native_display_publish")?;
+            let f: extern "C" fn(u64) = unsafe { std::mem::transmute(p) };
+            f(self.id);
+        }
+        Ok(())
+    }
     pub fn generation(&self) -> u64 {
         self.id
     }
@@ -268,7 +277,7 @@ pub fn submit_attempt<T: Send + 'static>(
     id: u64,
     job: impl FnOnce(Layer) -> Result<T, String> + Send + 'static,
 ) -> Result<(Ticket, Receiver<Result<T, String>>), String> {
-    submit_with_expiry(window, cancel, id, None, job)
+    submit_session(window, cancel, id, None, false, job)
 }
 /// Historical capture only: expiry is checked again by the exact Rust ready
 /// callback immediately before Swift reveals, independently of game frame polls.
@@ -279,13 +288,28 @@ pub fn submit_capture_attempt<T: Send + 'static>(
     expires: std::time::Instant,
     job: impl FnOnce(Layer) -> Result<T, String> + Send + 'static,
 ) -> Result<(Ticket, Receiver<Result<T, String>>), String> {
-    submit_with_expiry(window, cancel, id, Some(expires), job)
+    submit_session(window, cancel, id, Some(expires), false, job)
 }
-fn submit_with_expiry<T: Send + 'static>(
+/// Uses the same exclusive host and worker registry, separate from the capped
+/// historical flight-recorder attempts.
+pub fn submit_live<T: Send + 'static>(
+    window: &impl HasWindowHandle,
+    cancel: Arc<AtomicBool>,
+    job: impl FnOnce(Layer) -> Result<T, String> + Send + 'static,
+) -> Result<(Ticket, Receiver<Result<T, String>>), String> {
+    use std::sync::atomic::AtomicU64;
+    static NEXT_LIVE: AtomicU64 = AtomicU64::new(1 << 63);
+    let id = NEXT_LIVE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .map_err(|_| "live attachment IDs exhausted")?;
+    submit_session(window, cancel, id, None, true, job)
+}
+fn submit_session<T: Send + 'static>(
     window: &impl HasWindowHandle,
     cancel: Arc<AtomicBool>,
     id: u64,
     expires: Option<std::time::Instant>,
+    live: bool,
     job: impl FnOnce(Layer) -> Result<T, String> + Send + 'static,
 ) -> Result<(Ticket, Receiver<Result<T, String>>), String> {
     if !objc2_foundation::NSThread::isMainThread_class() {
@@ -295,7 +319,11 @@ fn submit_with_expiry<T: Send + 'static>(
     else {
         return Err("expected actual UIKit window".into());
     };
-    let request = symbol("horizon_native_display_request")?;
+    let request = symbol(if live {
+        "horizon_native_display_request_live"
+    } else {
+        "horizon_native_display_request"
+    })?;
     // Paired publication/release ABI must exist BEFORE UI resources are created.
     let _ = symbol("horizon_native_display_publish")?;
     let _ = symbol("horizon_native_display_cancel")?;
@@ -310,6 +338,7 @@ fn submit_with_expiry<T: Send + 'static>(
     let (send, recv) = mpsc::sync_channel(1);
     let status = Arc::new(match expires {
         Some(deadline) => Gate::expiring(cancel.clone(), deadline),
+        None if live => Gate::live(cancel.clone()),
         None => Gate::new(cancel.clone()),
     });
     let state = status.clone();
@@ -337,6 +366,12 @@ fn submit_with_expiry<T: Send + 'static>(
                             );
                             Err("native worker panic".into())
                         });
+                if live {
+                    state.cancel();
+                    state.finish(false);
+                    let _ = send.send(result);
+                    return;
+                }
                 if result.is_err() {
                     recorder::global().record(
                         id,

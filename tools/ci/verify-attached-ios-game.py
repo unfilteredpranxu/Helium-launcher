@@ -59,12 +59,12 @@ def verify(app: Path, rust: Path) -> None:
     if digest(binary) != digest(rust):
         raise ValueError("bundle executable differs from the opt-in Rust game")
     with binary.open("rb") as file, mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ) as data:
-        if data.find(b"attached-one-section") < 0:
+        if any(data.find(mode) < 0 for mode in (b"attached-one-section", b"live-terrain")):
             raise ValueError("native test mode absent from linked executable")
     framework = app / "Frameworks/HorizonLauncherKit.framework/HorizonLauncherKit"
     result = subprocess.check_output(["xcrun", "nm", "-g", str(framework)], text=True)
     defined = {parts[-1] for line in result.splitlines() if len(parts := line.split()) >= 3 and parts[-2] == "T"}
-    for name in ("abi", "mode", "request", "publish", "cancel"):
+    for name in ("abi", "mode", "request", "request_live", "publish", "cancel"):
         if "_horizon_native_display_" + name not in defined:
             raise ValueError("missing native host definition: " + name)
     for name in ("horizon_diag_install_v2","horizon_diag_hud_v2","horizon_diag_host_idle_v2"):
@@ -93,7 +93,7 @@ def verify(app: Path, rust: Path) -> None:
         plistlib.dump(value, stream)
     print("Verified actual opt-in Rust executable == bundle executable; thin arm64 device iOS15.0")
     print("Executable bytes:", binary.stat().st_size, "SHA256:", digest(binary))
-    print("Five ABI v1 host exports defined; proprietary assets/saves/config absent; isolated bundle ID applied")
+    print("Five ABI v1 host exports and live request defined; proprietary assets/saves/config absent; isolated bundle ID applied")
     print("No Java/JVM linkage, provisioning profile or distribution signature; diagnostics ABI v2 retained")
     print("Configuration file absent: isolated marker v2 AUTO-ARMS; normal apps remain OFF. Device/world runtime remains UNVERIFIED.")
 

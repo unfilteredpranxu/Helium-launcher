@@ -21,6 +21,9 @@ use std::{
     },
     time::{Duration, Instant},
 };
+#[cfg(any(target_os = "ios", test))]
+mod live;
+
 fn generation_value(g: Generation) -> u64 {
     g.diagnostic_id()
 }
@@ -64,17 +67,22 @@ pub enum Mode {
     Disabled,
     OneSectionDiagnostic,
     AttachedOneSection,
+    LiveTerrain,
 }
 impl Mode {
     fn observes_surface(self, offscreen: bool) -> bool {
-        self != Self::Disabled && !(self == Self::AttachedOneSection && offscreen)
+        self != Self::Disabled && !(self.requires_ios() && offscreen)
+    }
+    fn requires_ios(self) -> bool {
+        matches!(self, Self::AttachedOneSection | Self::LiveTerrain)
     }
     pub fn parse(value: Option<&str>) -> Result<Self, String> {
         match value {
             None | Some("") | Some("off") => Ok(Self::Disabled),
             Some("one-section") => Ok(Self::OneSectionDiagnostic),
             Some("attached-one-section") => Ok(Self::AttachedOneSection),
-            Some(_) => Err("unsupported HELIUM_DIRECT_METAL value; use one-section, attached-one-section or off".into()),
+            Some("live-terrain") => Ok(Self::LiveTerrain),
+            Some(_) => Err("unsupported HELIUM_DIRECT_METAL value; use one-section, attached-one-section, live-terrain or off".into()),
         }
     }
 }
@@ -90,6 +98,7 @@ fn selected_mode() -> Result<Mode, String> {
     return match helium_metal_prototype::attached::device_test_mode()? {
         0 => Ok(Mode::Disabled),
         2 => Ok(Mode::AttachedOneSection),
+        3 => Ok(Mode::LiveTerrain),
         _ => Err("invalid test-only sandbox configuration".into()),
     };
     #[cfg(not(target_os = "ios"))]
@@ -390,13 +399,14 @@ pub struct Controller {
     camera: Option<([f64; 3], [[f32; 4]; 4])>,
     #[cfg(target_os = "ios")]
     displayed: Option<Shown>,
+    #[cfg(target_os = "ios")]
+    live: Option<live::Live>,
 }
 impl Controller {
     pub fn observe_surface(offscreen: bool) -> bool {
         cfg!(any(target_os = "macos", target_os = "ios"))
             && selected_mode().is_ok_and(|m| {
-                m.observes_surface(offscreen)
-                    && (m != Mode::AttachedOneSection || cfg!(target_os = "ios"))
+                m.observes_surface(offscreen) && (!m.requires_ios() || cfg!(target_os = "ios"))
             })
     }
     /// Local runtime session counter, never a save ID or pointer identity.
@@ -430,8 +440,8 @@ impl Controller {
             log::warn!("Helium Direct Metal requires Apple; wgpu retained");
             return None;
         }
-        if mode == Mode::AttachedOneSection && !cfg!(target_os = "ios") {
-            log::warn!("attached-one-section requires the actual iOS game host; wgpu retained");
+        if mode.requires_ios() && !cfg!(target_os = "ios") {
+            log::warn!("attached native terrain requires the actual iOS game host; wgpu retained");
             return None;
         }
         log::info!("Helium Direct Metal selected={mode:?}; wgpu producer/fallback retained");
@@ -457,6 +467,8 @@ impl Controller {
             camera: None,
             #[cfg(target_os = "ios")]
             displayed: None,
+            #[cfg(target_os = "ios")]
+            live: (mode == Mode::LiveTerrain).then(live::Live::new),
         }
     }
     pub fn set_window(&mut self, window: Option<Arc<winit::window::Window>>) {
@@ -478,6 +490,21 @@ impl Controller {
     }
     pub fn invalidate(&mut self, reason: &str) {
         let cause = Cause::reason(reason);
+        #[cfg(target_os = "ios")]
+        if let Some(live) = &mut self.live {
+            if cause == Cause::MemoryPressure {
+                live.memory_pressure();
+            } else {
+                live.cancel(matches!(
+                    cause,
+                    Cause::Shutdown
+                        | Cause::WorldChanged
+                        | Cause::ResourceReload
+                        | Cause::RendererChanged
+                ));
+            }
+            return;
+        }
         let id = self
             .flight
             .as_ref()
@@ -510,6 +537,11 @@ impl Controller {
     /// Select at most one section from the producer's accepted batch. Mesh
     /// bytes remain borrowed until the winner is copied, before wgpu recycles them.
     pub fn sections(&mut self, renderer: &Renderer, sections: AcceptedSections<'_>) {
+        #[cfg(target_os = "ios")]
+        if let Some(live) = &mut self.live {
+            live.observe(renderer, sections);
+            return;
+        }
         if self.mode == Mode::Disabled {
             return;
         }
@@ -660,6 +692,11 @@ impl Controller {
         }
     }
     pub fn remove_columns(&mut self, columns: impl Iterator<Item = (i32, i32)>) {
+        #[cfg(target_os = "ios")]
+        if let Some(live) = &mut self.live {
+            live.remove_columns(columns);
+            return;
+        }
         for key in columns {
             #[cfg(target_os = "ios")]
             if self
@@ -690,6 +727,11 @@ impl Controller {
     /// Called after production render generates this frame's lightmap/animation
     /// state. Uses exact game view/projection/bob/spin, not a diagnostic camera.
     pub fn frame(&mut self, renderer: &Renderer, frame: &Frame<'_>) {
+        #[cfg(target_os = "ios")]
+        if let Some(live) = &mut self.live {
+            live.frame(renderer, frame, self.window.as_deref(), self.world_epoch);
+            return;
+        }
         if self.mode == Mode::Disabled {
             return;
         }

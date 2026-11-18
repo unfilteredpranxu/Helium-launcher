@@ -55,6 +55,7 @@ pub struct Display {
     completion: Option<Arc<crate::attached_protocol::Gate>>,
     layer: Retained<CAMetalLayer>,
     device: crate::upload::Id,
+    live_owner: crate::upload::Id,
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     size: (usize, usize),
     used: bool,
@@ -149,6 +150,7 @@ impl TerrainRenderer {
             completion: None,
             layer,
             device: self.upload_device,
+            live_owner: crate::upload::Id::new()?,
             pipeline,
             size,
             used: false,
@@ -165,7 +167,7 @@ impl Display {
         self.progress.counters
     }
 
-    fn encode(
+    pub(super) fn encode(
         &self,
         command: &ProtocolObject<dyn MTLCommandBuffer>,
         source: &Texture,
@@ -202,6 +204,46 @@ impl Display {
         encoder.endEncoding();
         Ok(())
     }
+    pub(super) fn live_drawable(
+        &self,
+        renderer: &TerrainRenderer,
+    ) -> Result<Option<Retained<ProtocolObject<dyn CAMetalDrawable>>>, String> {
+        if self.device != renderer.upload_device || !self.live_layout_valid() {
+            return Err("live display layout/device changed".into());
+        }
+        let Some(drawable) = self.layer.nextDrawable() else {
+            return Ok(None);
+        };
+        let target = drawable.texture();
+        if !self.live_layout_valid()
+            || target.pixelFormat() != MTLPixelFormat::BGRA8Unorm
+            || (target.width(), target.height()) != self.size
+        {
+            return Err("live drawable layout changed".into());
+        }
+        Ok(Some(drawable))
+    }
+    pub(super) fn live_owner(&self) -> crate::upload::Id {
+        self.live_owner
+    }
+    pub(super) fn live_layout_valid(&self) -> bool {
+        let size = self.layer.drawableSize();
+        size.width == self.size.0 as f64
+            && size.height == self.size.1 as f64
+            && self.layer.pixelFormat() == MTLPixelFormat::BGRA8Unorm
+    }
+    pub fn dimensions(&self) -> [usize; 2] {
+        [self.size.0, self.size.1]
+    }
+    pub(super) fn retain_for_live_command(&self, command: &ProtocolObject<dyn MTLCommandBuffer>) {
+        retain_layer_for_command(command, &self.layer);
+    }
+    pub(super) fn confirm_live(&self) {
+        if let Some(gate) = &self.completion {
+            gate.native_completed();
+        }
+    }
+
     /// One acquisition attempt, worker only. No GPU wait; nextDrawable itself may
     /// wait for the OS timeout. None means recoverable drawable unavailability.
     pub fn present<'a, S: Source + Send + Sync + 'static>(

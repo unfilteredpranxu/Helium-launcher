@@ -9,6 +9,8 @@ pub(crate) struct Gate {
     claimed: AtomicBool,
     native_confirmed: AtomicBool,
     expires: Option<std::time::Instant>,
+    live: bool,
+    revealed: AtomicBool,
 }
 impl Gate {
     pub fn new(cancel: Arc<AtomicBool>) -> Self {
@@ -18,11 +20,20 @@ impl Gate {
             claimed: AtomicBool::new(false),
             native_confirmed: AtomicBool::new(false),
             expires: None,
+            live: false,
+            revealed: AtomicBool::new(false),
         }
     }
     pub fn expiring(cancel: Arc<AtomicBool>, expires: std::time::Instant) -> Self {
         Self {
             expires: Some(expires),
+            ..Self::new(cancel)
+        }
+    }
+    #[cfg(any(target_os = "ios", test))]
+    pub fn live(cancel: Arc<AtomicBool>) -> Self {
+        Self {
+            live: true,
             ..Self::new(cancel)
         }
     }
@@ -64,6 +75,11 @@ impl Gate {
             && verified
     }
     pub fn publish(&self) -> bool {
+        if self.live {
+            return self.running()
+                && self.verification_ready()
+                && !self.revealed.swap(true, Ordering::AcqRel);
+        }
         !self.cancelled()
             && self
                 .state
@@ -71,7 +87,12 @@ impl Gate {
                 .is_ok()
     }
     pub fn published(&self) -> bool {
-        !self.cancelled() && self.state.load(Ordering::Acquire) == 5
+        !self.cancelled()
+            && if self.live {
+                self.running() && self.revealed.load(Ordering::Acquire)
+            } else {
+                self.state.load(Ordering::Acquire) == 5
+            }
     }
     pub fn running(&self) -> bool {
         self.state.load(Ordering::Acquire) == 2
@@ -92,6 +113,25 @@ mod tests {
     use super::*;
     fn gate() -> Gate {
         Gate::new(Arc::new(AtomicBool::new(false)))
+    }
+    #[test]
+    fn live_gate_cannot_publish_before_completion_or_after_retirement() {
+        let old = Gate::live(Arc::new(AtomicBool::new(false)));
+        assert!(old.start());
+        assert!(old.claim_display());
+        assert!(!old.publish());
+        old.native_completed(); // CPU simulation of the native terminal event.
+        assert!(old.publish());
+        assert!(old.running());
+        assert!(old.published());
+        assert!(!old.publish());
+        old.cancel();
+        assert!(!old.published());
+        let replacement = Gate::live(Arc::new(AtomicBool::new(false)));
+        assert!(replacement.start());
+        assert!(!replacement.publish());
+        old.native_completed();
+        assert!(!replacement.published());
     }
     #[test]
     fn simulated_submission_has_no_early_or_double_publication() {

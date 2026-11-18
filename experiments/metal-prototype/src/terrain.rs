@@ -6,7 +6,10 @@ use crate::Image;
 pub(crate) mod metal;
 pub mod validation;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-pub use metal::TerrainRenderer;
+pub use metal::{
+    TerrainRenderer,
+    live::{LiveCompletion, LiveFrame, LiveScene, LiveSection, LiveSubmission},
+};
 
 pub const STRIDE: usize = 24;
 pub const OPAQUE_LAYER: u16 = 0x8000;
