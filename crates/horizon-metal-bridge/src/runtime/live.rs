@@ -119,6 +119,116 @@ impl<T> Latest<T> {
     }
 }
 
+#[derive(Default)]
+struct Metrics {
+    completed: u64,
+    skipped: u64,
+    draws: u64,
+    uploads: u64,
+    evicted: u64,
+    peak_geometry: usize,
+    material: usize,
+    staging: usize,
+    upload_us: u64,
+    admitted_us: u64,
+    omitted_vertices: usize,
+    cpu_evictions: u64,
+    last_present_us: u64,
+    rate_hz: f64,
+    cull_us: u64,
+    encode_us: u64,
+    gpu_us: Option<u64>,
+    stalls_50: u64,
+    stalls_100: u64,
+    #[cfg(target_os = "ios")]
+    last: Option<Instant>,
+    cpu: std::collections::VecDeque<u64>,
+}
+impl Metrics {
+    #[cfg(target_os = "ios")]
+    fn record(&mut self, result: helium_metal_prototype::terrain::LiveCompletion, prepared: u64) {
+        self.completed += 1;
+        self.draws += result.draws;
+        self.encode_us = result.encode_time.as_micros() as u64;
+        self.gpu_us = result.gpu_time.map(|t| t.as_micros() as u64);
+        self.last_present_us = result.completion_latency.as_micros() as u64;
+        if self.cpu.len() == 120 {
+            self.cpu.pop_front();
+        }
+        self.cpu.push_back(prepared + self.cull_us + self.encode_us);
+        let now = Instant::now();
+        if let Some(last) = self.last.replace(now) {
+            let gap = now.duration_since(last);
+            self.stalls_50 += u64::from(gap > Duration::from_millis(50));
+            self.stalls_100 += u64::from(gap > Duration::from_millis(100));
+        }
+    }
+
+    #[cfg(target_os = "ios")]
+    fn report(
+        &self,
+        epoch: u64,
+        dropped: u64,
+        cpu_geometry: usize,
+        gpu_geometry: usize,
+        targets: usize,
+    ) {
+        log::info!(
+            "{}",
+            self.summary(epoch, dropped, cpu_geometry, gpu_geometry, targets)
+        );
+    }
+
+    fn summary(
+        &self,
+        epoch: u64,
+        dropped: u64,
+        cpu_geometry: usize,
+        gpu_geometry: usize,
+        targets: usize,
+    ) -> String {
+        let mut samples: Vec<_> = self.cpu.iter().copied().collect();
+        samples.sort_unstable();
+        let quantile = |p| {
+            samples
+                .get(samples.len().saturating_sub(1) * p / 100)
+                .copied()
+        };
+        format!(
+            "Helium S2B source=game epoch={epoch} complete={completed} skipped={skipped} replaced_requests={dropped} \
+             draws={draws} geometry_uploads={uploads} evicted={evicted} cpu_geometry={cpu_geometry} \
+             gpu_geometry={gpu_geometry} peak_gpu_geometry={peak_geometry} material={material} \
+             staging_peak={staging} targets={targets} cpu_us_p50={p50:?} p95={p95:?} p99={p99:?} \
+             admit_us={admitted_us} cull_us={cull_us} encode_us={encode_us} upload_us={upload_us} \
+             completion_us={last_present_us} gpu_us={gpu_us:?} completed_hz={rate_hz:.1} \
+             cpu_evictions={cpu_evictions} omitted_translucent_vertices={omitted_vertices} \
+             stalls_gt_50_ms={stalls_50} stalls_gt_100_ms={stalls_100}; scanout unverified",
+            completed = self.completed,
+            skipped = self.skipped,
+            draws = self.draws,
+            uploads = self.uploads,
+            evicted = self.evicted,
+            peak_geometry = self.peak_geometry,
+            material = self.material,
+            staging = self.staging,
+            p50 = quantile(50),
+            p95 = quantile(95),
+            p99 = quantile(99),
+            admitted_us = self.admitted_us,
+            cull_us = self.cull_us,
+            encode_us = self.encode_us,
+            upload_us = self.upload_us,
+            last_present_us = self.last_present_us,
+            gpu_us = self.gpu_us,
+            rate_hz = self.rate_hz,
+            cpu_evictions = self.cpu_evictions,
+            omitted_vertices = self.omitted_vertices,
+            stalls_50 = self.stalls_50,
+            stalls_100 = self.stalls_100,
+        )
+    }
+}
+
 #[cfg(target_os = "ios")]
 mod ios;
 #[cfg(target_os = "ios")]
@@ -128,6 +238,23 @@ pub(super) use ios::Live;
 mod tests {
     use super::*;
     use horizon_client_render::gfx::material_snapshot::State;
+    #[test]
+    fn telemetry_distinguishes_terminal_latency_and_unknown_gpu_time() {
+        let metrics = Metrics {
+            completed: 2,
+            cpu: (1..=100).collect(),
+            last_present_us: 27,
+            stalls_50: 1,
+            ..Metrics::default()
+        };
+        let line = metrics.summary(3, 5, 6, 7, 8);
+        assert!(line.contains("complete=2 skipped=0 replaced_requests=5"));
+        assert!(line.contains("cpu_us_p50=Some(50) p95=Some(95) p99=Some(99)"));
+        assert!(line.contains("completion_us=27 gpu_us=None"));
+        assert!(line.contains("stalls_gt_50_ms=1 stalls_gt_100_ms=0"));
+        assert!(line.contains("scanout unverified"));
+    }
+
     #[test]
     fn slow_consumer_gets_only_latest_camera_after_long_session() {
         let queue = Latest::default();

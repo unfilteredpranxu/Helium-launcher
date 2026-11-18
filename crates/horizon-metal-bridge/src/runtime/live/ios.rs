@@ -3,7 +3,6 @@ use helium_metal_prototype::{
     attached::{self, Layer, Ticket},
     terrain::{LiveFrame, LiveScene, LiveSection, LiveSubmission, TerrainRenderer},
 };
-use std::collections::VecDeque;
 
 const INPUT_INTERVAL: Duration = Duration::from_millis(16);
 const GPU_DEADLINE: Duration = Duration::from_secs(2);
@@ -311,83 +310,6 @@ impl Live {
 struct Resident {
     revision: u64,
     section: LiveSection<Generation>,
-}
-#[derive(Default)]
-struct Metrics {
-    completed: u64,
-    skipped: u64,
-    draws: u64,
-    uploads: u64,
-    evicted: u64,
-    peak_geometry: usize,
-    material: usize,
-    staging: usize,
-    upload_us: u64,
-    admitted_us: u64,
-    omitted_vertices: usize,
-    cpu_evictions: u64,
-    last_present_us: u64,
-    rate_hz: f64,
-    cull_us: u64,
-    encode_us: u64,
-    gpu_us: Option<u64>,
-    stalls_50: u64,
-    stalls_100: u64,
-    last: Option<Instant>,
-    cpu: VecDeque<u64>,
-}
-impl Metrics {
-    fn record(&mut self, result: helium_metal_prototype::terrain::LiveCompletion, prepared: u64) {
-        self.last_present_us = result.completion_latency.as_micros() as u64;
-        self.completed += 1;
-        self.draws += result.draws;
-        self.encode_us = result.encode_time.as_micros() as u64;
-        self.gpu_us = result.gpu_time.map(|t| t.as_micros() as u64);
-        if self.cpu.len() == 120 {
-            self.cpu.pop_front();
-        }
-        self.cpu.push_back(prepared + self.cull_us + self.encode_us);
-        let now = Instant::now();
-        if let Some(last) = self.last.replace(now) {
-            let gap = now.duration_since(last);
-            self.stalls_50 += u64::from(gap > Duration::from_millis(50));
-            self.stalls_100 += u64::from(gap > Duration::from_millis(100));
-        }
-    }
-    fn report(
-        &self,
-        epoch: u64,
-        dropped: u64,
-        cpu_geometry: usize,
-        gpu_geometry: usize,
-        targets: usize,
-    ) {
-        let mut samples: Vec<_> = self.cpu.iter().copied().collect();
-        samples.sort_unstable();
-        let quantile = |p| {
-            samples
-                .get(samples.len().saturating_sub(1) * p / 100)
-                .copied()
-        };
-        log::info!(
-            "Helium S2B source=game epoch={epoch} complete={} skipped={} replaced_requests={dropped} draws={} geometry_uploads={} evicted={} cpu_geometry={cpu_geometry} gpu_geometry={gpu_geometry} peak_gpu_geometry={} material={} staging_peak={} targets={targets} cpu_us_p50={:?} p95={:?} p99={:?} admit_us={} cull_us={} encode_us={} upload_us={} completion_us={} gpu_us={:?} completed_hz={:.1} cpu_evictions={} omitted_translucent_vertices={} stalls_gt_50_ms={} stalls_gt_100_ms={}; scanout unverified",
-            self.completed,
-            self.skipped,
-            self.draws,
-            self.uploads,
-            self.evicted,
-            self.peak_geometry,
-            self.material,
-            self.staging,
-            quantile(50),
-            quantile(95),
-            quantile(99),
-            self.upload_us,
-            self.gpu_us,
-            self.stalls_50,
-            self.stalls_100
-        );
-    }
 }
 
 fn run(
