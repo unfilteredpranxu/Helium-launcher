@@ -310,7 +310,7 @@ impl<S: Source + Send + Sync + 'static> Frames<S> {
                 &staging, 0, 256, 4096, MTLSize {width:16,height:16,depth:1}, &lm,0,0,MTLOrigin{x:0,y:0,z:0});
             }
             blit.endEncoding();
-            renderer.encode_terrain(
+            let draw_calls = renderer.encode_terrain(
                 &command,
                 &vertices,
                 &indices,
@@ -354,26 +354,29 @@ impl<S: Source + Send + Sync + 'static> Frames<S> {
             unsafe {
                 command.addCompletedHandler(RcBlock::as_ptr(&block));
             }
-            Ok::<_, String>(Pending {
-                command,
-                lease,
-                _resources: Resources {
-                    _vertices: vertices,
-                    _indices: indices,
-                    _uniforms: uniforms,
-                    _staging: staging,
-                    _lightmap: lm,
-                    _sprites: sprites,
-                    _pipeline: renderer.pipeline.clone(),
-                    _depth_state: if options.depth == Depth::Reversed {
-                        renderer.reversed.clone()
-                    } else {
-                        renderer.forward.clone()
+            Ok::<_, String>((
+                Pending {
+                    command,
+                    lease,
+                    _resources: Resources {
+                        _vertices: vertices,
+                        _indices: indices,
+                        _uniforms: uniforms,
+                        _staging: staging,
+                        _lightmap: lm,
+                        _sprites: sprites,
+                        _pipeline: renderer.pipeline.clone(),
+                        _depth_state: if options.depth == Depth::Reversed {
+                            renderer.reversed.clone()
+                        } else {
+                            renderer.forward.clone()
+                        },
                     },
                 },
-            })
+                draw_calls,
+            ))
         });
-        let pending = match prepared {
+        let (pending, draw_calls) = match prepared {
             Ok(p) => p,
             Err(e) => {
                 self.targets = None;
@@ -392,6 +395,7 @@ impl<S: Source + Send + Sync + 'static> Frames<S> {
         self.pending = Some(pending); // install BEFORE commit
         self.pending.as_ref().unwrap().command.commit();
         self.counters.submitted = self.counters.submitted.saturating_add(1);
+        self.counters.draw_calls = self.counters.draw_calls.saturating_add(draw_calls as u64);
         self.protocol
             .as_mut()
             .unwrap()

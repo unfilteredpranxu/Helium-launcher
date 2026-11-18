@@ -1424,7 +1424,7 @@ fn run_impl(
         Stage::DrawSubmitted,
         None,
         job.geometry.indices.len() as u64 / 3,
-        0,
+        frames.counters().draw_calls,
     );
     let mut ticket = loop {
         match frames.poll(&renderer, &material, &job.cancel) {

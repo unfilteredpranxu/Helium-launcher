@@ -19,6 +19,8 @@ pub enum Poll<G> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Counters {
     pub submitted: u64,
+    /// Indexed Metal draws in submitted frames. Adjacent triangles can share one draw.
+    pub draw_calls: u64,
     pub pending: usize,
     pub completed: u64,
     pub failed: u64,

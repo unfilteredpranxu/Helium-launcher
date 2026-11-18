@@ -682,6 +682,7 @@ fn native_512_banks_sample_high_slices_without_global_aliases() {
         }
     }
     for opaque in [false, true] {
+        let previous_draws = frames.counters().draw_calls;
         if opaque {
             indices = indices.chunks_exact(3).rev().flatten().copied().collect();
             for v in &mut vertices[20..] {
@@ -699,6 +700,8 @@ fn native_512_banks_sample_high_slices_without_global_aliases() {
                 options,
             )
             .unwrap();
+        assert_eq!(indices.len() / 3, 14);
+        assert_eq!(frames.counters().draw_calls - previous_draws, 4);
         let mut receipt = loop {
             match frames.poll(&r, &group, &a) {
                 frame::Poll::Completed(t) => break t,
@@ -737,6 +740,7 @@ fn native_512_banks_sample_high_slices_without_global_aliases() {
             }
         }
     }
+    eprintln!("Native 512-bank oracle: 14 ordered triangles rendered in 4 draws per frame");
     // New animation revision: unchanged banks retain completed textures, changed
     // bank uploads only its first layer. Mixed revisions must reject while staged.
     a.identity.revision = 2;

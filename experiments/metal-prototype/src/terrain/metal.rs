@@ -367,7 +367,7 @@ impl TerrainRenderer {
         index_count: usize,
         options: Options,
         banks: Option<(&Mesh<'_>, &[(u32, Texture)], u32)>,
-    ) -> Result<(), String> {
+    ) -> Result<usize, String> {
         let pass = MTLRenderPassDescriptor::new();
         // SAFETY: supported color attachment zero.
         let a = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
@@ -411,6 +411,7 @@ impl TerrainRenderer {
             znear: 0.,
             zfar: 1.,
         });
+        let draw_calls;
         // SAFETY: every indexed vertex, flat layer, texture and uniform range was
         // validated. Upload blit precedes reads; all resources remain retained.
         unsafe {
@@ -419,10 +420,20 @@ impl TerrainRenderer {
             encoder.setVertexTexture_atIndex(Some(&lm), 0);
             encoder.setFragmentTexture_atIndex(Some(&sprites), 0);
             if let Some((mesh, bindings, split)) = banks {
-                for (triangle, triangle_indices) in mesh.indices.chunks_exact(3).enumerate() {
-                    let global =
-                        u32::from(mesh.vertex(triangle_indices[0] as usize)?.layer & !OPAQUE_LAYER);
-                    let bank = global / split;
+                let bank_at = |index| -> Result<u32, String> {
+                    let global = u32::from(mesh.vertex(index as usize)?.layer & !OPAQUE_LAYER);
+                    Ok(global / split)
+                };
+                let mut draws = 0;
+                let mut start = 0;
+                while start < mesh.indices.len() {
+                    let bank = bank_at(mesh.indices[start])?;
+                    let mut end = start + 3;
+                    // Merge consecutive triangles only. The validated index
+                    // stream, ordering across banks and depth ties are intact.
+                    while end < mesh.indices.len() && bank_at(mesh.indices[end])? == bank {
+                        end += 3;
+                    }
                     let first = bank * split;
                     let texture = &bindings
                         .iter()
@@ -434,12 +445,15 @@ impl TerrainRenderer {
                     encoder
                         .drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
                             MTLPrimitiveType::Triangle,
-                            3,
+                            end - start,
                             MTLIndexType::UInt32,
                             &indices,
-                            triangle * 12,
+                            start * size_of::<u32>(),
                         );
+                    start = end;
+                    draws += 1;
                 }
+                draw_calls = draws;
             } else {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
                     MTLPrimitiveType::Triangle,
@@ -448,10 +462,11 @@ impl TerrainRenderer {
                     &indices,
                     0,
                 );
+                draw_calls = 1;
             }
         }
         encoder.endEncoding();
-        Ok(())
+        Ok(draw_calls)
     }
 }
 
