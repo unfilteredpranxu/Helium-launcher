@@ -1,4 +1,4 @@
-# G07-A Revision 3 — owner testing remains on hold (Prompt 12/25)
+# G07-A S1 — owner testing remains on hold (Prompt 12/25)
 
 **NO NEW OWNER IPA. No owner test is authorized yet.** Build 12001's earlier
 recommendation remains withdrawn. Do not repeat the crash or stress a real world.
@@ -17,11 +17,16 @@ The implemented shutdown contract is:
 - Background checkpoint requests do not imply extra iOS time or guarantee that
   unsaved live mutations already reached a durable handoff.
 
-One P0 blocker remains: a fatal event-loop return or guest/runtime unload can end
-execution before all live world state has been handed off. The existing process
-exit path can kill pending retirement. A controlled temporary-world subprocess
-reproduces that exposure; it is not a claim about the owner's exact crash stack.
-See [Revision 3 engineering evidence](G07-A.md).
+S1 makes a controlled game exit wait for actual retirement. Failed work keeps
+its owner and session lock. Previously admitted redo records remain recoverable
+even if the OS ends the process. Live changes that have not reached durable
+admission still depend on a successful checkpoint.
+
+One release blocker remains. LiveContainer has no verified guest lifetime
+contract that lets the game finish or report failed retirement before unload.
+A passing subprocess test covers the game's controlled exit. Physical iPad
+shutdown and scanout have yet to be tested. The test plan below remains held.
+See [engineering evidence](G07-A.md).
 
 After this hold is explicitly cleared, the acceptance plan remains ONE combined
 short session with ONE specifically qualified unsigned build:
