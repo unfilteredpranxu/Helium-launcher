@@ -23136,6 +23136,32 @@ fn leave_fullscreen_after(
     }
 }
 
+/// On macOS the native delegate and its run-loop observers must outlive the
+/// post-game pump. End event dispatch, drop application state, then drain
+/// retirement while the EventLoop still owns those native registrations.
+fn run_window_app<A: ApplicationHandler>(
+    mut app: A,
+    finish: impl FnOnce(A, std::result::Result<(), EventLoopError>) -> Result<()>,
+) -> Result<()> {
+    // The backend can fail before the first resumed callback.
+    horizon_client::save::shutdown::mark_event_thread();
+    let event_loop = event_loop()?;
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
+        let mut event_loop = event_loop;
+        runtime_exit::run(|| {
+            let result = event_loop.run_app_on_demand(&mut app);
+            finish(app, result)
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let result = event_loop.run_app(&mut app);
+        finish(app, result)
+    }
+}
+
 fn run_event_loop(mut game: Game<'_>) -> Result<()> {
     if game.options.headless {
         // No display to open winit's loop on: the game's own loop.
@@ -23145,20 +23171,18 @@ fn run_event_loop(mut game: Game<'_>) -> Result<()> {
         write_report(&game)?;
         return game.error.take().map_or(Ok(()), Err);
     }
-    let mut split = split::Split::new(game);
-    // The backend can fail before the first resumed callback.
-    horizon_client::save::shutdown::mark_event_thread();
-    let result = event_loop()?.run_app(&mut split);
-    game = split.host;
-    narrator::stop();
-    leave_fullscreen_after(&result, &mut game.settings);
-    result?;
-    horizon_client::discord_presence::stop();
-    write_report(&game)?;
-    if let Some(e) = game.error.take() {
-        return Err(e);
-    }
-    Ok(())
+    run_window_app(split::Split::new(game), |split, result| {
+        let mut game = split.host;
+        narrator::stop();
+        leave_fullscreen_after(&result, &mut game.settings);
+        result?;
+        horizon_client::discord_presence::stop();
+        write_report(&game)?;
+        if let Some(e) = game.error.take() {
+            return Err(e);
+        }
+        Ok(())
+    })
 }
 
 /// The loading screen's state while the worker loads the resources.
@@ -23964,30 +23988,30 @@ fn run_loading(
     started: Instant,
 ) -> Result<()> {
     let loading = launcher_loading(options, settings, vanilla_root, pack_error, started)?;
-    let mut app = App::Loading(Box::new(loading));
-    let result = event_loop()?.run_app(&mut app);
-    narrator::stop();
-    match &mut app {
-        // Ready: splitscreen around P1's game.
-        App::Ready(split) => leave_fullscreen_after(&result, &mut split.host.settings),
-        App::Loading(loading) => leave_fullscreen_after(&result, &mut loading.settings),
-    }
-    result?;
-    horizon_client::discord_presence::stop();
-    match app {
-        App::Ready(mut split) => {
-            write_report(&split.host)?;
-            if let Some(e) = split.host.error.take() {
-                return Err(e);
+    run_window_app(App::Loading(Box::new(loading)), |mut app, result| {
+        narrator::stop();
+        match &mut app {
+            // Ready: splitscreen around P1's game.
+            App::Ready(split) => leave_fullscreen_after(&result, &mut split.host.settings),
+            App::Loading(loading) => leave_fullscreen_after(&result, &mut loading.settings),
+        }
+        result?;
+        horizon_client::discord_presence::stop();
+        match app {
+            App::Ready(mut split) => {
+                write_report(&split.host)?;
+                if let Some(e) = split.host.error.take() {
+                    return Err(e);
+                }
+            }
+            App::Loading(loading) => {
+                if let Some(e) = loading.error {
+                    return Err(e);
+                }
             }
         }
-        App::Loading(loading) => {
-            if let Some(e) = loading.error {
-                return Err(e);
-            }
-        }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 pub use launch_api::{UsageError, exit_code};

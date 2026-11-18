@@ -70,10 +70,12 @@ declare_class!(
 
         #[method(applicationShouldTerminate:)]
         fn app_should_terminate(&self, _application: &NSApplication) -> NSApplicationTerminateReply {
-            if self.ivars().controlled_termination && self.is_running() {
-                // Cancel direct process termination. The current AppKit turn
-                // will return through winit's usual LoopExiting callback.
-                self.exit();
+            if self.ivars().controlled_termination {
+                // Cancel direct process termination during both gameplay
+                // dispatch and the caller's scoped retirement pump.
+                if self.is_running() {
+                    self.exit();
+                }
                 NSApplicationTerminateReply::NSTerminateCancel
             } else {
                 NSApplicationTerminateReply::NSTerminateNow
