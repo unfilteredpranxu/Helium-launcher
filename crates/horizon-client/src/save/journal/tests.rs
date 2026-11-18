@@ -1,5 +1,79 @@
 use super::*;
 
+const ADMISSION_CHILD: &str = "HORIZON_REDO_ADMISSION_CHILD";
+const NEW_BYTES: &[u8] = b"new synthetic redo payload";
+
+pub(super) fn pause_before_publication(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(root) = std::env::var_os(ADMISSION_CHILD)
+        && bytes == NEW_BYTES
+        && path == PathBuf::from(&root).join("fixture.dat.helium-redo-v3")
+    {
+        fs::write(PathBuf::from(root).join("admission-synced"), b"ready")?;
+        loop {
+            std::thread::park();
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "subprocess fixture invoked by killed_admission_preserves_the_last_published_version"]
+fn admission_child() {
+    let Some(root) = std::env::var_os(ADMISSION_CHILD) else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    assert!(
+        root.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("horizon-redo-fixture-")
+    );
+    let _lock = SessionLock::acquire(&root).unwrap();
+    let path = root.join("fixture.dat");
+    let _old = file(&path, b"last published version").unwrap();
+    let _new = file(&path, NEW_BYTES).unwrap();
+    panic!("admission fault-injection fixture was not reached");
+}
+
+#[test]
+fn killed_admission_preserves_the_last_published_version() {
+    let root = temporary();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "save::journal::tests::admission_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(ADMISSION_CHILD, &root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let marker = root.join("admission-synced");
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !marker.exists() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let had_lock = SessionLock::is_locked(&root);
+    let _ = child.kill();
+    child.wait().unwrap();
+    assert!(
+        marker.exists(),
+        "child did not reach the sync before publication"
+    );
+    assert!(had_lock);
+    for _ in 0..2 {
+        let _lock = SessionLock::acquire(&root).unwrap();
+        assert_eq!(
+            fs::read(root.join("fixture.dat")).unwrap(),
+            b"last published version"
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn unreadable_poi_cannot_be_acknowledged_as_an_empty_successful_handoff() {
     let root = temporary();

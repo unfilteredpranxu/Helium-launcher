@@ -49,6 +49,8 @@ fn publish_locked(path: PathBuf, bytes: &[u8]) -> Result<Ticket> {
     file.write_all(&hash)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    #[cfg(test)]
+    tests::pause_before_publication(&path, bytes)?;
     fs::rename(&temporary, &path)?;
     sync_folder(&path)?;
     Ok(Ticket { path, digest: hash })
