@@ -15,6 +15,8 @@ on:
       - 'crates/horizon-client/src/game/integrated.rs'
       - 'crates/horizon-threads/src/**'
       - 'crates/horizon-ios-launcher/**'
+      - 'third_party/winit/src/platform_impl/macos/**'
+      - 'third_party/winit/src/platform/macos.rs'
       - 'crates/horizon-client-render/src/lod.rs'
       - 'crates/horizon-client-render/src/streaming.rs'
       - 'crates/horizon-client/src/game/remote.rs'

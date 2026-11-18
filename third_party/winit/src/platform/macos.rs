@@ -428,6 +428,11 @@ pub trait EventLoopBuilderExtMacOS {
     /// ```
     fn with_default_menu(&mut self, enable: bool) -> &mut Self;
 
+    /// Return from the event loop on an AppKit termination request instead of
+    /// letting AppKit exit the process. The caller must finish its own shutdown
+    /// and return from main. Disabled by default.
+    fn with_controlled_termination(&mut self, enable: bool) -> &mut Self;
+
     /// Used to prevent the application from automatically activating when launched if
     /// another application is already active.
     ///
@@ -445,6 +450,12 @@ impl<T> EventLoopBuilderExtMacOS for EventLoopBuilder<T> {
     #[inline]
     fn with_default_menu(&mut self, enable: bool) -> &mut Self {
         self.platform_specific.default_menu = enable;
+        self
+    }
+
+    #[inline]
+    fn with_controlled_termination(&mut self, enable: bool) -> &mut Self {
+        self.platform_specific.controlled_termination = enable;
         self
     }
 

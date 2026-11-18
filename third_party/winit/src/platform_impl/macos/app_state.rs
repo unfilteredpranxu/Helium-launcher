@@ -6,7 +6,8 @@ use std::time::Instant;
 use objc2::rc::Retained;
 use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSRunningApplication,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply,
+    NSRunningApplication,
 };
 use objc2_foundation::{MainThreadMarker, NSNotification, NSObject, NSObjectProtocol};
 
@@ -22,6 +23,7 @@ use crate::window::WindowId as RootWindowId;
 pub(super) struct AppState {
     activation_policy: Option<NSApplicationActivationPolicy>,
     default_menu: bool,
+    controlled_termination: bool,
     activate_ignoring_other_apps: bool,
     run_loop: RunLoop,
     event_handler: EventHandler,
@@ -66,6 +68,18 @@ declare_class!(
             self.did_finish_launching(notification)
         }
 
+        #[method(applicationShouldTerminate:)]
+        fn app_should_terminate(&self, _application: &NSApplication) -> NSApplicationTerminateReply {
+            if self.ivars().controlled_termination && self.is_running() {
+                // Cancel direct process termination. The current AppKit turn
+                // will return through winit's usual LoopExiting callback.
+                self.exit();
+                NSApplicationTerminateReply::NSTerminateCancel
+            } else {
+                NSApplicationTerminateReply::NSTerminateNow
+            }
+        }
+
         #[method(applicationWillTerminate:)]
         fn app_will_terminate(&self, notification: &NSNotification) {
             self.will_terminate(notification)
@@ -78,11 +92,13 @@ impl ApplicationDelegate {
         mtm: MainThreadMarker,
         activation_policy: Option<NSApplicationActivationPolicy>,
         default_menu: bool,
+        controlled_termination: bool,
         activate_ignoring_other_apps: bool,
     ) -> Retained<Self> {
         let this = mtm.alloc().set_ivars(AppState {
             activation_policy,
             default_menu,
+            controlled_termination,
             activate_ignoring_other_apps,
             run_loop: RunLoop::main(mtm),
             event_handler: EventHandler::new(),

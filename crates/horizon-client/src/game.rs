@@ -23109,7 +23109,14 @@ fn event_loop() -> Result<EventLoop<()>> {
         let app = crate::ANDROID_APP.get().ok_or("no Android activity")?;
         Ok(EventLoop::builder().with_android_app(app.clone()).build()?)
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::EventLoopBuilderExtMacOS;
+        Ok(EventLoop::builder()
+            .with_controlled_termination(true)
+            .build()?)
+    }
+    #[cfg(not(any(target_os = "android", target_os = "macos")))]
     Ok(EventLoop::new()?)
 }
 
