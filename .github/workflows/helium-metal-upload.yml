@@ -138,7 +138,7 @@ jobs:
               echo "Native-only build dependencies for $target"
               dependencies="$RUNNER_TEMP/helium-upload/scene-$target.tree"
               cargo +1.95.0 tree --locked --manifest-path "$manifest" --target "$target" --edges normal,build --prefix none --format '{p}' | sort -u | tee "$dependencies"
-              if rg '^(wgpu|naga |horizon-)' "$dependencies"; then
+              if grep -E '^(wgpu|naga |horizon-)' "$dependencies"; then
                 echo "Unexpected graphics or gameplay dependency" >&2
                 exit 1
               fi
@@ -146,19 +146,21 @@ jobs:
             cargo +1.95.0 run --locked --manifest-path "$manifest" --example native_scene
             cargo +1.95.0 build --locked --manifest-path "$manifest" --target aarch64-apple-ios --release --example native_scene
             binary=experiments/metal-prototype/target/aarch64-apple-ios/release/examples/native_scene
-            xcrun lipo -verify_arch arm64 "$binary"
-            xcrun otool -hv "$binary" | tee "$RUNNER_TEMP/scene-mach-header.txt"
-            rg -q 'EXECUTE' "$RUNNER_TEMP/scene-mach-header.txt"
-            xcrun vtool -show-build "$binary" | tee "$RUNNER_TEMP/scene-build.txt"
-            rg -q 'platform IOS$' "$RUNNER_TEMP/scene-build.txt"
-            rg -q 'minos 15.0$' "$RUNNER_TEMP/scene-build.txt"
+            python3 - "$binary" <<'PY'
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, "tools/ci")
+          from ios_package import inspect_mach
+          inspect_mach(Path(sys.argv[1]), 2)
+          print("Verified thin arm64 device iOS 15.0 executable and entry point")
+          PY
             xcrun otool -L "$binary" | tee "$RUNNER_TEMP/scene-libraries.txt"
             xcrun nm -a "$binary" > "$RUNNER_TEMP/scene-symbols.txt"
-            if rg -i 'wgpu|webgpu|vulkan|/OpenGLES?\.framework|/JavaVM\.framework' "$RUNNER_TEMP/scene-symbols.txt" "$RUNNER_TEMP/scene-libraries.txt"; then
+            if grep -Ei 'wgpu|webgpu|vulkan|/OpenGLES?\.framework|/JavaVM\.framework' "$RUNNER_TEMP/scene-symbols.txt" "$RUNNER_TEMP/scene-libraries.txt"; then
               echo "Unexpected graphics runtime linkage" >&2
               exit 1
             fi
-            rg -q '_MTLCreateSystemDefaultDevice' "$RUNNER_TEMP/scene-symbols.txt"
+            grep -q '_MTLCreateSystemDefaultDevice' "$RUNNER_TEMP/scene-symbols.txt"
             shasum -a 256 "$binary"
             echo "LINKED_WGPU_DEPENDENCIES=0 NATIVE_IOS_ARM64_LINK=PASS"
           } 2>&1 | tee "$RUNNER_TEMP/helium-upload/native-scene.log"
@@ -169,7 +171,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/owner-probe"
           app="$RUNNER_TEMP/helium-probe-build/Build/Products/Release-iphoneos/HeliumMetalProbe.app"
           cargo +1.95.0 tree --locked --target aarch64-apple-ios --manifest-path experiments/metal-prototype/Cargo.toml > "$RUNNER_TEMP/owner-probe/dependencies.txt"
-          if rg '(^|[[:space:]])(horizon-|wgpu)' "$RUNNER_TEMP/owner-probe/dependencies.txt"; then exit 1; fi
+          if grep -E '(^|[[:space:]])(horizon-|wgpu)' "$RUNNER_TEMP/owner-probe/dependencies.txt"; then exit 1; fi
           python3 tools/ci/ios_package.py probe "$app" "$RUNNER_TEMP/owner-probe/Helium-S1H-Metal-Probe-unsigned.ipa" "$GITHUB_SHA" 2>&1 | tee "$RUNNER_TEMP/helium-upload/probe-package.log"
       - uses: actions/upload-artifact@v4
         if: success() && github.event_name == 'workflow_dispatch' && inputs.publish_no_world_probe && github.ref == 'refs/heads/feature/helium-g07-immutable-capture'
