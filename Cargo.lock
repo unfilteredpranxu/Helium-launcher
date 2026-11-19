@@ -1330,6 +1330,7 @@ name = "helium-metal-prototype"
 version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
+ "helium-render-scene",
  "libc",
  "objc2 0.6.5",
  "objc2-core-graphics",
@@ -1606,6 +1607,7 @@ dependencies = [
  "flate2",
  "glam",
  "half",
+ "helium-render-scene",
  "horizon-assets",
  "horizon-bench",
  "horizon-client-core",
@@ -1771,6 +1773,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helium-metal-prototype",
+ "helium-render-scene",
  "horizon-client-render",
  "horizon-core",
  "log",

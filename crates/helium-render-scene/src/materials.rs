@@ -17,7 +17,7 @@ pub struct BankDescriptor {
 /// Retains one immutable snapshot for all its banks. While alive, every bank
 /// must continue to expose the exact stored bytes and capacity reported at capture.
 pub trait BankStorage: Send + Sync {
-    fn pixels(&self, bank: usize) -> &[u8];
+    fn pixels(&self, bank: usize) -> Option<&[u8]>;
     fn retained_bytes(&self) -> usize;
 }
 
@@ -47,7 +47,9 @@ impl MaterialBank {
     }
 
     pub fn pixels(&self) -> &[u8] {
-        self.storage.pixels(self.bank as usize)
+        self.storage
+            .pixels(self.bank as usize)
+            .expect("validated immutable bank")
     }
     pub fn retained_bytes(&self) -> usize {
         self.storage.retained_bytes()
@@ -105,7 +107,7 @@ impl MaterialSet {
                 || d.allocated < used
                 || d.allocated > 512
                 || d.levels != levels
-                || storage.pixels(index).len() != bytes
+                || storage.pixels(index).map(<[u8]>::len) != Some(bytes)
             {
                 return Err("invalid scene bank layout".into());
             }

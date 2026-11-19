@@ -6,7 +6,9 @@ use crate::{
     upload::{self, Source},
 };
 use block2::RcBlock;
+use helium_render_scene::{Frame as CpuFrame, MaterialBank, Section};
 use objc2_quartz_core::CAMetalDrawable;
+use std::num::NonZeroU64;
 use std::{
     sync::{
         Arc,
@@ -23,6 +25,7 @@ const MAX_SECTION_BYTES: usize = 2 * 1024 * 1024;
 pub struct LiveSection<G> {
     owner: upload::Id,
     generation: G,
+    epoch: Option<NonZeroU64>,
     split: u32,
     sprites: u32,
     vertices: Buffer,
@@ -78,6 +81,7 @@ impl<G: Copy + Eq> LiveSection<G> {
         Ok(Self {
             owner: renderer.upload_device,
             generation: identity.generation,
+            epoch: None,
             split,
             sprites,
             vertices: upload(&renderer.device, mesh.vertices)?,
@@ -92,6 +96,30 @@ impl<G: Copy + Eq> LiveSection<G> {
     }
     pub fn bytes(&self) -> usize {
         self.payload
+    }
+}
+
+impl LiveSection<u64> {
+    pub fn from_scene<S>(
+        renderer: &TerrainRenderer,
+        section: &Section,
+        frame: &CpuFrame<S>,
+        budget: usize,
+    ) -> Result<Self, String> {
+        if !frame.accepts(section) {
+            return Err("section belongs to a different scene epoch or material generation".into());
+        }
+        let bank = frame.materials.banks()[0].description();
+        let mut resident = Self::new(
+            renderer,
+            &section.mesh(),
+            bank.identity,
+            bank.split,
+            bank.sprites,
+            budget,
+        )?;
+        resident.epoch = Some(frame.epoch);
+        Ok(resident)
     }
 }
 
@@ -177,6 +205,33 @@ impl LiveScene {
 
     pub fn bytes(&self) -> usize {
         self.size[0] * self.size[1] * 8 + LIGHT_STAGING + 1024
+    }
+
+    pub fn submit_scene<S>(
+        &mut self,
+        renderer: &TerrainRenderer,
+        material: &upload::Material<MaterialBank>,
+        display: Option<&Display>,
+        frame: &CpuFrame<S>,
+        sections: &[(&LiveSection<u64>, View)],
+        cancelled: &AtomicBool,
+    ) -> Result<LiveSubmission, String> {
+        if frame.lightmap.revision == 0
+            || sections.iter().any(|(s, _)| s.epoch != Some(frame.epoch))
+        {
+            return Err("scene draw has a stale epoch or missing lightmap revision".into());
+        }
+        self.submit(
+            renderer,
+            material,
+            display,
+            LiveFrame {
+                sections,
+                identity: frame.materials.banks()[0].description().identity,
+                lightmap: &frame.lightmap.rgba,
+            },
+            cancelled,
+        )
     }
 
     pub fn submit<S: Source<Authority = AtomicBool> + Send + Sync + 'static>(

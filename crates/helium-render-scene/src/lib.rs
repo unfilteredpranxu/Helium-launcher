@@ -125,16 +125,10 @@ pub struct Frame<S> {
     pub sections: Vec<S>,
 }
 
-impl<S: AsRef<Section>> Frame<S> {
+impl<S> Frame<S> {
     pub fn accepts(&self, section: &Section) -> bool {
         section.version.epoch == self.epoch
             && section.version.generation == self.materials.version().generation
-    }
-}
-
-impl AsRef<Section> for Section {
-    fn as_ref(&self) -> &Self {
-        self
     }
 }
 

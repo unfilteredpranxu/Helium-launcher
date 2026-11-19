@@ -13,6 +13,9 @@ crate-type = ["rlib", "staticlib"]
 # Deliberately independent of the game workspace and its lockfile.
 [workspace]
 
+[dependencies]
+helium-render-scene = { path = "../../crates/helium-render-scene" }
+
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2 = "=0.6.5"
 # Typed, owned completion block for source keepalive only; no Metal objects are moved.

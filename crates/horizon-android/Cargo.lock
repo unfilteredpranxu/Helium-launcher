@@ -1014,6 +1014,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "helium-render-scene"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "hermit-abi"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1039,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-airplay"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "objc2 0.6.5",
  "objc2-core-foundation",
@@ -1050,7 +1057,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-android"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "chrono",
  "glam",
@@ -1083,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-anticheat"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "serde",
  "toml",
@@ -1091,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-assets"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "horizon-core",
  "log",
@@ -1101,7 +1108,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-bench"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "horizon-telemetry",
  "serde",
@@ -1119,11 +1126,12 @@ dependencies = [
 
 [[package]]
 name = "horizon-client"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "ab_glyph",
  "bytemuck",
  "chrono",
+ "dunce",
  "flate2",
  "fs4",
  "glam",
@@ -1171,6 +1179,7 @@ dependencies = [
  "sha1",
  "sha2",
  "stacker",
+ "toml",
  "unicode-bidi",
  "ureq",
  "wgpu",
@@ -1181,7 +1190,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-client-core"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "horizon-world",
  "serde_json",
@@ -1189,7 +1198,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-client-input"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "arboard",
  "horizon-client-core",
@@ -1208,6 +1217,7 @@ dependencies = [
  "chrono",
  "flate2",
  "fs4",
+ "getrandom 0.3.4",
  "glam",
  "horizon-anticheat",
  "horizon-assets",
@@ -1218,6 +1228,7 @@ dependencies = [
  "horizon-client-render",
  "horizon-command",
  "horizon-core",
+ "horizon-cosmetics",
  "horizon-friends",
  "horizon-hdr",
  "horizon-items",
@@ -1258,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-client-render"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "ab_glyph",
  "base64",
@@ -1268,6 +1279,7 @@ dependencies = [
  "flate2",
  "glam",
  "half",
+ "helium-render-scene",
  "horizon-assets",
  "horizon-bench",
  "horizon-client-core",
@@ -1312,7 +1324,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-command"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "horizon-client-core",
  "horizon-core",
@@ -1322,7 +1334,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-core"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "libm",
 ]
@@ -1341,14 +1353,14 @@ dependencies = [
 
 [[package]]
 name = "horizon-dnssd"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "horizon-friends"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "chacha20poly1305",
  "getrandom 0.3.4",
@@ -1357,13 +1369,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "socket2 0.5.10",
+ "socket2",
  "spake2",
 ]
 
 [[package]]
 name = "horizon-gamecontroller"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
@@ -1373,7 +1385,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-hdr"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "ash",
  "wayland-backend",
@@ -1384,15 +1396,16 @@ dependencies = [
 
 [[package]]
 name = "horizon-ios-launcher"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
+ "core-foundation",
  "libc",
  "log",
 ]
 
 [[package]]
 name = "horizon-items"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "horizon-client-core",
  "horizon-core",
@@ -1422,7 +1435,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-mods"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "horizon-shader-api",
  "log",
@@ -1458,7 +1471,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-protocol"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "aes",
  "flate2",
@@ -1475,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-server-files"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "base64",
  "horizon-core",
@@ -1487,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-shader-api"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "bytemuck",
  "naga",
@@ -1501,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-shaders"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "half",
  "horizon-core",
@@ -1512,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-telemetry"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "getrandom 0.3.4",
  "ruzstd",
@@ -1523,11 +1536,11 @@ dependencies = [
 
 [[package]]
 name = "horizon-theme"
-version = "0.2.7"
+version = "0.2.8"
 
 [[package]]
 name = "horizon-threads"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "libc",
  "libmimalloc-sys",
@@ -1537,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-world"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "flate2",
  "horizon-core",
@@ -1681,12 +1694,12 @@ dependencies = [
 
 [[package]]
 name = "if-addrs"
-version = "0.13.4"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69b2eeee38fef3aa9b4cc5f1beea8a2444fc00e7377cafae396de3f5c2065e24"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1726,7 +1739,7 @@ version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d40460c0ce33d6ce4b0630ad68ff63d6661961c48b6dba35e5a4d81cfb48222"
 dependencies = [
- "socket2 0.6.5",
+ "socket2",
  "widestring",
  "windows-registry",
  "windows-result 0.4.1",
@@ -3238,16 +3251,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "socket2"
-version = "0.5.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
-dependencies = [
- "libc",
- "windows-sys 0.52.0",
 ]
 
 [[package]]

@@ -187,6 +187,28 @@ impl Geometry {
             indices,
         }))
     }
+    #[cfg(target_os = "ios")]
+    fn into_scene(
+        self,
+        epoch: std::num::NonZeroU64,
+    ) -> Result<helium_render_scene::Section, String> {
+        let version = helium_render_scene::SectionVersion {
+            epoch,
+            generation: self.generation.diagnostic_id(),
+            key: self.key,
+            revision: self.sequence,
+        };
+        helium_render_scene::Section::new(
+            version,
+            self.origin,
+            self.bounds,
+            self.omitted_translucent_vertices,
+            self.vertices,
+            self.indices,
+            GEOMETRY_BUDGET,
+        )
+    }
+
     fn mesh(&self) -> Mesh<'_> {
         Mesh {
             vertices: &self.vertices,
@@ -217,19 +239,11 @@ fn section_origin(key: Key, min_y: i32) -> Result<[i32; 3], String> {
     ])
 }
 fn camera_view(origin: [i32; 3], camera: [f64; 3], clip: [[f32; 4]; 4]) -> Result<View, String> {
-    let relative = std::array::from_fn(|i| (f64::from(origin[i]) - camera[i]) as f32);
-    if !camera.iter().all(|v| v.is_finite())
-        || !relative
-            .iter()
-            .chain(clip.iter().flatten())
-            .all(|v| v.is_finite())
-    {
-        return Err("invalid game camera".into());
-    }
-    Ok(View {
-        origin: relative,
+    helium_render_scene::Camera {
+        position: camera,
         clip_from_relative: clip,
-    })
+    }
+    .section_view(origin)
 }
 /// Test the eight corners of the production mesh bounds in Metal's 0..w depth
 /// range. These bounds include model overhang. Reject only if an entire bound
@@ -539,7 +553,7 @@ impl Controller {
     pub fn sections(&mut self, renderer: &Renderer, sections: AcceptedSections<'_>) {
         #[cfg(target_os = "ios")]
         if let Some(live) = &mut self.live {
-            live.observe(renderer, sections);
+            live.observe(renderer, sections, self.world_epoch);
             return;
         }
         if self.mode == Mode::Disabled {

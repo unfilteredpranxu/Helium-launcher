@@ -296,3 +296,16 @@ fn historical_payloads_can_drop_on_another_thread() {
     std::thread::spawn(move || drop(retained)).join().unwrap();
     assert_eq!(state.counters().retained_capacity, 0);
 }
+
+#[test]
+fn cpu_preparation_exports_the_original_banks_without_a_renderer() {
+    let mut state = prepared(3, 2).capture_materials(2, 3, false);
+    let old_ptr = state.snapshot().unwrap().banks()[1].pixels().as_ptr();
+    let set = state.scene_materials(1 << 20).unwrap();
+    assert_eq!(set.version().generation, state.generation().diagnostic_id());
+    assert_eq!(set.version().revision, state.animation_revision());
+    assert_eq!(set.banks()[1].pixels().as_ptr(), old_ptr);
+    state.release();
+    assert!(state.scene_materials(1 << 20).is_err());
+    assert_eq!(set.banks()[1].pixels()[0], 2);
+}

@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 [dependencies]
+helium-render-scene = { path = "../helium-render-scene" }
 horizon-client-render = { path = "../horizon-client-render", default-features = false }
 helium-metal-prototype = { path = "../../experiments/metal-prototype" }
 bytemuck = "1.24"

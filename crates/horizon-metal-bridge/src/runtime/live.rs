@@ -1,5 +1,6 @@
 //! A bounded view of accepted near terrain and a latest-only frame handoff.
 use super::*;
+use helium_render_scene::Section;
 use std::{collections::BTreeMap, sync::atomic::AtomicUsize};
 
 const MIB: usize = 1024 * 1024;
@@ -11,7 +12,7 @@ const CPU_LIMIT: usize = 16 * MIB;
 const ADMIT_BYTES: usize = 2 * MIB;
 
 struct PinnedGeometry {
-    mesh: Geometry,
+    mesh: Section,
     bytes: usize,
     retained: Arc<AtomicUsize>,
 }
@@ -38,8 +39,8 @@ impl Meshes {
         self.entries.clear();
         self.bytes = 0;
     }
-    fn admit(&mut self, mesh: Geometry, camera: [f64; 3]) -> bool {
-        self.remove(mesh.key);
+    fn admit(&mut self, mesh: Section, camera: [f64; 3]) -> bool {
+        self.remove(mesh.version.key);
         let bytes = mesh.retained_bytes();
         if self.retained.load(Ordering::Acquire) + bytes > CPU_LIMIT {
             return false;
@@ -67,7 +68,7 @@ impl Meshes {
         self.retained.fetch_add(bytes, Ordering::AcqRel);
         self.bytes += bytes;
         self.entries.insert(
-            mesh.key,
+            mesh.version.key,
             Arc::new(PinnedGeometry {
                 mesh,
                 bytes,
@@ -237,7 +238,6 @@ pub(super) use ios::Live;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horizon_client_render::gfx::material_snapshot::State;
     #[test]
     fn telemetry_distinguishes_terminal_latency_and_unknown_gpu_time() {
         let metrics = Metrics {
@@ -269,18 +269,25 @@ mod tests {
         assert!(queue.offer(10_001));
     }
 
-    fn fixture(key: Key, sequence: u64, bytes: usize) -> Geometry {
-        Geometry {
-            key,
-            origin: [key.0 * 16, key.1 * 16, key.2 * 16],
-            generation: State::new().generation(),
-            sequence,
-            bounds: [[0.; 3]; 2],
-            preparation_us: 0,
-            omitted_translucent_vertices: 0,
-            vertices: vec![0; bytes],
-            indices: vec![],
-        }
+    fn fixture(key: Key, sequence: u64, bytes: usize) -> Section {
+        // Byte-budget fixture only. It never submits geometry to the GPU.
+        let mut vertices = Vec::with_capacity(bytes);
+        vertices.resize(bytes / 24 * 24, 0);
+        Section::new(
+            helium_render_scene::SectionVersion {
+                epoch: std::num::NonZeroU64::MIN,
+                generation: 1,
+                key,
+                revision: sequence,
+            },
+            [key.0 * 16, key.1 * 16, key.2 * 16],
+            [[0.; 3]; 2],
+            0,
+            vertices,
+            vec![],
+            bytes,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -298,7 +305,10 @@ mod tests {
         let second = meshes.entries[&(0, 0, 0)].clone();
         assert!(!meshes.admit(fixture((0, 0, 0), 9, 2 * MIB), [0.; 3]));
         assert!(!meshes.entries.contains_key(&(0, 0, 0)));
-        assert_eq!((first.mesh.sequence, second.mesh.sequence), (7, 8));
+        assert_eq!(
+            (first.mesh.version.revision, second.mesh.version.revision),
+            (7, 8)
+        );
         meshes.clear();
         assert_eq!(meshes.retained.load(Ordering::Acquire), CPU_LIMIT);
         drop((first, second, old));

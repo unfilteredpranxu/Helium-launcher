@@ -92,6 +92,16 @@ impl Snapshot {
         &self.banks
     }
 }
+impl helium_render_scene::BankStorage for Snapshot {
+    fn pixels(&self, bank: usize) -> Option<&[u8]> {
+        self.banks.get(bank).map(Bank::pixels)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+}
+
 /// Renderer-owned lifecycle. No texture retention unless explicitly requested.
 /// Mutating this state requires exclusive renderer access; no frame-path locks.
 pub struct State {
@@ -153,6 +163,38 @@ impl State {
         }
         Ok(snapshot)
     }
+    /// Capture the same immutable banks for a CPU scene without requiring a
+    /// device, queue, or renderer. Existing strict tickets remain separate.
+    pub fn scene_materials(
+        &self,
+        budget: usize,
+    ) -> Result<helium_render_scene::MaterialSet, String> {
+        use helium_render_scene::{BankDescriptor, MaterialSet, MaterialVersion};
+        let snapshot = self.snapshot().map_err(str::to_owned)?;
+        self.current(snapshot).map_err(str::to_owned)?;
+        let descriptors: Vec<_> = snapshot
+            .banks()
+            .iter()
+            .map(|bank| BankDescriptor {
+                used: bank.used(),
+                allocated: bank.allocated(),
+                levels: bank.levels(),
+            })
+            .collect();
+        MaterialSet::new(
+            MaterialVersion {
+                generation: snapshot.generation().diagnostic_id(),
+                revision: snapshot.revision(),
+            },
+            snapshot.size(),
+            snapshot.split(),
+            snapshot.sprites(),
+            &descriptors,
+            snapshot.clone(),
+            budget,
+        )
+    }
+
     pub fn animation_revision(&self) -> u64 {
         self.animation_revision
     }

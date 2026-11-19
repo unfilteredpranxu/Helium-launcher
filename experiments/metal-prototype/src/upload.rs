@@ -87,6 +87,53 @@ pub trait Source {
     }
     fn check_current(&self, authority: &Self::Authority) -> Result<(), String>;
 }
+/// A frame owns one exact immutable CPU material revision. The live scene
+/// validates that revision before consuming residency. Cancellation still
+/// revokes the worker and its pending receipts.
+impl Source for helium_render_scene::MaterialBank {
+    type Generation = u64;
+    type Authority = std::sync::atomic::AtomicBool;
+
+    fn description(&self) -> Description<u64> {
+        let (size, split, sprites) = self.dimensions();
+        let d = self.descriptor();
+        let version = self.version();
+        Description {
+            version: BANKED_VERSION,
+            identity: Identity {
+                generation: version.generation,
+                revision: version.revision,
+            },
+            bank: self.index(),
+            split,
+            sprites,
+            size,
+            used: d.used,
+            allocated: d.allocated,
+            levels: d.levels,
+            format: material::Format::Rgba8Unorm,
+            layout: Layout::LayerMajorMipMajor,
+        }
+    }
+
+    fn pixels(&self) -> &[u8] {
+        self.pixels()
+    }
+    fn retained_bytes(&self) -> usize {
+        self.retained_bytes()
+    }
+    fn retention_key(&self) -> Option<(usize, usize)> {
+        Some((self.storage_id(), 0))
+    }
+    fn check_current(&self, cancel: &Self::Authority) -> Result<(), String> {
+        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            Err("live scene material lease revoked".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Budget {
     pub payload_bytes: usize,

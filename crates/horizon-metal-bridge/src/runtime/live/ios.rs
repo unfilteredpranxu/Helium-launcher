@@ -1,7 +1,7 @@
 use super::*;
 use helium_metal_prototype::{
     attached::{self, Layer, Ticket},
-    terrain::{LiveFrame, LiveScene, LiveSection, LiveSubmission, TerrainRenderer},
+    terrain::{LiveScene, LiveSection, LiveSubmission, TerrainRenderer},
 };
 
 const INPUT_INTERVAL: Duration = Duration::from_millis(16);
@@ -13,40 +13,11 @@ const MATERIAL_BUDGET: upload::Budget = upload::Budget {
 const GPU_GEOMETRY: usize = 16 * MIB;
 const MAX_DRAWS: usize = 4096;
 
-#[derive(Clone)]
-struct Bank(BankSource);
-impl Source for Bank {
-    type Generation = Generation;
-    type Authority = AtomicBool;
-    fn description(&self) -> upload::Description<Generation> {
-        let mut description = self.0.description();
-        description.version = upload::BANKED_VERSION;
-        description
-    }
-    fn pixels(&self) -> &[u8] {
-        self.0.pixels()
-    }
-    fn retained_bytes(&self) -> usize {
-        self.0.retained_bytes()
-    }
-    fn retention_key(&self) -> Option<(usize, usize)> {
-        self.0.retention_key()
-    }
-    fn check_current(&self, cancel: &AtomicBool) -> Result<(), String> {
-        if cancel.load(Ordering::Acquire) {
-            Err("live session revoked".into())
-        } else {
-            Ok(())
-        }
-    }
-}
+use helium_render_scene::{Camera, Frame as CpuFrame, Lightmap, MaterialSet, MaterialVersion};
+use std::num::NonZeroU64;
 
 struct Request {
-    camera: [f64; 3],
-    clip: [[f32; 4]; 4],
-    meshes: Vec<Arc<PinnedGeometry>>,
-    banks: Arc<Vec<Bank>>,
-    light: [u8; 1024],
+    scene: CpuFrame<Arc<PinnedGeometry>>,
     prepared_us: u64,
     admitted_us: u64,
     omitted_vertices: usize,
@@ -63,7 +34,7 @@ pub(in crate::runtime) struct Live {
     meshes: Meshes,
     camera: [f64; 3],
     generation: Option<Generation>,
-    banks: Option<Arc<Vec<Bank>>>,
+    banks: Option<Arc<MaterialSet>>,
     session: Option<Session>,
     next_start: Instant,
     pressure_until: Instant,
@@ -120,7 +91,10 @@ impl Live {
             self.generation = Some(generation);
         }
     }
-    pub fn observe(&mut self, renderer: &Renderer, sections: AcceptedSections<'_>) {
+    pub fn observe(&mut self, renderer: &Renderer, sections: AcceptedSections<'_>, epoch: u64) {
+        let Some(epoch) = NonZeroU64::new(epoch) else {
+            return;
+        };
         let start = Instant::now();
         let state = renderer.material_state();
         self.generation(state.generation());
@@ -163,6 +137,7 @@ impl Live {
             budget -= bytes;
             if let Ok(Some(geometry)) =
                 Geometry::capture(key, min_y, mesh, state.generation(), version, layers)
+                    .and_then(|captured| captured.map(|g| g.into_scene(epoch)).transpose())
             {
                 self.meshes.admit(geometry, self.camera);
             }
@@ -215,30 +190,19 @@ impl Live {
             self.cancel(false);
             return;
         }
-        let Ok(snapshot) = state.snapshot() else {
-            self.cancel(false);
+        let Ok(light_revision) = state.light_revision() else {
             return;
         };
-        let id = upload::Identity {
-            generation: state.generation(),
+        let version = MaterialVersion {
+            generation: state.generation().diagnostic_id(),
             revision: state.animation_revision(),
         };
-        if self
-            .banks
-            .as_ref()
-            .is_none_or(|b| b[0].description().identity != id)
-        {
-            let sources = Binding::new(renderer).and_then(|binding| {
-                (0..snapshot.banks().len())
-                    .map(|bank| binding.upload_source(renderer, bank as u32).map(Bank))
-                    .collect::<Result<Vec<_>, _>>()
-            });
-            match sources {
-                Ok(banks) if !banks.is_empty() && banks.len() <= 8 => {
-                    self.banks = Some(Arc::new(banks))
-                }
-                _ => {
+        if self.banks.as_ref().is_none_or(|b| b.version() != version) {
+            match state.scene_materials(SNAPSHOT_BUDGET) {
+                Ok(banks) => self.banks = Some(Arc::new(banks)),
+                Err(err) => {
                     self.cancel(false);
+                    log::debug!("Helium live scene unavailable: {err}");
                     return;
                 }
             }
@@ -286,11 +250,19 @@ impl Live {
             .view_proj(frame.bob * frame.spin)
             .to_cols_array_2d();
         let request = Request {
-            camera: self.camera,
-            clip,
-            meshes: self.meshes.entries.values().cloned().collect(),
-            banks: self.banks.as_ref().unwrap().clone(),
-            light: renderer.lightmap_pixels,
+            scene: CpuFrame {
+                epoch: NonZeroU64::new(epoch).unwrap(), // checked before a worker can start
+                camera: Camera {
+                    position: self.camera,
+                    clip_from_relative: clip,
+                },
+                sections: self.meshes.entries.values().cloned().collect(),
+                materials: self.banks.as_ref().unwrap().clone(),
+                lightmap: Lightmap {
+                    revision: light_revision,
+                    rgba: renderer.lightmap_pixels,
+                },
+            },
             prepared_us: start.elapsed().as_micros() as u64,
             admitted_us: self.admitted_us,
             omitted_vertices: self
@@ -309,7 +281,7 @@ impl Live {
 
 struct Resident {
     revision: u64,
-    section: LiveSection<Generation>,
+    section: LiveSection<u64>,
 }
 
 fn run(
@@ -339,29 +311,37 @@ fn run(
         if cancel.load(Ordering::Acquire) {
             break;
         }
+        let frame = &request.scene;
+        if frame.epoch.get() != epoch {
+            return Err("live scene belongs to another world epoch".into());
+        }
         let started = Instant::now();
         metrics.admitted_us = request.admitted_us;
         metrics.omitted_vertices = request.omitted_vertices;
         metrics.cpu_evictions = request.cpu_evictions;
         let previous = resident.len();
         resident.retain(|key, value| {
-            request
-                .meshes
-                .iter()
-                .any(|entry| entry.mesh.key == *key && entry.mesh.sequence == value.revision)
+            frame.sections.iter().any(|entry| {
+                frame.accepts(&entry.mesh)
+                    && entry.mesh.version.key == *key
+                    && entry.mesh.version.revision == value.revision
+            })
         });
         metrics.evicted += (previous - resident.len()) as u64;
-        let mut visible: Vec<_> = request
-            .meshes
+        let mut visible: Vec<_> = frame
+            .sections
             .iter()
             .filter_map(|entry| {
-                let view = camera_view(entry.mesh.origin, request.camera, request.clip).ok()?;
+                if !frame.accepts(&entry.mesh) {
+                    return None;
+                }
+                let view = frame.camera.section_view(entry.mesh.origin).ok()?;
                 bounds_visible(view, entry.mesh.bounds).then(|| (entry, view))
             })
             .collect();
         visible.sort_unstable_by(|a, b| {
-            distance(a.0.mesh.origin, request.camera)
-                .total_cmp(&distance(b.0.mesh.origin, request.camera))
+            distance(a.0.mesh.origin, frame.camera.position)
+                .total_cmp(&distance(b.0.mesh.origin, frame.camera.position))
         });
         metrics.cull_us = started.elapsed().as_micros() as u64;
         if visible.is_empty() {
@@ -372,13 +352,12 @@ fn run(
             continue;
         }
 
-        let namespace = request.banks[0].description();
+        let banks = frame.materials.banks();
         if material.is_none() {
-            material =
-                Some(renderer.create_material_set(&request.banks, cancel, MATERIAL_BUDGET)?);
+            material = Some(renderer.create_material_set(banks, cancel, MATERIAL_BUDGET)?);
         }
         let material = material.as_mut().unwrap();
-        for bank in request.banks.iter() {
+        for bank in banks {
             let d = bank.description();
             let target = material.bank_mut(d.bank)?;
             if target.phase() == upload::Phase::Completed
@@ -413,31 +392,35 @@ fn run(
         let mut live_bytes: usize = resident.values().map(|r| r.section.bytes()).sum();
         for (entry, _) in &visible {
             let g = &entry.mesh;
-            if resident.contains_key(&g.key) {
+            if resident.contains_key(&g.version.key) {
                 continue;
             }
             let estimated =
-                g.retained_bytes() + g.indices.len() / 3 * size_of::<(usize, usize, u32)>();
+                g.retained_bytes() + g.mesh().indices.len() / 3 * size_of::<(usize, usize, u32)>();
             if estimated > budget {
                 continue;
             }
             if live_bytes + estimated > GPU_GEOMETRY {
                 // Evict out-of-view or strictly farther buffers, never the valid
                 // near sections that can render while this request catches up.
-                let far = request
-                    .meshes
+                let far = frame
+                    .sections
                     .iter()
-                    .filter(|mesh| resident.contains_key(&mesh.mesh.key))
+                    .filter(|mesh| resident.contains_key(&mesh.mesh.version.key))
                     .filter(|mesh| {
-                        distance(mesh.mesh.origin, request.camera)
-                            > distance(g.origin, request.camera)
+                        distance(mesh.mesh.origin, frame.camera.position)
+                            > distance(g.origin, frame.camera.position)
                     })
                     .max_by(|a, b| {
-                        distance(a.mesh.origin, request.camera)
-                            .total_cmp(&distance(b.mesh.origin, request.camera))
+                        distance(a.mesh.origin, frame.camera.position)
+                            .total_cmp(&distance(b.mesh.origin, frame.camera.position))
                     });
                 if let Some(far) = far {
-                    live_bytes -= resident.remove(&far.mesh.key).unwrap().section.bytes();
+                    live_bytes -= resident
+                        .remove(&far.mesh.version.key)
+                        .unwrap()
+                        .section
+                        .bytes();
                     metrics.evicted += 1;
                 }
             }
@@ -445,19 +428,12 @@ fn run(
                 continue;
             }
             budget -= estimated;
-            let section = LiveSection::new(
-                &renderer,
-                &g.mesh(),
-                namespace.identity,
-                namespace.split,
-                namespace.sprites,
-                estimated,
-            )?;
+            let section = LiveSection::from_scene(&renderer, g, frame, estimated)?;
             live_bytes += section.bytes();
             resident.insert(
-                g.key,
+                g.version.key,
                 Resident {
-                    revision: g.sequence,
+                    revision: g.version.revision,
                     section,
                 },
             );
@@ -468,7 +444,7 @@ fn run(
         let draw: Vec<_> = visible
             .iter()
             .filter_map(|(g, view)| {
-                let section = &resident.get(&g.mesh.key)?.section;
+                let section = &resident.get(&g.mesh.version.key)?.section;
                 remaining_draws = remaining_draws.checked_sub(section.draw_count())?;
                 Some((section, *view))
             })
@@ -480,12 +456,7 @@ fn run(
             }
             continue;
         }
-        let scene_frame = LiveFrame {
-            sections: &draw,
-            identity: namespace.identity,
-            lightmap: &request.light,
-        };
-        match scene.submit(&renderer, material, Some(&display), scene_frame, cancel)? {
+        match scene.submit_scene(&renderer, material, Some(&display), frame, &draw, cancel)? {
             LiveSubmission::Submitted => {
                 let deadline = Instant::now() + GPU_DEADLINE;
                 loop {

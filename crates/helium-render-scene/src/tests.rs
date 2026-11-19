@@ -2,8 +2,8 @@ use super::*;
 
 struct Pixels(Vec<Vec<u8>>);
 impl BankStorage for Pixels {
-    fn pixels(&self, bank: usize) -> &[u8] {
-        &self.0[bank]
+    fn pixels(&self, bank: usize) -> Option<&[u8]> {
+        self.0.get(bank).map(Vec::as_slice)
     }
     fn retained_bytes(&self) -> usize {
         self.0.iter().map(Vec::capacity).sum()
