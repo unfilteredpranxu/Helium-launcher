@@ -1340,6 +1340,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "helium-render-scene"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "hermit-abi"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
