@@ -4,6 +4,8 @@ on:
     branches: [feature/helium-g05-metal-upload, feature/helium-g05-async-upload, feature/helium-g05-async-draw, feature/helium-g05-metal-presentation, feature/helium-g06-real-world-metal, feature/helium-g06-production-banks, feature/helium-g06-attached-game, feature/helium-g06d-one-build-diagnostics, feature/helium-g07-immutable-capture]
     paths:
       - 'crates/horizon-metal-bridge/**'
+      - 'crates/helium-render-scene/**'
+      - 'crates/horizon-client-render/src/gfx/material_snapshot.rs'
       - 'crates/horizon-client/src/game.rs'
       - 'crates/horizon-client/src/game/**'
       - 'crates/horizon-client/tests/generation_saves.rs'
@@ -126,6 +128,40 @@ jobs:
           cargo +1.95.0 test --locked --manifest-path experiments/metal-prototype/Cargo.toml \
             -- --ignored --nocapture --test-threads=1 \
             2>&1 | tee "$RUNNER_TEMP/helium-upload/native-runtime.log"
+      - name: Run the standalone native scene and audit the iOS executable
+        run: |
+          set -euo pipefail
+          manifest=experiments/metal-prototype/Cargo.toml
+          host=$(rustc +1.95.0 -vV | sed -n 's/^host: //p')
+          {
+            for target in "$host" aarch64-apple-ios; do
+              echo "Native-only build dependencies for $target"
+              dependencies="$RUNNER_TEMP/helium-upload/scene-$target.tree"
+              cargo +1.95.0 tree --locked --manifest-path "$manifest" --target "$target" --edges normal,build --prefix none --format '{p}' | sort -u | tee "$dependencies"
+              if rg '^(wgpu|naga |horizon-)' "$dependencies"; then
+                echo "Unexpected graphics or gameplay dependency" >&2
+                exit 1
+              fi
+            done
+            cargo +1.95.0 run --locked --manifest-path "$manifest" --example native_scene
+            cargo +1.95.0 build --locked --manifest-path "$manifest" --target aarch64-apple-ios --release --example native_scene
+            binary=experiments/metal-prototype/target/aarch64-apple-ios/release/examples/native_scene
+            xcrun lipo -verify_arch arm64 "$binary"
+            xcrun otool -hv "$binary" | tee "$RUNNER_TEMP/scene-mach-header.txt"
+            rg -q 'EXECUTE' "$RUNNER_TEMP/scene-mach-header.txt"
+            xcrun vtool -show-build "$binary" | tee "$RUNNER_TEMP/scene-build.txt"
+            rg -q 'platform IOS$' "$RUNNER_TEMP/scene-build.txt"
+            rg -q 'minos 15.0$' "$RUNNER_TEMP/scene-build.txt"
+            xcrun otool -L "$binary" | tee "$RUNNER_TEMP/scene-libraries.txt"
+            xcrun nm -a "$binary" > "$RUNNER_TEMP/scene-symbols.txt"
+            if rg -i 'wgpu|webgpu|vulkan|/OpenGLES?\.framework|/JavaVM\.framework' "$RUNNER_TEMP/scene-symbols.txt" "$RUNNER_TEMP/scene-libraries.txt"; then
+              echo "Unexpected graphics runtime linkage" >&2
+              exit 1
+            fi
+            rg -q '_MTLCreateSystemDefaultDevice' "$RUNNER_TEMP/scene-symbols.txt"
+            shasum -a 256 "$binary"
+            echo "LINKED_WGPU_DEPENDENCIES=0 NATIVE_IOS_ARM64_LINK=PASS"
+          } 2>&1 | tee "$RUNNER_TEMP/helium-upload/native-scene.log"
       - name: Verify final unsigned no-world probe IPA
         if: github.ref == 'refs/heads/feature/helium-g07-immutable-capture'
         run: |
@@ -161,7 +197,7 @@ jobs:
           script: |
             const fs = require('fs');
             const path = require('path');
-            const names = ['toolchain.log', 'macos-tests.log', 'ios-check.log', 'msl.log', 'swift-host.log', 'native-runtime.log', 'probe-package.log'];
+            const names = ['toolchain.log', 'macos-tests.log', 'ios-check.log', 'msl.log', 'swift-host.log', 'native-runtime.log', 'native-scene.log', 'probe-package.log'];
             const sections = names.map(name => {
               const file = path.join(process.env.RUNNER_TEMP, 'helium-upload', name);
               const data = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : 'NOT RUN / no log';
@@ -399,6 +435,7 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s tests -p 'test_helium_ios_package.py'
           cargo +1.95.0 test --locked --manifest-path experiments/metal-prototype/Cargo.toml
+          cargo +1.95.0 test --locked -p helium-render-scene
           cargo +1.95.0 test --locked -p horizon-metal-bridge
           cargo +1.95.0 test --locked -p horizon-client-render --lib mesher::
           cargo +1.95.0 test --locked -p horizon-client-render --lib gfx::animate:: -- --test-threads=2
