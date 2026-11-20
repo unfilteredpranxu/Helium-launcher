@@ -98,7 +98,18 @@ On an Apple runner, generate the Xcode project with `xcodegen generate` from `pa
 - The real Linux `horizon-client` binary returned exit status 1 in a temporary, empty game directory for `HELIUM_DIRECT_METAL=native-gameplay`, with the explicit isolated iOS host error. The native mode cannot silently start the Linux compatibility renderer.
 - Apple SDK job `136324480223` passed with Xcode 26.6 and the iPhoneOS 26.5 SDK. The regular prototype suite passed 89 tests and 2 integration tests. A separate ignored-GPU invocation executed all 11 GPU tests successfully, including the new translucent depth/blend readback. The S2B synthetic 120-frame run completed four detached presentations with 0.320 ms median encode and 1.123 ms median GPU command time. The S2C synthetic executable completed 12 frames and four detached presentations and passed the ARM64 wgpu-free Mach-O audit. The separate production bridge job passed 26 tests and explicitly ran the ignored production-format Metal worker test. The prepared-resource regression remained ignored.
 - Swift/C/Rust recorder round-trip and UIKit compile passed in job `136324480291`. The Linux shutdown summary logged 93 save, 26 player, 4 integrated shutdown, 2 save coordinator, and 2 runtime exit passes. macOS passed the same counts and a three-test launcher-retirement suite. The shutdown tests used temporary directories and controlled child processes.
-- The ARM64 release link and package verification job is still running at this checkpoint. [iOS game link job 136330528669](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44746911766/job/136330528669)
+- All seven execution jobs passed on code SHA `ee903d618e9e4bec1fa98baf3e270ae9e7744e8c`. Linux diagnostics, both Linux and macOS save/replay jobs, the Apple SDK job, production bridge checks, Swift/UIKit diagnostics, and the final ARM64 game link all succeeded. [Workflow 44746911766](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44746911766)
+
+The ARM64 job verified the real Rust game executable in the real UIKit bundle, device iOS 15.0 minimum, the native gameplay selector and Swift attachment exports, and the temporary archive. CI published evidence logs and removed the game archive. The owner-IPA step was skipped. [iOS game link and package verification job 136330528669](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44746911766/job/136330528669)
+
+| CI-only game package evidence | Value |
+| --- | --- |
+| Bundle and build | `dev.helium.g06ctest`, build `12001` |
+| Game executable bytes | 84,228,512 |
+| Game executable SHA-256 | `0317655091b650620008fdeb4694d9d7bf71ac864f322677d804140507f08ab1` |
+| Swift launcher framework SHA-256 | `61785d185a165c50352dc038293e835c6b45831eb3e3eba6df60db2d07947477` |
+| Temporary `held.ipa` SHA-256 | `323a2b9fa06d227c9ed826bd8bfd9647f081c1fd098ece033f7a24c6977a091d` |
+| Signing | Unsigned or linker-only ad-hoc; no distribution signature or provisioning profile |
 
 The initial S2D run caught a changed loader signature used by legacy test callers. The next source commit restored the original wrapper and kept native-specific loading at its dedicated call site. [Initial S2D run](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44745414103)
 
