@@ -199,6 +199,7 @@ impl Game<'_> {
                 "launcher-state" => {
                     let state = json!({
                         "phase": if self.title.is_some() { "title" } else { "world" },
+                        "native_terrain_gameplay": self.options.native_gameplay,
                         "screen": self.screen_name(),
                         "player": self.options.player_name(),
                         "version": horizon_core::version::VERSION_ID,
@@ -214,6 +215,22 @@ impl Game<'_> {
                 "launcher-start" => request.answer(r#"{"ok":true}"#),
                 "launcher-session" => session_request(request),
                 "launcher-world" => self.launcher_world(request),
+                "native-terrain-save-quit" if self.options.native_gameplay => {
+                    let result = if self.player.is_some() && self.title.is_none() {
+                        self.begin_closing_save(false)
+                    } else {
+                        Err("no active world to save".into())
+                    };
+                    match result {
+                        Ok(()) => {
+                            self.native_return_to_launcher = true;
+                            request.answer(r#"{"phase":"saving"}"#);
+                        }
+                        Err(error) => {
+                            request.answer(&json!({"error": error.to_string()}).to_string())
+                        }
+                    }
+                }
                 _ => {
                     let (reply, answers) = mpsc::channel();
                     let line = request.line.clone();
@@ -412,7 +429,7 @@ impl Loading {
                     request.answer(r#"{"ok":true}"#);
                 }
                 "launcher-state" => {
-                    let state = if horizon_ios_launcher::waiting() {
+                    let mut state = if horizon_ios_launcher::waiting() {
                         json!({ "phase": "waiting", "import": import_state() })
                     } else if self.importing() {
                         json!({ "phase": "needs_files", "reason": self.import_reason(), "import": import_state() })
@@ -423,6 +440,8 @@ impl Loading {
                             "import": import_state(),
                         })
                     };
+                    state["native_terrain_gameplay"] =
+                        json!(self.options.as_ref().is_some_and(|o| o.native_gameplay));
                     request.answer(&state.to_string());
                 }
                 "download-state" => request.answer(&self.download_state().to_string()),

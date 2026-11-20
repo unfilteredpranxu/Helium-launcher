@@ -256,6 +256,8 @@ mod native_entity_refs;
 mod native_explosions;
 mod native_falling;
 mod native_fluid_render;
+#[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
+mod native_gameplay;
 mod native_hooks;
 mod native_host_bridge;
 mod native_inventories;
@@ -551,6 +553,8 @@ struct Options {
     /// `--resources` was given: the game files are where someone said, and a run without them fails
     /// rather than downloading any (game/import_screen.rs).
     resources_given: bool,
+    /// Direct Metal owns the iOS scene. Never construct a reference graphics surface.
+    native_gameplay: bool,
     distance: i32,
     distance_override: Option<i32>,
     seed: i64,
@@ -756,6 +760,7 @@ impl Options {
             control: None,
             offscreen: false,
             resources_given: false,
+            native_gameplay: false,
             headless: false,
             window_size: [1280, 720],
             spikes: std::env::var("HORIZON_SPIKES")
@@ -2580,6 +2585,7 @@ struct Game<'a> {
     rest_loader: Option<WorldRestLoader>,
     pending_entry: Option<PendingWorldEntry>,
     quit_to_launcher: bool,
+    native_return_to_launcher: bool,
     /// `DebugEntryChunkGeneration`'s `lastPos` and `result`: F3's `Density` line is sampled
     /// again only when the feet block (or the dimension) changes.
     debug_density: RefCell<debug_keys::DensityCache>,
@@ -2606,6 +2612,8 @@ struct Game<'a> {
     /// Single player's server while it loads its world (`Minecraft.doWorldLoad`).
     integrated_starting: Option<integrated::Starting>,
     world_renderer_ready: bool,
+    #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
+    native_terrain: Option<horizon_client::gfx::NativeTerrainMaterials>,
     collision: &'a BlockCollisionRegistry<'a>,
     motion: &'a MotionResources,
     /// This world's frozen damage definitions and reloadable tag snapshot.
@@ -17004,6 +17012,15 @@ impl Game<'_> {
             .renderer
             .as_ref()
             .map(|r| [r.config.width, r.config.height])
+            .or_else(|| {
+                self.window
+                    .as_ref()
+                    .filter(|_| self.options.native_gameplay)
+                    .map(|window| {
+                        let size = window.inner_size();
+                        [size.width, size.height]
+                    })
+            })
         else {
             return Ok(false);
         };
@@ -17121,6 +17138,12 @@ impl Game<'_> {
             sky.sky_light_factor = 1.0;
         }
         pr.lap("pr_environment");
+        #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
+        if self.options.native_gameplay {
+            self.render_native_terrain(view, &sky, size, alpha as f32, camera_alpha as f32)?;
+            // Completion is asynchronous. Never increment reference frame counters.
+            return Ok(false);
+        }
         // FishingHookRenderer's line, then DebugRenderer: chunk borders and
         // hitboxes (F3+G, F3+B).
         let mut lines = self.fishing_line(alpha, size);
@@ -18480,6 +18503,11 @@ impl Game<'_> {
                     .streaming
                     .update_and_observe(&mut self.world, |sections, removed| {
                         native.remove_columns(removed.iter().map(|c| (c.x, c.z)));
+                        #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
+                        if let Some(materials) = self.native_terrain.as_ref() {
+                            native.native_sections(materials, sections);
+                            return;
+                        }
                         if let Some(renderer) = self.renderer.as_ref() {
                             native.sections(renderer, sections);
                         }
@@ -18682,6 +18710,9 @@ impl Game<'_> {
                     renderer.upload_lods(std::time::Duration::from_millis(2))
                 });
             }
+        } else if self.options.native_gameplay {
+            // The Metal bridge has pinned only admitted meshes. Recycle the source batch.
+            self.streaming.free(uploads);
         }
     }
 }
@@ -18765,6 +18796,12 @@ impl ApplicationHandler for Game<'_> {
         horizon_client::window::settle_created_fullscreen(&window, fullscreen);
         drop(window_step);
         horizon_client::telemetry::note_display(&window);
+        if self.options.native_gameplay {
+            self.error =
+                Some("native Metal gameplay requires the asynchronous UIKit handoff".into());
+            event_loop.exit();
+            return;
+        }
         match self.new_renderer(window.clone()) {
             Ok(r) => {
                 self.renderer = Some(r);
@@ -18875,7 +18912,7 @@ impl ApplicationHandler for Game<'_> {
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.idle(event_loop);
-        if !self.splitscreen.guest {
+        if !self.splitscreen.guest && !self.options.native_gameplay {
             self.poll_splitscreen(event_loop);
         }
     }
@@ -20538,6 +20575,13 @@ impl Game<'_> {
                     event_loop.exit();
                 }
                 Ok(false) => {
+                    if self.native_return_to_launcher
+                        && self.pending_save.is_none()
+                        && self.title.is_some()
+                    {
+                        self.native_return_to_launcher = false;
+                        horizon_ios_launcher::show();
+                    }
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
@@ -20738,9 +20782,17 @@ impl<'a> Game<'a> {
         );
         let mut game = Game {
             #[cfg(feature = "helium-direct-metal")]
-            direct_metal: (!options.split_guest && options.execution_role.is_client())
+            direct_metal: if options.native_gameplay && options.execution_role.is_client() {
+                Some(horizon_metal_bridge::Controller::native_gameplay())
+            } else {
+                (!options.native_gameplay
+                    && !options.split_guest
+                    && options.execution_role.is_client())
                 .then(horizon_metal_bridge::Controller::from_environment)
-                .flatten(),
+                .flatten()
+            },
+            #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
+            native_terrain: None,
             world_biomes: None,
             world_biomes_base: None,
             res: res.clone(),
@@ -20749,6 +20801,7 @@ impl<'a> Game<'a> {
             rest_loader: None,
             pending_entry: None,
             quit_to_launcher: false,
+            native_return_to_launcher: false,
             debug_density: RefCell::default(),
             pending_pack_reload: false,
             pack_folder: None,
@@ -21389,6 +21442,8 @@ struct Loaded {
     /// itself on the synchronous launch.
     entity_models: Option<Arc<horizon_client::mobs::EntityModelDocument>>,
     renderer_cpu: Option<horizon_client::gfx::PreparedTextures>,
+    #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
+    native_terrain: Option<horizon_client::gfx::NativeTerrainMaterials>,
     root: PathBuf,
     pack_error: Option<String>,
     resources: Arc<Resources>,
@@ -21890,6 +21945,9 @@ impl Progress {
 /// output stays byte-identical; only an ordinary launch shows the window first.
 fn synchronous_startup(options: &Options) -> bool {
     // A headless game has no window for the loading screen.
+    if options.native_gameplay {
+        return false;
+    }
     options.headless
         || options.frames.is_some()
         || options.world_frames.is_some()
@@ -22175,6 +22233,7 @@ fn load_resources(
     started: Instant,
     menu: bool,
     headless: bool,
+    native_gameplay: bool,
     progress: &Progress,
     publish: &mut dyn FnMut(UiResources, &std::path::Path),
 ) -> Result<Loaded> {
@@ -22183,7 +22242,9 @@ fn load_resources(
     // server thread's (horizon_threads::jobs), sized before any world opens.
     horizon_threads::jobs::configure(threads);
     horizon_client::sprites::set_texture_budget(settings.horizon.texture_budget_mib);
-    horizon_client::sprites::set_labpbr_maps(shader_packs::picks_material_pack(settings));
+    horizon_client::sprites::set_labpbr_maps(
+        !native_gameplay && shader_packs::picks_material_pack(settings),
+    );
     // Stage A: the menu bundle (atlas and panorama). With a loading screen it is
     // published at once so the title screen can appear while the world bundle
     // loads; the synchronous launch instead carries it in `Loaded`.
@@ -22402,7 +22463,7 @@ fn load_resources(
         let (game_cpu, renderer_cpu) = std::thread::scope(|scope| {
             let textures = Step::spawn(scope, parallel, "textures", || {
                 startup::time("handoff.renderer_textures", || {
-                    prepare_renderer_textures(&pack)
+                    (!native_gameplay).then(|| prepare_renderer_textures(&pack))
                 })
             });
             let game_cpu = startup::time("handoff.game_cpu", || {
@@ -22423,7 +22484,7 @@ fn load_resources(
             "Horizon: handoff CPU resources prepared on worker in {} ms",
             prepared_at.elapsed().as_millis()
         );
-        (Some(game_cpu), Some(renderer_cpu))
+        (Some(game_cpu), renderer_cpu)
     } else {
         (None, None)
     };
@@ -22431,6 +22492,10 @@ fn load_resources(
         game_cpu,
         entity_models,
         renderer_cpu,
+        #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
+        native_terrain: native_gameplay
+            .then(|| native_gameplay::prepare(&pack))
+            .transpose()?,
         root,
         pack_error,
         resources,
@@ -22661,6 +22726,18 @@ fn prepare_renderer_textures(pack: &PackResources) -> horizon_client::gfx::Prepa
 }
 
 /// Upload pack textures and create the renderer on the window's device.
+// Set once in run_game before launching UIKit. The centralized guards also
+// cover future accidental call sites through reload, split-screen and recovery.
+static NATIVE_GAMEPLAY_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn require_reference_graphics() -> Result<()> {
+    if NATIVE_GAMEPLAY_ACTIVE.load(Ordering::Relaxed) {
+        return Err("reference renderer forbidden in native Metal gameplay".into());
+    }
+    Ok(())
+}
+
 fn build_renderer(
     window: Arc<Window>,
     offscreen: bool,
@@ -22676,6 +22753,7 @@ fn build_renderer(
     shader_pack: shader_packs::PickedPack,
     filtering: (i32, i32),
 ) -> Result<Renderer> {
+    require_reference_graphics()?;
     let assets = &pack.render;
     let atlas = &gui.atlas;
     // The new renderer's atlas texture starts from `HudAtlas.pixels`, which
@@ -22756,6 +22834,7 @@ fn loading_renderer(
     previous: Option<&Renderer>,
     api: horizon_client::graphics::GraphicsApi,
 ) -> Result<Renderer> {
+    require_reference_graphics()?;
     static FORCEFIELD: [u8; 4] = [0; 4];
     static EMPTY_HUD: [u8; 4] = [0, 0, 0, 255];
     static EMPTY_GLINT: [u8; 4] = [0; 4];
@@ -23231,7 +23310,8 @@ impl Loading {
     /// the title is on the screen holds the title back by that build. Wait for
     /// one title frame first, unless a world is waiting to open.
     fn ready_for_handoff(&self) -> bool {
-        self.title_drawn
+        self.options.as_ref().is_some_and(|o| o.native_gameplay)
+            || self.title_drawn
             || self.menu.pending.is_some()
             || self.ui_at.is_none_or(|at| at.elapsed() >= TITLE_FRAME_WAIT)
     }
@@ -23297,14 +23377,18 @@ impl Loading {
         horizon_client::window::settle_created_fullscreen(&window, fullscreen);
         drop(window_step);
         horizon_client::telemetry::note_display(&window);
-        if horizon_ios_launcher::waiting() {
+        let native_gameplay = self.options.as_ref().is_some_and(|o| o.native_gameplay);
+        if native_gameplay || horizon_ios_launcher::waiting() {
             self.window = Some(window);
             #[cfg(feature = "helium-direct-metal")]
             if let Some(w) = &self.window {
                 horizon_metal_bridge::diagnostic_window(w);
                 horizon_metal_bridge::checkpoint(4);
             }
-            horizon_ios_launcher::present();
+            let shown = horizon_ios_launcher::present();
+            if native_gameplay && !shown && !horizon_ios_launcher::covered() {
+                self.error = Some("native Metal gameplay launcher could not be presented".into());
+            }
             return;
         }
         // The renderer takes seconds to build and winit's window sits white
@@ -23389,6 +23473,9 @@ impl Loading {
         self.title_drawn = false;
         horizon_client::ui_theme::reset_atlas();
         self.apply_menu_settings();
+        if self.options.as_ref().is_some_and(|o| o.native_gameplay) {
+            return;
+        }
         let Some(window) = self.window.clone() else {
             return;
         };
@@ -23573,48 +23660,60 @@ impl Loading {
         options.server = None;
         let gui = self.gui.take().ok_or("missing menu bundle")?;
         let window = self.window.clone().ok_or("window closed")?;
-        // Keep the loader's device and swap in the real textures in one step.
-        if let Some(renderer) = &mut self.renderer {
-            renderer.release_surface();
-        }
         let renderer_at = Instant::now();
-        let renderer = match startup::time("renderer.world", || {
-            build_renderer(
-                window.clone(),
-                options.offscreen,
-                &loaded.pack,
-                &gui,
-                self.renderer.as_ref(),
-                loaded.renderer_cpu,
-                self.settings.horizon.api,
-                self.settings.horizon.translucent_batching,
-                self.settings.horizon.wide_frame(),
-                shader_packs::picked_pack_shape(&self.settings),
-                (
-                    self.settings.file.int("textureFiltering"),
-                    self.settings.file.int("maxAnisotropyBit"),
-                ),
-            )
-        }) {
-            Ok(renderer) => renderer,
-            // The screen that says why (a phone's import screen) draws on the loading renderer.
-            Err(e) => {
-                if let Some(renderer) = &mut self.renderer {
-                    let _ = renderer.recreate_surface();
-                }
-                return Err(e);
+        let renderer = if options.native_gameplay {
+            None
+        } else {
+            // Keep the loader's device and swap in the real textures.
+            if let Some(renderer) = &mut self.renderer {
+                renderer.release_surface();
             }
+            Some(
+                match startup::time("renderer.world", || {
+                    build_renderer(
+                        window.clone(),
+                        options.offscreen,
+                        &loaded.pack,
+                        &gui,
+                        self.renderer.as_ref(),
+                        loaded.renderer_cpu,
+                        self.settings.horizon.api,
+                        self.settings.horizon.translucent_batching,
+                        self.settings.horizon.wide_frame(),
+                        shader_packs::picked_pack_shape(&self.settings),
+                        (
+                            self.settings.file.int("textureFiltering"),
+                            self.settings.file.int("maxAnisotropyBit"),
+                        ),
+                    )
+                }) {
+                    Ok(renderer) => renderer,
+                    // The screen that says why (a phone's import screen) draws on the loading renderer.
+                    Err(e) => {
+                        if let Some(renderer) = &mut self.renderer {
+                            let _ = renderer.recreate_surface();
+                        }
+                        return Err(e);
+                    }
+                },
+            )
         };
-        log::info!(
-            "Horizon: world renderer ready after {} ms",
-            self.started.elapsed().as_millis()
-        );
         let renderer_ms = renderer_at.elapsed().as_millis();
         // Audio is created on the main thread, after the core is ready.
         let audio = if !options.execution_role.is_client() {
             Audio::silent(&options.resources)
         } else {
             Audio::with_device(&options.resources, &self.settings.sound_device)
+        };
+        #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
+        let native_terrain = if options.native_gameplay {
+            Some(
+                loaded
+                    .native_terrain
+                    .ok_or("missing native terrain materials")?,
+            )
+        } else {
+            None
         };
         let pack_error = loaded.pack_error.or_else(|| self.pack_error.take());
         // The game borrows its shared resources for the process's lifetime,
@@ -23642,7 +23741,12 @@ impl Loading {
         drop(game_step);
         let game_ms = game_at.elapsed().as_millis();
         game.window = Some(window);
-        game.renderer = Some(renderer);
+        game.renderer = renderer;
+        #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
+        if game.options.native_gameplay {
+            game.native_terrain = native_terrain;
+            log::info!("Helium S2D game boot: UIKit + production CPU scene; direct Metal selected");
+        }
         game.world_renderer_ready = true;
         game.fullscreen = self.fullscreen;
         game.panorama_rotation = self.panorama_rotation;
@@ -24027,6 +24131,28 @@ fn run_game() -> Result<()> {
     let Some(mut options) = Options::read()? else {
         return Ok(());
     };
+    #[cfg(feature = "helium-direct-metal")]
+    {
+        options.native_gameplay = horizon_metal_bridge::Controller::select_native_gameplay()?;
+        if options.native_gameplay
+            && (!cfg!(feature = "helium-native-metal-gameplay")
+                || !options.execution_role.is_client()
+                || options.headless
+                || options.offscreen
+                || options.frames.is_some()
+                || options.world_frames.is_some()
+                || options.benchmark.is_some()
+                || options.test_terrain
+                || options.pack.is_some())
+        {
+            return Err("native Metal gameplay requires the isolated interactive iOS build".into());
+        }
+        NATIVE_GAMEPLAY_ACTIVE.store(options.native_gameplay, Ordering::Relaxed);
+    }
+    #[cfg(not(feature = "helium-direct-metal"))]
+    if std::env::var("HELIUM_DIRECT_METAL").as_deref() == Ok("native-gameplay") {
+        return Err("this executable does not support native Metal gameplay".into());
+    }
     log::info!(
         "Horizon checkpoint: prepared resource manifest located={}",
         options.resources.join("horizon-resources.json").is_file()
@@ -24208,6 +24334,7 @@ fn run_game() -> Result<()> {
         started,
         false,
         options.dedicated.is_some(),
+        false,
         &Progress::new(),
         &mut |_, _| {},
     )?;

@@ -33,6 +33,10 @@ private final class NativeMetalView: UIView {
     override class var layerClass: AnyClass { CAMetalLayer.self }
     var invalid: ((UInt32,UInt64,UInt64) -> Void)?
     var initialPixels = CGSize.zero
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        return hit === self ? nil : hit
+    }
     override func layoutSubviews() {
         super.layoutSubviews()
         let scale = window?.screen.scale ?? 0
@@ -41,9 +45,17 @@ private final class NativeMetalView: UIView {
     }
     override func didMoveToWindow() { super.didMoveToWindow(); if window == nil { invalid?(11,0,0) } }
 }
+private enum TerrainAttachment {
+    case capture, inset, gameplay
+
+    var live: Bool { self != .capture }
+    var fullscreen: Bool { self != .inset }
+}
+
 private final class NativeSession {
     let id: UInt64
-    let live: Bool
+    let attachment: TerrainAttachment
+    var live: Bool { attachment.live }
     let started = ProcessInfo.processInfo.systemUptime
     let view: NativeMetalView
     weak var parent: UIView?
@@ -51,14 +63,14 @@ private final class NativeSession {
     let cancel: NativeCancel
     let ready: NativeReady
     var timer: Timer?
-    init(_ id: UInt64, _ parent: UIView, _ cancel: @escaping NativeCancel, _ ready: @escaping NativeReady, live: Bool) {
+    init(_ id: UInt64, _ parent: UIView, _ cancel: @escaping NativeCancel, _ ready: @escaping NativeReady, attachment: TerrainAttachment) {
         self.id=id; self.parent=parent; self.window=parent.window; self.cancel=cancel; self.ready=ready
-        self.live = live
-        view = NativeMetalView(frame: nativeTerrainRect(parent.bounds, live: live))
+        self.attachment = attachment
+        view = NativeMetalView(frame: nativeTerrainRect(parent.bounds, attachment: attachment))
     }
     func invalidCause() -> UInt32 {
         let size = parent.map { p in
-            let rect = nativeTerrainRect(p.bounds, live: live)
+            let rect = nativeTerrainRect(p.bounds, attachment: attachment)
             let scale = window?.screen.scale ?? 0
             return CGSize(width: (rect.width * scale).rounded(), height: (rect.height * scale).rounded())
         }
@@ -79,10 +91,10 @@ private func cancelNative(_ id: UInt64,_ cause:UInt32=16,_ expected:UInt64=0,_ o
     guard let target=nativeTargets.removeValue(forKey:id) else { return }
     target.timer?.invalidate(); target.cancel(id); target.view.invalid=nil; target.view.removeFromSuperview()
     diagnosticEvent(id,29,0,UInt64(cause),0)
-    LauncherLog.write("native session closed \(id); wgpu fallback visible")
+    LauncherLog.write("native session closed \(id) mode=\(target.attachment)")
 }
-private func nativeTerrainRect(_ bounds: CGRect, live: Bool) -> CGRect {
-    guard live else { return bounds }
+private func nativeTerrainRect(_ bounds: CGRect, attachment: TerrainAttachment) -> CGRect {
+    guard !attachment.fullscreen else { return bounds }
     let size = CGSize(width: bounds.width / 2, height: bounds.height / 2)
     return CGRect(x: bounds.maxX - size.width, y: bounds.minY, width: size.width, height: size.height)
 }
@@ -91,20 +103,31 @@ private func nativeTerrainRect(_ bounds: CGRect, live: Bool) -> CGRect {
 public func nativeDisplayRequestLive(_ id: UInt64, _ pointer: UnsafeMutableRawPointer?, _ work: NativeWork?, _ cancel: NativeCancel?, _ ready: NativeReady?) -> Bool {
     guard Bundle.main.bundleIdentifier == "dev.helium.g06ctest",
           Bundle.main.object(forInfoDictionaryKey: "HeliumMetalDiagnosticsVersion") as? Int == 2 else { return false }
-    return nativeDisplayRequestImpl(id, pointer, work, cancel, ready, live: true)
+    return nativeDisplayRequestImpl(id, pointer, work, cancel, ready, attachment: .inset)
+}
+@_cdecl("horizon_native_display_gameplay_supported")
+public func nativeDisplayGameplaySupported() -> Bool {
+    Bundle.main.bundleIdentifier == "dev.helium.g06ctest" &&
+        Bundle.main.object(forInfoDictionaryKey: "HeliumMetalDiagnosticsVersion") as? Int == 2
+}
+
+@_cdecl("horizon_native_display_request_gameplay")
+public func nativeDisplayRequestGameplay(_ id: UInt64, _ pointer: UnsafeMutableRawPointer?, _ work: NativeWork?, _ cancel: NativeCancel?, _ ready: NativeReady?) -> Bool {
+    guard nativeDisplayGameplaySupported() else { return false }
+    return nativeDisplayRequestImpl(id, pointer, work, cancel, ready, attachment: .gameplay)
 }
 @_cdecl("horizon_native_display_request")
 public func nativeDisplayRequest(_ id: UInt64, _ pointer: UnsafeMutableRawPointer?, _ work: NativeWork?, _ cancel: NativeCancel?, _ ready: NativeReady?) -> Bool {
-    nativeDisplayRequestImpl(id, pointer, work, cancel, ready, live: false)
+    nativeDisplayRequestImpl(id, pointer, work, cancel, ready, attachment: .capture)
 }
 
-private func nativeDisplayRequestImpl(_ id: UInt64, _ pointer: UnsafeMutableRawPointer?, _ work: NativeWork?, _ cancel: NativeCancel?, _ ready: NativeReady?, live: Bool) -> Bool {
+private func nativeDisplayRequestImpl(_ id: UInt64, _ pointer: UnsafeMutableRawPointer?, _ work: NativeWork?, _ cancel: NativeCancel?, _ ready: NativeReady?, attachment: TerrainAttachment) -> Bool {
     guard Thread.isMainThread, nativeTargets.isEmpty, let pointer=pointer, let work=work, let cancel=cancel, let ready=ready else {diagnosticEvent(id,30,38);return false}
     guard let parent=Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? UIView else {diagnosticEvent(id,30,21);return false}
     guard let window=parent.window else {diagnosticEvent(id,30,22);return false}
     let hostCause=MetalDiagnosticModel.invalidHost(age:0,parent:true,window:true,attached:true,hidden:window.isHidden || parent.isHidden,key:window.isKeyWindow,active:UIApplication.shared.applicationState == .active,modal:window.rootViewController?.presentedViewController != nil,size:true)
     guard hostCause==0 else {diagnosticEvent(id,30,hostCause);return false}
-    let rect = nativeTerrainRect(parent.bounds, live: live)
+    let rect = nativeTerrainRect(parent.bounds, attachment: attachment)
     let pixels = CGSize(width: (rect.width * window.screen.scale).rounded(), height: (rect.height * window.screen.scale).rounded())
     guard pixels.width>0, pixels.height>0, pixels.width<=4096, pixels.height<=4096, pixels.width*pixels.height*12 <= 64*1024*1024 else {
         diagnosticEvent(id,30,10,0,MetalDiagnosticModel.pixels(Double(pixels.width),Double(pixels.height)))
@@ -121,18 +144,60 @@ private func nativeDisplayRequestImpl(_ id: UInt64, _ pointer: UnsafeMutableRawP
         NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object:nil, queue:.main) { _ in cancelAllNativeTargets(14) }
         NotificationCenter.default.addObserver(forName:UIApplication.didReceiveMemoryWarningNotification,object:nil,queue:.main){_ in cancelAllNativeTargets(34)}
     }
-    if live { setMetalDebugMode("LIVE-TERRAIN") }
-    let target=NativeSession(id,parent,cancel,ready,live:live)
+    if attachment == .inset { setMetalDebugMode("LIVE-TERRAIN") }
+    if attachment == .gameplay { setMetalDebugMode("NATIVE-GAMEPLAY-TERRAIN") }
+    let target=NativeSession(id,parent,cancel,ready,attachment:attachment)
     let view=target.view; let metal=view.layer as! CAMetalLayer
-    view.isUserInteractionEnabled=false; view.autoresizingMask = live ? [.flexibleLeftMargin, .flexibleWidth, .flexibleHeight] : [.flexibleWidth, .flexibleHeight]; view.alpha=0
+    view.isUserInteractionEnabled = attachment == .gameplay
+    view.autoresizingMask = !attachment.fullscreen ? [.flexibleLeftMargin, .flexibleWidth, .flexibleHeight] : [.flexibleWidth, .flexibleHeight]; view.alpha=0
     view.initialPixels=pixels; metal.device=MTLCreateSystemDefaultDevice(); metal.pixelFormat = .bgra8Unorm
     metal.colorspace=CGColorSpace(name: CGColorSpace.linearSRGB); metal.framebufferOnly=true
     metal.allowsNextDrawableTimeout=true; metal.presentsWithTransaction=false; metal.maximumDrawableCount=3
     metal.contentsScale=window.screen.scale; metal.drawableSize=pixels
     let label=UILabel(frame:CGRect(x:8,y:8,width:rect.width-16,height:44))
-    label.text = live ? "HELIUM S2B · LIVE NATIVE OPAQUE/CUTOUT\nwgpu reference and input remain active" : NSLocalizedString("HELIUM S2A · HISTORICAL NATIVE TERRAIN · OPAQUE/CUTOUT\nwgpu producer/fallback active",comment:"Native diagnostic")
+    switch attachment {
+    case .capture:
+        label.text = NSLocalizedString("HELIUM S2A · HISTORICAL NATIVE TERRAIN · OPAQUE/CUTOUT\nwgpu producer/fallback active",comment:"Native diagnostic")
+    case .inset:
+        label.text = "HELIUM S2B · LIVE NATIVE OPAQUE/CUTOUT\nwgpu reference and input remain active"
+    case .gameplay:
+        label.text = "HELIUM S2D · DIRECT METAL TERRAIN\nOpaque and cutout only"
+    }
     label.textColor = .yellow; label.backgroundColor = .black; label.numberOfLines=2; label.font = .systemFont(ofSize:12)
     view.addSubview(label)
+    if attachment == .gameplay {
+        let close = UIButton(type: .system)
+        close.setTitle("Save & Quit", for: .normal)
+        close.tintColor = .white
+        close.backgroundColor = UIColor.black.withAlphaComponent(0.85)
+        close.translatesAutoresizingMaskIntoConstraints = false
+        close.addAction(UIAction { [weak close] _ in
+            close?.isEnabled = false
+            Task { @MainActor in
+                let answer = await Bridge.send("native-terrain-save-quit")
+                if answer["phase"] as? String != "saving" {
+                    close?.isEnabled = true
+                }
+            }
+        }, for: .touchUpInside)
+        view.addSubview(close)
+        NSLayoutConstraint.activate([
+            close.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            close.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            close.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
+            close.widthAnchor.constraint(greaterThanOrEqualToConstant: 100)
+        ])
+        let crosshair = UILabel()
+        crosshair.text = "+"
+        crosshair.textColor = .white
+        crosshair.font = .monospacedSystemFont(ofSize: 20, weight: .semibold)
+        crosshair.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(crosshair)
+        NSLayoutConstraint.activate([
+            crosshair.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            crosshair.centerYAnchor.constraint(equalTo: view.centerYAnchor)
+        ])
+    }
     nativeTargets[id]=target; view.invalid={ cause,old,new in cancelNative(id,cause,old,new) }; parent.addSubview(view)
     diagnosticEvent(id,14,0,UInt64(pixels.width),UInt64(pixels.height));liftMetalHUD()
     target.timer=Timer.scheduledTimer(withTimeInterval:0.1,repeats:true){[weak target] _ in
@@ -155,7 +220,7 @@ public func nativeDisplayPublish(_ id:UInt64) {
         let cause=target.invalidCause();guard cause==0, target.ready(id) else {cancelNative(id,cause==0 ? 16 : cause);return}
         if target.live {
             target.view.alpha = 1
-            LauncherLog.write("live native terrain revealed; physical scanout unverified")
+            LauncherLog.write("live native terrain revealed mode=\(target.attachment); physical scanout unverified")
             return
         }
         let values=diagnosticValues()

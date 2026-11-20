@@ -7,6 +7,8 @@ on:
       - 'crates/helium-render-scene/**'
       - 'crates/horizon-client-render/src/gfx/material_snapshot.rs'
       - 'crates/horizon-client/src/game.rs'
+      - 'crates/horizon-client/Cargo.toml'
+      - 'crates/horizon-client-render/src/gfx.rs'
       - 'crates/horizon-client/src/game/**'
       - 'crates/horizon-client/tests/generation_saves.rs'
       - 'crates/horizon-client/src/entry.rs'
@@ -236,17 +238,18 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/bridge"
           cargo +1.95.0 test --locked -p horizon-metal-bridge 2>&1 | tee "$RUNNER_TEMP/bridge/tests.log"
+          cargo +1.95.0 test --locked -p horizon-client-render --lib gfx::tests::native_terrain 2>&1 | tee "$RUNNER_TEMP/bridge/cpu-native-input.log"
           HORIZON_SPRITE_SPLIT=512 cargo +1.95.0 test --locked -p horizon-metal-bridge --lib runtime::ownership_tests::native_worker_from_production_owned_bank_and_typed_section -- --ignored --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/bridge/native.log"
-          cargo +1.95.0 check --locked -p horizon-client --no-default-features --features helium-direct-metal 2>&1 | tee "$RUNNER_TEMP/bridge/game.log"
+          cargo +1.95.0 check --locked -p horizon-client --no-default-features --features helium-native-metal-gameplay 2>&1 | tee "$RUNNER_TEMP/bridge/game.log"
           cargo +1.95.0 check --locked --target aarch64-apple-ios -p horizon-metal-bridge 2>&1 | tee "$RUNNER_TEMP/bridge/ios.log"
-          cargo +1.95.0 check --locked --target aarch64-apple-ios -p horizon-client --no-default-features --features helium-direct-metal 2>&1 | tee "$RUNNER_TEMP/bridge/ios-game.log"
+          cargo +1.95.0 check --locked --target aarch64-apple-ios -p horizon-client --no-default-features --features helium-native-metal-gameplay 2>&1 | tee "$RUNNER_TEMP/bridge/ios-game.log"
       - name: Publish bridge compilation evidence
         if: always()
         uses: actions/github-script@v7
         with:
           script: |
             const fs=require('fs'), path=require('path');
-            const summary=['tests.log','native.log','game.log','ios.log','ios-game.log'].map(n=>{
+            const summary=['tests.log','cpu-native-input.log','native.log','game.log','ios.log','ios-game.log'].map(n=>{
               const p=path.join(process.env.RUNNER_TEMP,'bridge',n);
               return '### '+n+'\n```text\n'+(fs.existsSync(p)?fs.readFileSync(p,'utf8').slice(-10000):'NOT RUN')+'\n```';
             }).join('\n');
@@ -333,7 +336,8 @@ jobs:
       - name: Actually link the opt-in arm64 Rust GAME executable
         run: |
           set -euo pipefail
-          cargo +1.95.0 build --release --locked --target aarch64-apple-ios -p horizon-client --no-default-features --features audio,helium-direct-metal 2>&1 | tee "$RUNNER_TEMP/attached-game/rust-link.log"
+          cargo +1.95.0 build --release --locked --target aarch64-apple-ios -p horizon-client --no-default-features --features audio,helium-native-metal-gameplay 2>&1 | tee "$RUNNER_TEMP/attached-game/rust-link.log"
+          cargo +1.95.0 tree --locked --target aarch64-apple-ios -p horizon-client --no-default-features --features audio,helium-native-metal-gameplay -i wgpu > "$RUNNER_TEMP/attached-game/game-wgpu-graph.log"
       - name: Compile and link the actual UIKit launcher and game bundle
         run: |
           set -euo pipefail
@@ -341,7 +345,7 @@ jobs:
           (cd packaging/ios && xcodegen generate)
           HORIZON_GAME_PREBUILT=1 xcodebuild -project packaging/ios/HorizonIOS.xcodeproj -target HorizonGame -configuration Release -sdk iphoneos -arch arm64 CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= CODE_SIGNING_REQUIRED=NO DEBUG_INFORMATION_FORMAT=dwarf CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/attached-game/build" build > "$RUNNER_TEMP/attached-game/xcode.log" 2>&1 || { tail -80 "$RUNNER_TEMP/attached-game/xcode.log"; exit 1; }
           app="$RUNNER_TEMP/attached-game/build/HorizonGame.app"
-          python3 tools/ci/verify-attached-ios-game.py "$app" target/aarch64-apple-ios/release/horizon-client 2>&1 | tee "$RUNNER_TEMP/attached-game/verified.log"
+          python3 tools/ci/verify-attached-ios-game.py "$app" target/aarch64-apple-ios/release/horizon-client --native-gameplay 2>&1 | tee "$RUNNER_TEMP/attached-game/verified.log"
           # Inspect the exact archive and discard it. The gameplay release hold below is independent.
           trap 'rm -f "$RUNNER_TEMP/attached-game/held.ipa"' EXIT
           python3 tools/ci/ios_package.py game "$app" "$RUNNER_TEMP/attached-game/held.ipa" "$GITHUB_SHA" 2>&1 | tee "$RUNNER_TEMP/attached-game/package-verifier.log"
@@ -357,7 +361,7 @@ jobs:
         with:
           script: |
             const fs=require('fs'),path=require('path');
-            const summary=['apple.log','default.log','dependency-isolation.log','binary-guard-tests.log','rust-link.log','xcode.log','verified.log','package-verifier.log'].map(n=>{
+            const summary=['apple.log','default.log','dependency-isolation.log','binary-guard-tests.log','rust-link.log','game-wgpu-graph.log','xcode.log','verified.log','package-verifier.log'].map(n=>{
               const p=path.join(process.env.RUNNER_TEMP,'attached-game',n);
               return '### '+n+'\n```text\n'+(fs.existsSync(p)?fs.readFileSync(p,'utf8').slice(-7500):'NOT RUN')+'\n```';
             }).join('\n');

@@ -109,6 +109,7 @@ final class GameLink: ObservableObject {
     }
 
     @Published private(set) var phase: Phase = .unknown
+    private var nativeTerrainGameplay = false
     @Published private(set) var worlds: [World] = []
     @Published private(set) var servers: [Server] = []
     @Published private(set) var statuses: [String: ServerStatus] = [:]
@@ -147,6 +148,7 @@ final class GameLink: ObservableObject {
     func refresh() async {
         let state = await Bridge.send("launcher-state")
         let was = phase
+        nativeTerrainGameplay = state["native_terrain_gameplay"] as? Bool ?? nativeTerrainGameplay
         switch state["phase"] as? String {
         case "waiting":
             if phase != .waiting { GameAudio.stop() }
@@ -218,6 +220,11 @@ final class GameLink: ObservableObject {
     func play(_ world: World? = nil) async {
         Haptics.launch()
         guard let world else {
+            if phase == .unknown { await refresh() }
+            if nativeTerrainGameplay {
+                problem = "Choose or create a disposable world under Worlds. This build draws terrain only."
+                return
+            }
             await start()
             uncover()
             return

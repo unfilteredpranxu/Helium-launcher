@@ -68,13 +68,17 @@ pub enum Mode {
     OneSectionDiagnostic,
     AttachedOneSection,
     LiveTerrain,
+    NativeGameplay,
 }
 impl Mode {
     fn observes_surface(self, offscreen: bool) -> bool {
         self != Self::Disabled && !(self.requires_ios() && offscreen)
     }
     fn requires_ios(self) -> bool {
-        matches!(self, Self::AttachedOneSection | Self::LiveTerrain)
+        matches!(
+            self,
+            Self::AttachedOneSection | Self::LiveTerrain | Self::NativeGameplay
+        )
     }
     pub fn parse(value: Option<&str>) -> Result<Self, String> {
         match value {
@@ -82,7 +86,8 @@ impl Mode {
             Some("one-section") => Ok(Self::OneSectionDiagnostic),
             Some("attached-one-section") => Ok(Self::AttachedOneSection),
             Some("live-terrain") => Ok(Self::LiveTerrain),
-            Some(_) => Err("unsupported HELIUM_DIRECT_METAL value; use one-section, attached-one-section, live-terrain or off".into()),
+            Some("native-gameplay") => Ok(Self::NativeGameplay),
+            Some(_) => Err("unsupported HELIUM_DIRECT_METAL value; use one-section, attached-one-section, live-terrain, native-gameplay or off".into()),
         }
     }
 }
@@ -99,6 +104,7 @@ fn selected_mode() -> Result<Mode, String> {
         0 => Ok(Mode::Disabled),
         2 => Ok(Mode::AttachedOneSection),
         3 => Ok(Mode::LiveTerrain),
+        4 => Ok(Mode::NativeGameplay),
         _ => Err("invalid test-only sandbox configuration".into()),
     };
     #[cfg(not(target_os = "ios"))]
@@ -439,6 +445,56 @@ impl Controller {
         }
     }
 
+    /// Resolve explicit gameplay selection before any loading or game surface.
+    /// Other diagnostic modes keep their existing compatibility behavior.
+    pub fn select_native_gameplay() -> Result<bool, String> {
+        if !matches!(selected_mode(), Ok(Mode::NativeGameplay)) {
+            return Ok(false);
+        }
+        #[cfg(target_os = "ios")]
+        if helium_metal_prototype::attached::gameplay_supported()? {
+            return Ok(true);
+        }
+        Err("direct Metal gameplay requires the isolated iOS UIKit launcher".into())
+    }
+
+    pub fn native_gameplay() -> Self {
+        Self::new(Mode::NativeGameplay)
+    }
+
+    #[cfg(target_os = "ios")]
+    pub fn native_sections(
+        &mut self,
+        materials: &horizon_client_render::gfx::NativeTerrainMaterials,
+        sections: AcceptedSections<'_>,
+    ) {
+        if let Some(live) = &mut self.live {
+            live.observe(materials.materials(), sections, self.world_epoch);
+        }
+    }
+
+    #[cfg(target_os = "ios")]
+    pub fn native_frame(
+        &mut self,
+        materials: &horizon_client_render::gfx::NativeTerrainMaterials,
+        camera: helium_render_scene::Camera,
+        size: [u32; 2],
+    ) -> Result<(), String> {
+        let live = self
+            .live
+            .as_mut()
+            .ok_or("direct Metal game controller unavailable")?;
+        live.frame(
+            materials.materials(),
+            camera,
+            materials.lightmap(),
+            size,
+            self.window.as_deref(),
+            self.world_epoch,
+            true,
+        )
+    }
+
     pub fn from_environment() -> Option<Self> {
         let mode = match selected_mode() {
             Ok(m) => m,
@@ -447,7 +503,7 @@ impl Controller {
                 return None;
             }
         };
-        if mode == Mode::Disabled {
+        if matches!(mode, Mode::Disabled | Mode::NativeGameplay) {
             return None;
         }
         if !cfg!(any(target_os = "macos", target_os = "ios")) {
@@ -482,7 +538,7 @@ impl Controller {
             #[cfg(target_os = "ios")]
             displayed: None,
             #[cfg(target_os = "ios")]
-            live: (mode == Mode::LiveTerrain).then(live::Live::new),
+            live: matches!(mode, Mode::LiveTerrain | Mode::NativeGameplay).then(live::Live::new),
         }
     }
     pub fn set_window(&mut self, window: Option<Arc<winit::window::Window>>) {
@@ -553,7 +609,7 @@ impl Controller {
     pub fn sections(&mut self, renderer: &Renderer, sections: AcceptedSections<'_>) {
         #[cfg(target_os = "ios")]
         if let Some(live) = &mut self.live {
-            live.observe(renderer, sections, self.world_epoch);
+            live.observe(renderer.material_state(), sections, self.world_epoch);
             return;
         }
         if self.mode == Mode::Disabled {
@@ -743,7 +799,7 @@ impl Controller {
     pub fn frame(&mut self, renderer: &Renderer, frame: &Frame<'_>) {
         #[cfg(target_os = "ios")]
         if let Some(live) = &mut self.live {
-            live.frame(renderer, frame, self.window.as_deref(), self.world_epoch);
+            live.reference_frame(renderer, frame, self.window.as_deref(), self.world_epoch);
             return;
         }
         if self.mode == Mode::Disabled {
@@ -1580,6 +1636,17 @@ mod tests {
         gfx::material_snapshot::State,
         mesher::{OPAQUE_LAYER, TerrainVertex},
     };
+    #[test]
+    fn native_gameplay_is_a_distinct_ios_only_opt_in() {
+        assert_eq!(Mode::parse(None), Ok(Mode::Disabled));
+        assert_eq!(Mode::parse(Some("live-terrain")), Ok(Mode::LiveTerrain));
+        let mode = Mode::parse(Some("native-gameplay")).unwrap();
+        assert_eq!(mode, Mode::NativeGameplay);
+        assert!(mode.requires_ios());
+        assert!(!mode.observes_surface(true));
+        assert!(Mode::parse(Some("native-gameplay=false")).is_err());
+    }
+
     #[test]
     fn normal_content_updates_during_worker_preserve_only_historical_authority() {
         let generation = State::new().generation();

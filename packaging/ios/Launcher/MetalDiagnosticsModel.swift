@@ -22,9 +22,13 @@ struct MetalDiagnosticModel {
         switch value {case "off", "off\n":return (0,"OFF")
         case "attached-one-section", "attached-one-section\n":return (2,"CONFIG-ARMED")
         case "live-terrain", "live-terrain\n":return isolated ? (3,"LIVE-TERRAIN") : (-1,"INVALID")
+        case "native-gameplay", "native-gameplay\n":return isolated ? (4,"NATIVE-GAMEPLAY-TERRAIN") : (-1,"INVALID")
         default:return (-1,"INVALID")}
     }
     static func hud(_ a: [UInt64], mode: String) -> String {
+        if mode == "NATIVE-GAMEPLAY-TERRAIN" {
+            return "HELIUM S2D · DIRECT METAL TERRAIN\nOpaque and cutout only · PHYSICAL SCANOUT UNVERIFIED"
+        }
         if mode == "LIVE-TERRAIN" {
             return "HELIUM S2B · LIVE TERRAIN MODE\nNative completion and frame timing in game log\nwgpu reference active · PHYSICAL SCANOUT UNVERIFIED"
         }

@@ -44,7 +44,7 @@ def ios_version(header: bytes) -> int:
     return version
 
 
-def verify(app: Path, rust: Path) -> None:
+def verify(app: Path, rust: Path, native_gameplay: bool = False) -> None:
     binary = app / "Horizon"
     with binary.open("rb") as file:
         head = file.read(1024 * 1024 + 32)
@@ -59,12 +59,18 @@ def verify(app: Path, rust: Path) -> None:
     if digest(binary) != digest(rust):
         raise ValueError("bundle executable differs from the opt-in Rust game")
     with binary.open("rb") as file, mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ) as data:
-        if any(data.find(mode) < 0 for mode in (b"attached-one-section", b"live-terrain")):
+        modes = (b"attached-one-section", b"live-terrain")
+        if native_gameplay:
+            modes += (b"native-gameplay", b"horizon_native_display_request_gameplay")
+        if any(data.find(mode) < 0 for mode in modes):
             raise ValueError("native test mode absent from linked executable")
     framework = app / "Frameworks/HorizonLauncherKit.framework/HorizonLauncherKit"
     result = subprocess.check_output(["xcrun", "nm", "-g", str(framework)], text=True)
     defined = {parts[-1] for line in result.splitlines() if len(parts := line.split()) >= 3 and parts[-2] == "T"}
-    for name in ("abi", "mode", "request", "request_live", "publish", "cancel"):
+    symbols = ("abi", "mode", "request", "request_live", "publish", "cancel")
+    if native_gameplay:
+        symbols += ("request_gameplay", "gameplay_supported")
+    for name in symbols:
         if "_horizon_native_display_" + name not in defined:
             raise ValueError("missing native host definition: " + name)
     for name in ("horizon_diag_install_v2","horizon_diag_hud_v2","horizon_diag_host_idle_v2"):
@@ -93,10 +99,19 @@ def verify(app: Path, rust: Path) -> None:
         plistlib.dump(value, stream)
     print("Verified actual opt-in Rust executable == bundle executable; thin arm64 device iOS15.0")
     print("Executable bytes:", binary.stat().st_size, "SHA256:", digest(binary))
-    print("Five ABI v1 host exports and live request defined; proprietary assets/saves/config absent; isolated bundle ID applied")
+    print("Required native display exports defined; proprietary assets/saves/config absent; isolated bundle ID applied")
+    if native_gameplay:
+        print("Direct Metal gameplay selector and UIKit attachment ABI verified in linked binaries; runtime remains unverified")
     print("No Java/JVM linkage, provisioning profile or distribution signature; diagnostics ABI v2 retained")
     print("Configuration file absent: isolated marker v2 AUTO-ARMS; normal apps remain OFF. Device/world runtime remains UNVERIFIED.")
 
 
 if __name__ == "__main__":
-    verify(Path(sys.argv[1]), Path(sys.argv[2]))
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("app", type=Path)
+    parser.add_argument("rust", type=Path)
+    parser.add_argument("--native-gameplay", action="store_true")
+    args = parser.parse_args()
+    verify(args.app, args.rust, args.native_gameplay)

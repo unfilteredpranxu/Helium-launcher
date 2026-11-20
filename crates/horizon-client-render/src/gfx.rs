@@ -1724,6 +1724,123 @@ fn terrain_group(
         ],
     })
 }
+/// Production 16×16 RGBA lightmap shared by direct Metal and the reference renderer.
+pub fn terrain_lightmap(
+    sky: &Sky,
+    darkness: f32,
+    gamma: f32,
+    night_vision: f32,
+    flicker: f32,
+    boss_darken: f32,
+    fullbright: bool,
+) -> [u8; 1024] {
+    // lightmap.fsh: per (block, sky) level.
+    let brightness = |level: f32| level / (4.0 - 3.0 * level);
+    let mut pixels = [0u8; 16 * 16 * 4];
+    for s in 0..16 {
+        for b in 0..16 {
+            let block_level = b as f32 / 15.0;
+            let sky_level = s as f32 / 15.0;
+            let block_brightness = brightness(block_level) * (1.4 + flicker);
+            let sky_brightness = brightness(sky_level) * sky.sky_light_factor;
+            // NightVisionColor defaults to 0x999999.
+            let mut color =
+                Vec3::from(sky.ambient_light_color).max(Vec3::splat(0.6 * night_vision));
+            color += Vec3::from(sky.sky_light_color) * sky_brightness;
+            let parabolic = (2.0 * block_level - 1.0).powi(2);
+            let block_color = Vec3::from(sky.block_light_tint).lerp(Vec3::ONE, 0.9 * parabolic);
+            color += block_color * block_brightness;
+            // lightmap.fsh: a boss bar mixes the light toward 70/60/60%.
+            color = color.lerp(color * Vec3::new(0.7, 0.6, 0.6), boss_darken);
+            color -= Vec3::splat(darkness);
+            color = color.clamp(Vec3::ZERO, Vec3::ONE);
+            let max = color.max_element().max(1e-6);
+            let inverted = 1.0 - max;
+            let scaled = 1.0 - inverted.powi(4);
+            let not_gamma = color * (scaled / max);
+            color = color.lerp(not_gamma, gamma);
+            let i = (s * 16 + b) * 4;
+            pixels[i] = (color.x * 255.0) as u8;
+            pixels[i + 1] = (color.y * 255.0) as u8;
+            pixels[i + 2] = (color.z * 255.0) as u8;
+            pixels[i + 3] = 255;
+        }
+    }
+    if fullbright {
+        pixels.fill(255);
+    }
+    pixels
+}
+
+/// Build the production mip chains for direct Metal, with its physical array
+/// limit. This is a CPU-only operation and issues no upload/device ticket.
+pub fn prepare_native_terrain(
+    pixels: &[u8],
+    size: u32,
+    layers: u32,
+    settings: &[crate::mipmap::Settings],
+    budget: usize,
+) -> std::result::Result<NativeTerrainMaterials, &'static str> {
+    const SPLIT: u32 = 512;
+    let stride =
+        material_snapshot::chain(size, size.checked_ilog2().ok_or("missing sprites")? + 1)?;
+    let payload = stride
+        .checked_mul(layers as usize)
+        .ok_or("sprite size overflow")?;
+    let base = (size as usize)
+        .checked_mul(size as usize)
+        .and_then(|n| n.checked_mul(4))
+        .and_then(|n| n.checked_mul(layers as usize))
+        .ok_or("sprite size overflow")?;
+    if layers == 0 || layers > 8 * SPLIT || pixels.len() != base || payload > budget {
+        return Err("native terrain sprite layout or mip budget exceeded");
+    }
+    let state = PreparedTextures::with_split(pixels, size, layers, settings, (&[255; 4], 1), SPLIT)
+        .retain_material_snapshot(budget)
+        .capture_materials(size, layers, false);
+    state.snapshot()?;
+    Ok(NativeTerrainMaterials {
+        state,
+        lightmap: [0; 1024],
+    })
+}
+
+/// CPU-owned material and lighting data for the direct Metal game path.
+pub struct NativeTerrainMaterials {
+    state: material_snapshot::State,
+    lightmap: [u8; 1024],
+}
+
+impl NativeTerrainMaterials {
+    pub fn materials(&self) -> &material_snapshot::State {
+        &self.state
+    }
+
+    pub fn set_lightmap(&mut self, rgba: [u8; 1024]) {
+        self.state.observe_lightmap(&self.lightmap, &rgba);
+        self.lightmap = rgba;
+    }
+
+    pub fn lightmap(&self) -> [u8; 1024] {
+        self.lightmap
+    }
+}
+
+/// The production reverse-Z terrain projection for a physical viewport.
+pub fn terrain_clip(
+    yaw: f32,
+    pitch: f32,
+    fov_degrees: f32,
+    size: [u32; 2],
+    far: f32,
+    pose: Mat4,
+) -> [[f32; 4]; 4] {
+    let aspect = size[0] as f32 / size[1].max(1) as f32;
+    View::screen(yaw, pitch, fov_degrees, aspect, far)
+        .view_proj(pose)
+        .to_cols_array_2d()
+}
+
 /// CPU texture uploads prepared by the resource worker. Consumed by renderer
 /// construction so the temporary mip chains are released after GPU upload.
 pub struct PreparedTextures {
@@ -7436,41 +7553,15 @@ impl Renderer {
         flicker: f32,
         boss_darken: f32,
     ) {
-        // lightmap.fsh: per (block, sky) level.
-        let brightness = |level: f32| level / (4.0 - 3.0 * level);
-        let mut pixels = [0u8; 16 * 16 * 4];
-        for s in 0..16 {
-            for b in 0..16 {
-                let block_level = b as f32 / 15.0;
-                let sky_level = s as f32 / 15.0;
-                let block_brightness = brightness(block_level) * (1.4 + flicker);
-                let sky_brightness = brightness(sky_level) * sky.sky_light_factor;
-                // NightVisionColor defaults to 0x999999.
-                let mut color =
-                    Vec3::from(sky.ambient_light_color).max(Vec3::splat(0.6 * night_vision));
-                color += Vec3::from(sky.sky_light_color) * sky_brightness;
-                let parabolic = (2.0 * block_level - 1.0).powi(2);
-                let block_color = Vec3::from(sky.block_light_tint).lerp(Vec3::ONE, 0.9 * parabolic);
-                color += block_color * block_brightness;
-                // lightmap.fsh: a boss bar mixes the light toward 70/60/60%.
-                color = color.lerp(color * Vec3::new(0.7, 0.6, 0.6), boss_darken);
-                color -= Vec3::splat(darkness);
-                color = color.clamp(Vec3::ZERO, Vec3::ONE);
-                let max = color.max_element().max(1e-6);
-                let inverted = 1.0 - max;
-                let scaled = 1.0 - inverted.powi(4);
-                let not_gamma = color * (scaled / max);
-                color = color.lerp(not_gamma, gamma);
-                let i = (s * 16 + b) * 4;
-                pixels[i] = (color.x * 255.0) as u8;
-                pixels[i + 1] = (color.y * 255.0) as u8;
-                pixels[i + 2] = (color.z * 255.0) as u8;
-                pixels[i + 3] = 255;
-            }
-        }
-        if self.fullbright {
-            pixels.fill(255);
-        }
+        let pixels = terrain_lightmap(
+            sky,
+            darkness,
+            gamma,
+            night_vision,
+            flicker,
+            boss_darken,
+            self.fullbright,
+        );
         // The lightmap changes with the time of day, flicker and effects,
         // not every frame: upload only what differs from the texture.
         if pixels == self.lightmap_pixels && self.lightmap_uploaded {
@@ -12485,6 +12576,64 @@ fn frustum(m: Mat4) -> [Vec4; 6] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_terrain_prepares_production_bank_split_without_a_device() {
+        use super::*;
+
+        let mut pixels = vec![0; 513 * 16];
+        pixels[512 * 16..].fill(255);
+        let mut materials = prepare_native_terrain(&pixels, 2, 513, &[], 32 * 1024).unwrap();
+        let scene = materials.materials().scene_materials(32 * 1024).unwrap();
+        assert_eq!(scene.banks().len(), 2);
+        assert_eq!(
+            (
+                scene.banks()[0].dimensions().1,
+                scene.banks()[0].descriptor().used
+            ),
+            (512, 512)
+        );
+        assert_eq!(scene.banks()[1].descriptor().used, 1);
+        assert!(materials.materials().gpu_current().is_err());
+        assert!(materials.materials().light_revision().is_err());
+        materials.set_lightmap([12; 1024]);
+        assert_eq!(materials.materials().light_revision(), Ok(1));
+        materials.set_lightmap([12; 1024]);
+        assert_eq!(materials.materials().light_revision(), Ok(1));
+        materials.set_lightmap([13; 1024]);
+        assert_eq!(materials.materials().light_revision(), Ok(2));
+        assert_eq!(materials.lightmap(), [13; 1024]);
+        assert!(prepare_native_terrain(&pixels, 2, 513, &[], 1024).is_err());
+        assert!(prepare_native_terrain(&pixels[..16], 2, 513, &[], 32 * 1024).is_err());
+    }
+
+    #[test]
+    fn native_terrain_uses_reference_projection_and_reverse_depth() {
+        use super::*;
+
+        let pose = Mat4::from_translation(Vec3::new(0.02, 0.03, 0.0));
+        for size in [[2360, 1640], [1640, 2360]] {
+            let expected = View::screen(30.0, -10.0, 72.0, size[0] as f32 / size[1] as f32, 256.0)
+                .view_proj(pose);
+            assert_eq!(
+                Mat4::from_cols_array_2d(&terrain_clip(30.0, -10.0, 72.0, size, 256.0, pose)),
+                expected,
+            );
+        }
+        let clip = Mat4::from_cols_array_2d(&terrain_clip(
+            0.0,
+            0.0,
+            72.0,
+            [1280, 720],
+            256.0,
+            Mat4::IDENTITY,
+        ));
+        let depth = |z| {
+            let point = clip * Vec4::new(0.0, 0.0, z, 1.0);
+            point.z / point.w
+        };
+        assert!(depth(1.0) > depth(50.0));
+    }
+
     #[test]
     fn depth_culling_keeps_jittered_edges_and_depth_crossing_models() {
         use super::*;

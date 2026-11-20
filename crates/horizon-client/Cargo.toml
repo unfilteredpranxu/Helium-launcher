@@ -118,6 +118,8 @@ wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
 [features]
 # Development-only, single-section native diagnostic; wgpu remains the display backend.
 helium-direct-metal = ["dep:horizon-metal-bridge"]
+# Select the isolated direct-Metal game path at runtime. The reference backend still links.
+helium-native-metal-gameplay = ["helium-direct-metal"]
 default = ["audio", "controllers"]
 # Sound output. Without it (and `controllers`) the program links neither libasound nor libudev on
 # Linux: the server build (`--no-default-features`, released as horizon-engine; docs/server.md).

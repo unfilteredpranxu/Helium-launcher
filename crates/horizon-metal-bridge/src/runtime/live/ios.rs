@@ -14,6 +14,7 @@ const GPU_GEOMETRY: usize = 16 * MIB;
 const MAX_DRAWS: usize = 4096;
 
 use helium_render_scene::{Camera, Frame as CpuFrame, Lightmap, MaterialSet, MaterialVersion};
+use horizon_client_render::gfx::material_snapshot::State;
 use std::num::NonZeroU64;
 
 struct Request {
@@ -91,12 +92,11 @@ impl Live {
             self.generation = Some(generation);
         }
     }
-    pub fn observe(&mut self, renderer: &Renderer, sections: AcceptedSections<'_>, epoch: u64) {
+    pub fn observe(&mut self, state: &State, sections: AcceptedSections<'_>, epoch: u64) {
         let Some(epoch) = NonZeroU64::new(epoch) else {
             return;
         };
         let start = Instant::now();
-        let state = renderer.material_state();
         self.generation(state.generation());
         if start < self.pressure_until {
             return;
@@ -144,54 +144,82 @@ impl Live {
         }
         self.admitted_us = start.elapsed().as_micros() as u64;
     }
-    pub fn frame(
+    pub fn reference_frame(
         &mut self,
         renderer: &Renderer,
         frame: &Frame<'_>,
         window: Option<&winit::window::Window>,
         epoch: u64,
     ) {
+        if frame.title || renderer.validate_material_snapshot_mode().is_err() {
+            self.cancel(frame.title || epoch == 0);
+            return;
+        }
+        let camera = Camera {
+            position: frame.camera.to_array(),
+            clip_from_relative: renderer
+                .views(frame)
+                .primary()
+                .view_proj(frame.bob * frame.spin)
+                .to_cols_array_2d(),
+        };
+        if let Err(err) = self.frame(
+            renderer.material_state(),
+            camera,
+            renderer.lightmap_pixels,
+            [renderer.config.width, renderer.config.height],
+            window,
+            epoch,
+            false,
+        ) {
+            log::debug!("Helium live scene unavailable: {err}");
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn frame(
+        &mut self,
+        state: &State,
+        camera: Camera,
+        rgba: [u8; 1024],
+        size: [u32; 2],
+        window: Option<&winit::window::Window>,
+        epoch: u64,
+        fullscreen: bool,
+    ) -> Result<(), String> {
         let start = Instant::now();
-        self.camera = frame.camera.to_array();
-        let state = renderer.material_state();
+        self.camera = camera.position;
         self.generation(state.generation());
         if let Some(session) = &self.session {
             if let Ok(result) = session.done.try_recv() {
-                if let Err(err) = result {
-                    log::warn!("Helium S2B worker retired: {err}");
-                }
                 self.cancel(false);
                 self.next_start = start + Duration::from_secs(2);
+                if let Err(err) = result {
+                    if fullscreen {
+                        return Err(err);
+                    }
+                    log::warn!("Helium S2B worker retired: {err}");
+                }
             }
         }
-        let size = [renderer.config.width, renderer.config.height];
         if self.session.as_ref().is_some_and(|s| {
             s.ticket.is_cancelled() || s.size != size || s.generation != state.generation()
         }) {
             self.cancel(false);
         }
-        if epoch == 0
-            || window.is_none()
-            || frame.title
-            || start < self.next_input
-            || renderer.validate_material_snapshot_mode().is_err()
-            || state.light_revision().is_err()
-        {
-            if epoch == 0
-                || window.is_none()
-                || frame.title
-                || renderer.validate_material_snapshot_mode().is_err()
-            {
-                self.cancel(frame.title || epoch == 0);
-            }
-            return;
+        let (Some(epoch), Some(window)) = (NonZeroU64::new(epoch), window) else {
+            self.cancel(epoch == 0);
+            return Ok(());
+        };
+        if size.contains(&0) || start < self.next_input {
+            return Ok(());
         }
         if self.meshes.entries.is_empty() {
             self.cancel(false);
-            return;
+            return Ok(());
         }
         let Ok(light_revision) = state.light_revision() else {
-            return;
+            return Ok(());
         };
         let version = MaterialVersion {
             generation: state.generation().diagnostic_id(),
@@ -202,14 +230,13 @@ impl Live {
                 Ok(banks) => self.banks = Some(Arc::new(banks)),
                 Err(err) => {
                     self.cancel(false);
-                    log::debug!("Helium live scene unavailable: {err}");
-                    return;
+                    return Err(err.into());
                 }
             }
         }
         if self.session.is_none() {
             if start < self.next_start || !attached::can_start() {
-                return;
+                return Ok(());
             }
             let cancel = Arc::new(AtomicBool::new(false));
             let input = Arc::new(Latest::default());
@@ -217,15 +244,20 @@ impl Live {
             let worker_cancel = cancel.clone();
             let dropped = self.dropped.clone();
             let retained = self.meshes.retained.clone();
-            match attached::submit_live(window.unwrap(), cancel, move |layer| {
-                run(
+            match attached::submit_live(window, cancel, fullscreen, move |layer| {
+                let result = run(
                     layer,
                     &worker_input,
                     &worker_cancel,
-                    epoch,
+                    epoch.get(),
                     &dropped,
                     &retained,
-                )
+                );
+                if worker_cancel.load(Ordering::Acquire) {
+                    Ok(())
+                } else {
+                    result
+                }
             }) {
                 Ok((ticket, done)) => {
                     self.session = Some(Session {
@@ -239,28 +271,20 @@ impl Live {
                 Err(err) => {
                     log::debug!("Helium S2B host not ready: {err}");
                     self.next_start = start + Duration::from_secs(2);
-                    return;
+                    return Ok(());
                 }
             }
         }
         self.next_input = start + INPUT_INTERVAL;
-        let clip = renderer
-            .views(frame)
-            .primary()
-            .view_proj(frame.bob * frame.spin)
-            .to_cols_array_2d();
         let request = Request {
             scene: CpuFrame {
-                epoch: NonZeroU64::new(epoch).unwrap(), // checked before a worker can start
-                camera: Camera {
-                    position: self.camera,
-                    clip_from_relative: clip,
-                },
+                epoch,
+                camera,
                 sections: self.meshes.entries.values().cloned().collect(),
                 materials: self.banks.as_ref().unwrap().clone(),
                 lightmap: Lightmap {
                     revision: light_revision,
-                    rgba: renderer.lightmap_pixels,
+                    rgba,
                 },
             },
             prepared_us: start.elapsed().as_micros() as u64,
@@ -276,6 +300,7 @@ impl Live {
         if !self.session.as_ref().unwrap().input.offer(request) {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
+        Ok(())
     }
 }
 

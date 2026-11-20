@@ -49,6 +49,11 @@ import Foundation
   for (bundle,marker,legacy,file,expected) in [("dev.helium.g06ctest",2,false,Optional<Data>.none,Int32(2)),("dev.helium.g06ctest",2,false,Data("off\n".utf8),0),("dev.horizon.game",2,false,nil,0),("dev.horizon.game",nil,false,nil,0),("dev.helium.g06ctest",3,false,nil,-1),("dev.helium.g06ctest",2,false,Data("bad".utf8),-1),("dev.helium.g06ctest",2,false,Data("live-terrain\n".utf8),3),("dev.horizon.game",nil,true,Data("live-terrain".utf8),-1)] {
    assert(MetalDiagnosticModel.mode(bundle:bundle,marker:marker,legacy:legacy,file:file).0==expected)
   }
+  let nativeConfig = Data("native-gameplay\n".utf8)
+  assert(MetalDiagnosticModel.mode(bundle: "dev.helium.g06ctest", marker: 2, legacy: false, file: nativeConfig).0 == 4)
+  assert(MetalDiagnosticModel.mode(bundle: "dev.helium.launcher", marker: nil, legacy: true, file: nativeConfig).0 == -1)
+  assert(MetalDiagnosticModel.mode(bundle: "dev.helium.g06ctest", marker: 2, legacy: false, file: nil).0 == 2)
+
   assert(MetalDiagnosticModel.pixels(Double.nan,10)==0)
   for (age,key,active,modal,size,expected) in [(0.0,false,true,false,true,UInt32(12)),(0,true,true,false,false,10),(0,true,false,false,true,14),(0,true,true,true,true,13),(35,true,true,false,true,15)] {
    assert(MetalDiagnosticModel.invalidHost(age:age,parent:true,window:true,attached:true,hidden:false,key:key,active:active,modal:modal,size:size)==expected)

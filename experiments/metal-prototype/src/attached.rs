@@ -277,7 +277,7 @@ pub fn submit_attempt<T: Send + 'static>(
     id: u64,
     job: impl FnOnce(Layer) -> Result<T, String> + Send + 'static,
 ) -> Result<(Ticket, Receiver<Result<T, String>>), String> {
-    submit_session(window, cancel, id, None, false, job)
+    submit_session(window, cancel, id, None, Attachment::Capture, job)
 }
 /// Historical capture only: expiry is checked again by the exact Rust ready
 /// callback immediately before Swift reveals, independently of game frame polls.
@@ -288,13 +288,14 @@ pub fn submit_capture_attempt<T: Send + 'static>(
     expires: std::time::Instant,
     job: impl FnOnce(Layer) -> Result<T, String> + Send + 'static,
 ) -> Result<(Ticket, Receiver<Result<T, String>>), String> {
-    submit_session(window, cancel, id, Some(expires), false, job)
+    submit_session(window, cancel, id, Some(expires), Attachment::Capture, job)
 }
 /// Uses the same exclusive host and worker registry, separate from the capped
 /// historical flight-recorder attempts.
 pub fn submit_live<T: Send + 'static>(
     window: &impl HasWindowHandle,
     cancel: Arc<AtomicBool>,
+    fullscreen: bool,
     job: impl FnOnce(Layer) -> Result<T, String> + Send + 'static,
 ) -> Result<(Ticket, Receiver<Result<T, String>>), String> {
     use std::sync::atomic::AtomicU64;
@@ -302,14 +303,33 @@ pub fn submit_live<T: Send + 'static>(
     let id = NEXT_LIVE
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
         .map_err(|_| "live attachment IDs exhausted")?;
-    submit_session(window, cancel, id, None, true, job)
+    let attachment = if fullscreen {
+        Attachment::Gameplay
+    } else {
+        Attachment::Inset
+    };
+    submit_session(window, cancel, id, None, attachment, job)
+}
+
+enum Attachment {
+    Capture,
+    Inset,
+    Gameplay,
+}
+
+/// Validate the gameplay-specific Swift ABI and test bundle before opening a world.
+/// This only looks up an ABI export and checks bundle metadata.
+pub fn gameplay_supported() -> Result<bool, String> {
+    let p = symbol("horizon_native_display_gameplay_supported")?;
+    let f: extern "C" fn() -> bool = unsafe { std::mem::transmute(p) };
+    Ok(f())
 }
 fn submit_session<T: Send + 'static>(
     window: &impl HasWindowHandle,
     cancel: Arc<AtomicBool>,
     id: u64,
     expires: Option<std::time::Instant>,
-    live: bool,
+    attachment: Attachment,
     job: impl FnOnce(Layer) -> Result<T, String> + Send + 'static,
 ) -> Result<(Ticket, Receiver<Result<T, String>>), String> {
     if !objc2_foundation::NSThread::isMainThread_class() {
@@ -319,10 +339,11 @@ fn submit_session<T: Send + 'static>(
     else {
         return Err("expected actual UIKit window".into());
     };
-    let request = symbol(if live {
-        "horizon_native_display_request_live"
-    } else {
-        "horizon_native_display_request"
+    let live = !matches!(attachment, Attachment::Capture);
+    let request = symbol(match attachment {
+        Attachment::Capture => "horizon_native_display_request",
+        Attachment::Inset => "horizon_native_display_request_live",
+        Attachment::Gameplay => "horizon_native_display_request_gameplay",
     })?;
     // Paired publication/release ABI must exist BEFORE UI resources are created.
     let _ = symbol("horizon_native_display_publish")?;

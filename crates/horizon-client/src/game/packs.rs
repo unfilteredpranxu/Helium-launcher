@@ -268,6 +268,11 @@ impl Game<'_> {
     /// progress meanwhile, and the overlay takes no input (`LoadingOverlay`),
     /// so what is held is released (`KeyMapping.releaseAll`).
     pub(super) fn spawn_pack_reload(&mut self, kind: ReloadKind) -> std::io::Result<()> {
+        if self.options.native_gameplay {
+            return Err(std::io::Error::other(
+                "in-session resource reload is unavailable in direct Metal gameplay",
+            ));
+        }
         self.keys.clear();
         self.physical_keys.clear();
         self.left = false;

@@ -130,7 +130,7 @@ impl Game<'_> {
     /// Where touches land, in GUI pixels: the screen the game draws on, or the phone's window when the
     /// phone is splitscreen's controller ([`Self::touch_on_phone`]).
     fn touch_batch(&self) -> Option<HudBatch> {
-        if self.touch_on_phone() {
+        if self.touch_on_phone() || self.options.native_gameplay {
             return self.window.as_ref().map(|w| {
                 let size = w.inner_size();
                 HudBatch::new([size.width, size.height])
