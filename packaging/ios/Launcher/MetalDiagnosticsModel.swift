@@ -27,7 +27,7 @@ struct MetalDiagnosticModel {
     }
     static func hud(_ a: [UInt64], mode: String) -> String {
         if mode == "NATIVE-GAMEPLAY-TERRAIN" {
-            return "HELIUM S2D · DIRECT METAL TERRAIN\nOpaque and cutout only · PHYSICAL SCANOUT UNVERIFIED"
+            return "HELIUM S2D · DIRECT METAL TERRAIN\nTerrain only · early blend pass · PHYSICAL SCANOUT UNVERIFIED"
         }
         if mode == "LIVE-TERRAIN" {
             return "HELIUM S2B · LIVE TERRAIN MODE\nNative completion and frame timing in game log\nwgpu reference active · PHYSICAL SCANOUT UNVERIFIED"

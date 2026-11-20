@@ -125,6 +125,7 @@ fn owned_section_and_camera_keep_terrain_abi_and_reject_foreign_epochs() {
             revision: 2,
             rgba: [255; 1024],
         },
+        clear_rgb: [0.0; 3],
         materials: Arc::new(materials),
         sections: vec![section],
     };

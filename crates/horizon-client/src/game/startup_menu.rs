@@ -377,7 +377,7 @@ pub(super) fn spawn_loader(
                     vanilla_root.clone()
                 });
             let root = mods::content_root(&root, &settings.mods.enabled, &dev_mods);
-            let result = load_resources(
+            let result = load_resources_for_game(
                 root,
                 world.as_deref(),
                 &vanilla_root,

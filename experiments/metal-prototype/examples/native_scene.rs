@@ -131,6 +131,7 @@ mod apple {
                 revision: 1,
                 rgba: [255; 1024],
             },
+            clear_rgb: [0.0; 3],
             materials: Arc::new(materials),
             sections: vec![section(section_version, 0)?, section(second, 1)?],
         };

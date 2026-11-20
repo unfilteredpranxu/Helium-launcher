@@ -39,6 +39,7 @@ pub(in crate::runtime) struct Live {
     session: Option<Session>,
     next_start: Instant,
     pressure_until: Instant,
+    restream_after_pressure: bool,
     next_input: Instant,
     dropped: Arc<AtomicU64>,
     admitted_us: u64,
@@ -54,6 +55,7 @@ impl Live {
             session: None,
             next_start: Instant::now(),
             pressure_until: Instant::now(),
+            restream_after_pressure: false,
             next_input: Instant::now(),
             dropped: Arc::new(AtomicU64::new(0)),
             admitted_us: 0,
@@ -68,12 +70,17 @@ impl Live {
             self.meshes.clear();
             self.camera = [0.; 3];
             self.generation = None;
+            self.restream_after_pressure = false;
         }
     }
     pub fn memory_pressure(&mut self) {
         self.cancel(true);
         self.pressure_until = Instant::now() + Duration::from_secs(5);
         self.next_start = self.pressure_until;
+        self.restream_after_pressure = true;
+    }
+    pub fn take_restream_request(&mut self) -> bool {
+        Instant::now() >= self.pressure_until && std::mem::take(&mut self.restream_after_pressure)
     }
     pub fn remove_columns(&mut self, columns: impl Iterator<Item = (i32, i32)>) {
         for column in columns {
@@ -88,11 +95,19 @@ impl Live {
     }
     fn generation(&mut self, generation: Generation) {
         if self.generation != Some(generation) {
+            let restream = self.generation.is_none() && self.restream_after_pressure;
             self.cancel(true);
+            self.restream_after_pressure = restream;
             self.generation = Some(generation);
         }
     }
-    pub fn observe(&mut self, state: &State, sections: AcceptedSections<'_>, epoch: u64) {
+    pub fn observe(
+        &mut self,
+        state: &State,
+        sections: AcceptedSections<'_>,
+        epoch: u64,
+        translucent: bool,
+    ) {
         let Some(epoch) = NonZeroU64::new(epoch) else {
             return;
         };
@@ -111,7 +126,13 @@ impl Live {
         for section in sections {
             let (key, min_y, version, mesh) = section.parts();
             self.meshes.remove(key);
-            let quads = mesh.solid.len() / 4;
+            let quads = (mesh.solid.len()
+                + if translucent {
+                    mesh.translucent.len()
+                } else {
+                    0
+                })
+                / 4;
             // Include the worst case resident draw metadata in admission.
             let bytes = quads.saturating_mul(120 + 2 * size_of::<(usize, usize, u32)>());
             if quads == 0 || bytes > GEOMETRY_BUDGET {
@@ -135,9 +156,16 @@ impl Live {
                 continue;
             }
             budget -= bytes;
-            if let Ok(Some(geometry)) =
-                Geometry::capture(key, min_y, mesh, state.generation(), version, layers)
-                    .and_then(|captured| captured.map(|g| g.into_scene(epoch)).transpose())
+            if let Ok(Some(geometry)) = Geometry::capture_passes(
+                key,
+                min_y,
+                mesh,
+                state.generation(),
+                version,
+                layers,
+                translucent,
+            )
+            .and_then(|captured| captured.map(|g| g.into_scene(epoch)).transpose())
             {
                 self.meshes.admit(geometry, self.camera);
             }
@@ -170,7 +198,7 @@ impl Live {
             [renderer.config.width, renderer.config.height],
             window,
             epoch,
-            false,
+            None,
         ) {
             log::debug!("Helium live scene unavailable: {err}");
         }
@@ -185,8 +213,9 @@ impl Live {
         size: [u32; 2],
         window: Option<&winit::window::Window>,
         epoch: u64,
-        fullscreen: bool,
+        gameplay_clear: Option<[f32; 3]>,
     ) -> Result<(), String> {
+        let fullscreen = gameplay_clear.is_some();
         let start = Instant::now();
         self.camera = camera.position;
         self.generation(state.generation());
@@ -252,6 +281,7 @@ impl Live {
                     epoch.get(),
                     &dropped,
                     &retained,
+                    fullscreen,
                 );
                 if worker_cancel.load(Ordering::Acquire) {
                     Ok(())
@@ -280,6 +310,7 @@ impl Live {
             scene: CpuFrame {
                 epoch,
                 camera,
+                clear_rgb: gameplay_clear.unwrap_or([0.0; 3]),
                 sections: self.meshes.entries.values().cloned().collect(),
                 materials: self.banks.as_ref().unwrap().clone(),
                 lightmap: Lightmap {
@@ -316,8 +347,12 @@ fn run(
     epoch: u64,
     dropped: &AtomicU64,
     retained: &AtomicUsize,
+    fullscreen: bool,
 ) -> Result<(), String> {
     let renderer = TerrainRenderer::new()?;
+    if fullscreen {
+        log::info!("Helium S2D Metal gameplay device and command queue ready epoch={epoch}");
+    }
     let display = layer.display(&renderer)?;
     let mut scene = LiveScene::new(&renderer, display.dimensions())?;
     let mut material = None;
@@ -486,6 +521,13 @@ fn run(
                 let deadline = Instant::now() + GPU_DEADLINE;
                 loop {
                     if let Some(result) = scene.poll(Some(&display), cancel)? {
+                        let first = metrics.completed == 0;
+                        if fullscreen && first {
+                            log::info!(
+                                "Helium S2D REAL game Metal draw and present completed epoch={epoch} draw_calls={}; physical scanout unverified",
+                                result.draws,
+                            );
+                        }
                         metrics.record(result, request.prepared_us);
                         available = Instant::now();
                         layer.reveal_live()?;

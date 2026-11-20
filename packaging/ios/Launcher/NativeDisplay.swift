@@ -105,15 +105,20 @@ public func nativeDisplayRequestLive(_ id: UInt64, _ pointer: UnsafeMutableRawPo
           Bundle.main.object(forInfoDictionaryKey: "HeliumMetalDiagnosticsVersion") as? Int == 2 else { return false }
     return nativeDisplayRequestImpl(id, pointer, work, cancel, ready, attachment: .inset)
 }
-@_cdecl("horizon_native_display_gameplay_supported")
-public func nativeDisplayGameplaySupported() -> Bool {
+private func nativeGameplayBundle() -> Bool {
     Bundle.main.bundleIdentifier == "dev.helium.g06ctest" &&
         Bundle.main.object(forInfoDictionaryKey: "HeliumMetalDiagnosticsVersion") as? Int == 2
 }
 
+@_cdecl("horizon_native_display_gameplay_supported")
+public func nativeDisplayGameplaySupported() -> Int32 {
+    guard nativeGameplayBundle() else { return 0 }
+    return MTLCreateSystemDefaultDevice() == nil ? -1 : 1
+}
+
 @_cdecl("horizon_native_display_request_gameplay")
 public func nativeDisplayRequestGameplay(_ id: UInt64, _ pointer: UnsafeMutableRawPointer?, _ work: NativeWork?, _ cancel: NativeCancel?, _ ready: NativeReady?) -> Bool {
-    guard nativeDisplayGameplaySupported() else { return false }
+    guard nativeGameplayBundle() else { return false }
     return nativeDisplayRequestImpl(id, pointer, work, cancel, ready, attachment: .gameplay)
 }
 @_cdecl("horizon_native_display_request")
@@ -134,7 +139,7 @@ private func nativeDisplayRequestImpl(_ id: UInt64, _ pointer: UnsafeMutableRawP
         LauncherLog.write("native attach rejected: physical dimensions \(pixels), policy 1..4096 and <=64MiB three-drawable reservation")
         return false
     }
-    guard MTLCreateSystemDefaultDevice() != nil else {
+    guard let device = MTLCreateSystemDefaultDevice() else {
         diagnosticEvent(id,30,28)
         LauncherLog.write("native attach rejected: no system Metal device")
         return false
@@ -150,7 +155,7 @@ private func nativeDisplayRequestImpl(_ id: UInt64, _ pointer: UnsafeMutableRawP
     let view=target.view; let metal=view.layer as! CAMetalLayer
     view.isUserInteractionEnabled = attachment == .gameplay
     view.autoresizingMask = !attachment.fullscreen ? [.flexibleLeftMargin, .flexibleWidth, .flexibleHeight] : [.flexibleWidth, .flexibleHeight]; view.alpha=0
-    view.initialPixels=pixels; metal.device=MTLCreateSystemDefaultDevice(); metal.pixelFormat = .bgra8Unorm
+    view.initialPixels=pixels; metal.device=device; metal.pixelFormat = .bgra8Unorm
     metal.colorspace=CGColorSpace(name: CGColorSpace.linearSRGB); metal.framebufferOnly=true
     metal.allowsNextDrawableTimeout=true; metal.presentsWithTransaction=false; metal.maximumDrawableCount=3
     metal.contentsScale=window.screen.scale; metal.drawableSize=pixels
@@ -161,7 +166,7 @@ private func nativeDisplayRequestImpl(_ id: UInt64, _ pointer: UnsafeMutableRawP
     case .inset:
         label.text = "HELIUM S2B · LIVE NATIVE OPAQUE/CUTOUT\nwgpu reference and input remain active"
     case .gameplay:
-        label.text = "HELIUM S2D · DIRECT METAL TERRAIN\nOpaque and cutout only"
+        label.text = "HELIUM S2D · DIRECT METAL TERRAIN\nTerrain only · early blend pass"
     }
     label.textColor = .yellow; label.backgroundColor = .black; label.numberOfLines=2; label.font = .systemFont(ofSize:12)
     view.addSubview(label)

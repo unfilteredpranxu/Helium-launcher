@@ -23,6 +23,34 @@ pub(super) fn prepare(pack: &PackResources) -> Result<NativeTerrainMaterials> {
 }
 
 impl Game<'_> {
+    /// Pressure may drop all pinned geometry while the streamer still owns
+    /// the chunks. Requeue a bounded neighborhood once the native pause ends.
+    pub(super) fn remesh_native_spawn_area(&mut self) {
+        let Some(player) = self.player.as_ref() else {
+            return;
+        };
+        if !self
+            .direct_metal
+            .as_mut()
+            .is_some_and(|native| native.native_restream_requested())
+        {
+            return;
+        }
+        let (cx, cz) = self.streaming.center;
+        let layout = self.world.layout();
+        let cy = ((player.position.y.floor() as i32 - layout.min_y()) >> 4)
+            .clamp(0, layout.height() / 16 - 1);
+        for x in (cx - 2)..=(cx + 2) {
+            for z in (cz - 2)..=(cz + 2) {
+                if self.world.chunks.contains_key(&(x, z)) {
+                    for y in (cy - 2).max(0)..=(cy + 2).min(layout.height() / 16 - 1) {
+                        self.world.dirty_sections.insert((x, y, z));
+                    }
+                }
+            }
+        }
+    }
+
     pub(super) fn render_native_terrain(
         &mut self,
         view: Option<(glam::DVec3, f32, f32)>,
@@ -61,6 +89,11 @@ impl Game<'_> {
             self.boss_overlay.darken_amount(alpha),
             self.settings.extras.fullbright,
         );
+        let clear_rgb = if self.settings.horizon.sky {
+            sky.sky_color
+        } else {
+            sky.fog_color
+        };
         let materials = self
             .native_terrain
             .as_mut()
@@ -79,6 +112,7 @@ impl Game<'_> {
                     clip_from_relative: clip,
                 },
                 size,
+                clear_rgb.map(|c| c.clamp(0.0, 1.0)),
             )
             .map_err(|error| format!("direct Metal gameplay frame: {error}").into())
     }

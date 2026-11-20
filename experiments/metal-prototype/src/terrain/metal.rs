@@ -26,6 +26,8 @@ pub struct TerrainRenderer {
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     reversed: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     banked_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    blended_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    blended_reversed: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     forward: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     capabilities: Capabilities,
     upload_device: crate::upload::Id,
@@ -157,22 +159,40 @@ impl TerrainRenderer {
         let banked_pipeline = device
             .newRenderPipelineStateWithDescriptor_error(&desc)
             .map_err(|e| format!("banked pipeline: {e}"))?;
-        let depth = |compare| {
+        desc.setFragmentFunction(
+            library
+                .newFunctionWithName(&NSString::from_str("terrain_banked_translucent"))
+                .as_deref(),
+        );
+        // SAFETY: valid color attachment zero, already configured for RGBA8.
+        let blend = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
+        blend.setBlendingEnabled(true);
+        blend.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+        blend.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+        blend.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+        blend.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+        let blended_pipeline = device
+            .newRenderPipelineStateWithDescriptor_error(&desc)
+            .map_err(|e| format!("blended terrain pipeline: {e}"))?;
+        let depth = |compare, write| {
             let desc = MTLDepthStencilDescriptor::new();
             desc.setDepthCompareFunction(compare);
-            desc.setDepthWriteEnabled(true);
+            desc.setDepthWriteEnabled(write);
             device
                 .newDepthStencilStateWithDescriptor(&desc)
                 .ok_or_else(|| "depth state allocation failed".to_string())
         };
-        let reversed = depth(MTLCompareFunction::GreaterEqual)?;
-        let forward = depth(MTLCompareFunction::LessEqual)?;
+        let reversed = depth(MTLCompareFunction::GreaterEqual, true)?;
+        let blended_reversed = depth(MTLCompareFunction::GreaterEqual, false)?;
+        let forward = depth(MTLCompareFunction::LessEqual, true)?;
         Ok(Self {
             device,
             queue,
             pipeline,
             banked_pipeline,
+            blended_pipeline,
             reversed,
+            blended_reversed,
             forward,
             capabilities,
             upload_device: crate::upload::Id::new()?,

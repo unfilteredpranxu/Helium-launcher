@@ -320,9 +320,24 @@ enum Attachment {
 /// Validate the gameplay-specific Swift ABI and test bundle before opening a world.
 /// This only looks up an ABI export and checks bundle metadata.
 pub fn gameplay_supported() -> Result<bool, String> {
+    for name in [
+        "horizon_native_display_request_gameplay",
+        "horizon_native_display_publish",
+        "horizon_native_display_cancel",
+        "horizon_diag_host_idle_v2",
+        "horizon_diag_hud_v2",
+    ] {
+        symbol(name)?;
+    }
     let p = symbol("horizon_native_display_gameplay_supported")?;
-    let f: extern "C" fn() -> bool = unsafe { std::mem::transmute(p) };
-    Ok(f())
+    // SAFETY: gameplay-only Swift preflight export, with no view pointer.
+    let f: extern "C" fn() -> i32 = unsafe { std::mem::transmute(p) };
+    match f() {
+        0 => Ok(false),
+        1 => Ok(true),
+        -1 => Err("system Metal device unavailable for gameplay".into()),
+        _ => Err("invalid direct Metal gameplay preflight result".into()),
+    }
 }
 fn submit_session<T: Send + 'static>(
     window: &impl HasWindowHandle,

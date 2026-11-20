@@ -32,6 +32,7 @@ pub struct LiveSection<G> {
     indices: Buffer,
     // Byte offsets and counts in the unchanged index stream. Calculated once.
     runs: Vec<(usize, usize, u32)>,
+    opaque_runs: usize,
     mask: u8,
     payload: usize,
 }
@@ -44,6 +45,29 @@ impl<G: Copy + Eq> LiveSection<G> {
         sprites: u32,
         budget: usize,
     ) -> Result<Self, String> {
+        Self::with_passes(
+            renderer,
+            mesh,
+            identity,
+            split,
+            sprites,
+            budget,
+            mesh.indices.len(),
+        )
+    }
+
+    fn with_passes(
+        renderer: &TerrainRenderer,
+        mesh: &Mesh<'_>,
+        identity: upload::Identity<G>,
+        split: u32,
+        sprites: u32,
+        budget: usize,
+        opaque_indices: usize,
+    ) -> Result<Self, String> {
+        if opaque_indices > mesh.indices.len() || !opaque_indices.is_multiple_of(3) {
+            return Err("invalid opaque/translucent pass boundary".into());
+        }
         let index_bytes = std::mem::size_of_val(mesh.indices);
         let metadata = (mesh.indices.len() / 3)
             .checked_mul(size_of::<(usize, usize, u32)>())
@@ -69,12 +93,16 @@ impl<G: Copy + Eq> LiveSection<G> {
         for (tri, indices) in mesh.indices.chunks_exact(3).enumerate() {
             let bank = u32::from(mesh.vertex(indices[0] as usize)?.layer & !OPAQUE_LAYER) / split;
             mask |= 1 << bank;
-            if let Some(last) = runs.last_mut().filter(|last| last.2 == bank) {
+            if let Some(last) = runs
+                .last_mut()
+                .filter(|last| last.2 == bank && tri * 3 != opaque_indices)
+            {
                 last.1 += 3;
             } else {
                 runs.push((tri * 3 * size_of::<u32>(), 3, bank));
             }
         }
+        let opaque_runs = runs.partition_point(|run| run.0 < opaque_indices * size_of::<u32>());
         // SAFETY: initialized u32 values, exact byte length, borrowed for copying.
         let indices =
             unsafe { std::slice::from_raw_parts(mesh.indices.as_ptr().cast(), index_bytes) };
@@ -87,6 +115,7 @@ impl<G: Copy + Eq> LiveSection<G> {
             vertices: upload(&renderer.device, mesh.vertices)?,
             indices: upload(&renderer.device, indices)?,
             runs,
+            opaque_runs,
             mask,
             payload,
         })
@@ -110,13 +139,14 @@ impl LiveSection<u64> {
             return Err("section belongs to a different scene epoch or material generation".into());
         }
         let bank = frame.materials.banks()[0].description();
-        let mut resident = Self::new(
+        let mut resident = Self::with_passes(
             renderer,
             &section.mesh(),
             bank.identity,
             bank.split,
             bank.sprites,
             budget,
+            section.opaque_indices(),
         )?;
         resident.epoch = Some(frame.epoch);
         Ok(resident)
@@ -127,6 +157,7 @@ pub struct LiveFrame<'a, G> {
     pub sections: &'a [(&'a LiveSection<G>, View)],
     pub identity: upload::Identity<G>,
     pub lightmap: &'a [u8; 1024],
+    pub clear_rgb: [f32; 3],
 }
 pub enum LiveSubmission {
     Submitted,
@@ -229,6 +260,7 @@ impl LiveScene {
                 sections,
                 identity: frame.materials.banks()[0].description().identity,
                 lightmap: &frame.lightmap.rgba,
+                clear_rgb: frame.clear_rgb,
             },
             cancelled,
         )
@@ -260,11 +292,13 @@ impl LiveScene {
             sections,
             identity,
             lightmap,
+            clear_rgb,
         } = scene;
         if self.device != renderer.upload_device
             || cancelled.load(Ordering::Acquire)
             || sections.is_empty()
             || sections.len() > MAX_SECTIONS
+            || !clear_rgb.iter().all(|c| (0.0..=1.0).contains(c))
         {
             return Err("invalid/cancelled live frame".into());
         }
@@ -354,9 +388,9 @@ impl LiveScene {
         color.setLoadAction(MTLLoadAction::Clear);
         color.setStoreAction(MTLStoreAction::Store);
         color.setClearColor(MTLClearColor {
-            red: 0.,
-            green: 0.,
-            blue: 0.,
+            red: f64::from(clear_rgb[0]),
+            green: f64::from(clear_rgb[1]),
+            blue: f64::from(clear_rgb[2]),
             alpha: 1.,
         });
         let depth = pass.depthAttachment();
@@ -367,52 +401,79 @@ impl LiveScene {
         let encoder = command
             .renderCommandEncoderWithDescriptor(&pass)
             .ok_or("live terrain encoder unavailable")?;
-        encoder.setRenderPipelineState(&renderer.banked_pipeline);
-        encoder.setDepthStencilState(Some(&renderer.reversed));
         encoder.setCullMode(MTLCullMode::None);
+        // SAFETY: the lightmap is retained by this command and texture slot zero
+        // matches both terrain vertex pipelines.
+        unsafe { encoder.setVertexTexture_atIndex(Some(&self.light), 0) };
         let mut draws = 0;
-        let mut bound = None;
-        for (section, view) in sections {
-            let mut uniforms = [0f32; 20];
-            for (dst, src) in uniforms
-                .iter_mut()
-                .zip(view.clip_from_relative.iter().flatten())
-            {
-                *dst = *src;
+        for blended in [false, true] {
+            if blended {
+                if !sections.iter().any(|(s, _)| s.opaque_runs < s.runs.len()) {
+                    break;
+                }
+                encoder.setRenderPipelineState(&renderer.blended_pipeline);
+                encoder.setDepthStencilState(Some(&renderer.blended_reversed));
+            } else {
+                encoder.setRenderPipelineState(&renderer.banked_pipeline);
+                encoder.setDepthStencilState(Some(&renderer.reversed));
             }
-            uniforms[16..19].copy_from_slice(&view.origin);
-            uniforms[19] = UV_STEP;
-            // SAFETY: Metal copies all uniform bytes immediately. Encoded buffers,
-            // textures and index ranges are validated and retained by the command.
-            unsafe {
-                encoder.setVertexTexture_atIndex(Some(&self.light), 0);
-                encoder.setVertexBuffer_offset_atIndex(Some(&section.vertices), 0, 0);
-                encoder.setVertexBytes_length_atIndex(
-                    NonNull::from(&uniforms).cast(),
-                    size_of_val(&uniforms),
-                    1,
-                );
-                for &(offset, count, bank) in &section.runs {
-                    if bound != Some(bank) {
-                        let texture = &banks
-                            .iter()
-                            .find(|(id, _)| *id == bank)
-                            .ok_or("missing validated live bank")?
-                            .1;
-                        let first = bank * d.split;
-                        encoder.setFragmentTexture_atIndex(Some(texture), 0);
-                        encoder.setFragmentBytes_length_atIndex(NonNull::from(&first).cast(), 4, 0);
-                        bound = Some(bank);
+            let mut bound = None;
+            for i in 0..sections.len() {
+                // The game worker supplies nearest-first sections. Keep opaque
+                // early depth rejection and blend farther sections first.
+                let (section, view) = &sections[if blended { sections.len() - 1 - i } else { i }];
+                let runs = if blended {
+                    &section.runs[section.opaque_runs..]
+                } else {
+                    &section.runs[..section.opaque_runs]
+                };
+                if runs.is_empty() {
+                    continue;
+                }
+                let mut uniforms = [0f32; 20];
+                for (dst, src) in uniforms
+                    .iter_mut()
+                    .zip(view.clip_from_relative.iter().flatten())
+                {
+                    *dst = *src;
+                }
+                uniforms[16..19].copy_from_slice(&view.origin);
+                uniforms[19] = UV_STEP;
+                // SAFETY: Metal copies all uniform bytes immediately. Encoded buffers,
+                // textures and index ranges are validated and retained by the command.
+                unsafe {
+                    encoder.setVertexBuffer_offset_atIndex(Some(&section.vertices), 0, 0);
+                    encoder.setVertexBytes_length_atIndex(
+                        NonNull::from(&uniforms).cast(),
+                        size_of_val(&uniforms),
+                        1,
+                    );
+                    for &(offset, count, bank) in runs {
+                        if bound != Some(bank) {
+                            let texture = &banks
+                                .iter()
+                                .find(|(id, _)| *id == bank)
+                                .ok_or("missing validated live bank")?
+                                .1;
+                            let first = bank * d.split;
+                            encoder.setFragmentTexture_atIndex(Some(texture), 0);
+                            encoder.setFragmentBytes_length_atIndex(
+                                NonNull::from(&first).cast(),
+                                4,
+                                0,
+                            );
+                            bound = Some(bank);
+                        }
+                        encoder
+                            .drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                                MTLPrimitiveType::Triangle,
+                                count,
+                                MTLIndexType::UInt32,
+                                &section.indices,
+                                offset,
+                            );
+                        draws += 1;
                     }
-                    encoder
-                        .drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
-                            MTLPrimitiveType::Triangle,
-                            count,
-                            MTLIndexType::UInt32,
-                            &section.indices,
-                            offset,
-                        );
-                    draws += 1;
                 }
             }
         }
@@ -555,6 +616,118 @@ mod tests {
 
     #[test]
     #[ignore = "requires Apple Metal; CI executes the ignored GPU suite serially"]
+    fn native_translucency_blends_in_depth_order_over_terrain_and_sky() {
+        autoreleasepool(|_| {
+            let renderer = TerrainRenderer::new().unwrap();
+            let cancel = AtomicBool::new(false);
+            let (mut fixture, _) = fixture();
+            fixture.description.version = upload::BANKED_VERSION;
+            fixture.pixels = Arc::new(
+                [
+                    [255, 0, 0, 255].repeat(5),
+                    [0, 0, 255, 128].repeat(5),
+                    [0, 255, 0, 128].repeat(5),
+                ]
+                .concat(),
+            );
+            let bank = Synthetic(fixture);
+            let d = bank.description();
+            let mut material = renderer
+                .create_material_set(&[bank.clone()], &cancel, budget())
+                .unwrap();
+            let target = material.bank_mut(0).unwrap();
+            target
+                .begin_upload(&renderer, bank, &cancel, upload::Update::Full, budget())
+                .unwrap();
+            let started = Instant::now();
+            loop {
+                match target.poll_upload(&renderer, &cancel) {
+                    upload::Poll::Completed(_) => break,
+                    upload::Poll::Pending => assert!(started.elapsed() < Duration::from_secs(3)),
+                    _ => panic!("translucency fixture upload failed"),
+                }
+            }
+            retire(&renderer);
+            let section = |layer: u16, z, opaque: bool| {
+                let vertices = [
+                    [-0.5, -0.5, z],
+                    [0.5, -0.5, z],
+                    [0.5, 0.5, z],
+                    [-0.5, 0.5, z],
+                ]
+                .map(|pos| TerrainVertex {
+                    pos,
+                    uv: [0; 2],
+                    layer,
+                    light: 0,
+                    color: 0xffffff,
+                });
+                LiveSection::with_passes(
+                    &renderer,
+                    &Mesh::from_vertices(&vertices, &[0, 1, 2, 0, 2, 3]),
+                    d.identity,
+                    d.split,
+                    d.sprites,
+                    4096,
+                    usize::from(opaque) * 6,
+                )
+                .unwrap()
+            };
+            let solid = section(OPAQUE_LAYER, 0.50, true);
+            let front = section(1, 0.75, false);
+            let back = section(2, 0.25, false);
+            let view = View::identity();
+            let mut scene = LiveScene::new(&renderer, [64, 64]).unwrap();
+            let both_passes = [(&front, view), (&solid, view), (&back, view)];
+            let over_sky = [(&front, view), (&back, view)];
+            let channels = |a: &[u8], b: [u8; 4]| a.iter().zip(b).all(|(&x, y)| x.abs_diff(y) <= 2);
+            for (sections, expected) in [
+                (&both_passes[..], [127, 0, 128, 255]),
+                (&over_sky[..], [16, 64, 192, 255]),
+            ] {
+                assert!(matches!(
+                    scene
+                        .submit(
+                            &renderer,
+                            &material,
+                            None,
+                            LiveFrame {
+                                sections,
+                                identity: d.identity,
+                                lightmap: &[255; 1024],
+                                clear_rgb: [0.25, 0.0, 1.0],
+                            },
+                            &cancel
+                        )
+                        .unwrap(),
+                    LiveSubmission::Submitted
+                ));
+                let started = Instant::now();
+                loop {
+                    if let Some(result) = scene.poll(None, &cancel).unwrap() {
+                        assert_eq!(result.draws, sections.len() as u64);
+                        break;
+                    }
+                    assert!(started.elapsed() < Duration::from_secs(3));
+                }
+                retire(&renderer);
+                let pixels = readback(&renderer, &scene);
+                let center = (32 * 64 + 32) * 4;
+                assert!(
+                    channels(&pixels[center..center + 4], expected),
+                    "{:?}",
+                    &pixels[center..center + 4]
+                );
+                assert!(channels(&pixels[..4], [64, 0, 255, 255]));
+            }
+            eprintln!(
+                "S2D synthetic Apple Metal readback: ordered translucent terrain, reverse-Z opaque rejection and production-format clear passed"
+            );
+        });
+    }
+
+    #[test]
+    #[ignore = "requires Apple Metal; CI executes the ignored GPU suite serially"]
     fn live_resident_sections_render_consecutive_camera_frames_and_present() {
         autoreleasepool(|_| {
             let renderer = TerrainRenderer::new().unwrap();
@@ -621,6 +794,7 @@ mod tests {
                 sections: &initial,
                 identity: d.identity,
                 lightmap: &light,
+                clear_rgb: [0.0; 3],
             };
             assert!(
                 scene
@@ -660,6 +834,7 @@ mod tests {
                             sections: &[(&obsolete, identity)],
                             identity: d.identity,
                             lightmap: &light,
+                            clear_rgb: [0.0; 3],
                         },
                         &cancel
                     )
@@ -735,6 +910,7 @@ mod tests {
                                 sections,
                                 identity: material.description().identity,
                                 lightmap: &light,
+                                clear_rgb: [0.0; 3],
                             },
                             &cancel
                         )
@@ -791,6 +967,7 @@ mod tests {
                             sections: &last,
                             identity: material.description().identity,
                             lightmap: &light,
+                            clear_rgb: [0.0; 3],
                         },
                         &cancel
                     )

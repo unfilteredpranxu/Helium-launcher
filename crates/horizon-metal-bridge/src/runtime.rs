@@ -133,6 +133,7 @@ struct Geometry {
     bounds: [[f32; 3]; 2],
     preparation_us: u64,
     omitted_translucent_vertices: usize,
+    opaque_indices: usize,
     vertices: Vec<u8>,
     indices: Vec<u32>,
 }
@@ -145,41 +146,83 @@ impl Geometry {
         sequence: u64,
         layers: usize,
     ) -> Result<Option<Self>, String> {
+        Self::capture_passes(key, min_y, mesh, generation, sequence, layers, false)
+    }
+
+    fn capture_passes(
+        key: Key,
+        min_y: i32,
+        mesh: &SectionMesh,
+        generation: Generation,
+        sequence: u64,
+        layers: usize,
+        translucent: bool,
+    ) -> Result<Option<Self>, String> {
+        use helium_metal_prototype::section::layout;
+
         let origin = section_origin(key, min_y)?;
+        let solid_len = mesh.solid.len();
+        let blended_len = if translucent {
+            mesh.translucent.len()
+        } else {
+            0
+        };
+        let solid = layout(solid_len)?;
+        let blended = layout(blended_len)?;
+        if solid.geometry_bytes.saturating_add(blended.geometry_bytes) > GEOMETRY_BUDGET {
+            return Err("combined section passes exceed the retained geometry budget".into());
+        }
+        let limits = Limits {
+            max_buffer_bytes: GEOMETRY_BUDGET,
+            geometry_bytes: GEOMETRY_BUDGET,
+            texture_layers: layers,
+        };
         let mut indices = Vec::new();
+        indices
+            .try_reserve_exact(solid.index_count + blended.index_count)
+            .map_err(|_| "section index allocation failed")?;
         let export = adapter::expanded_opaque_cutout(
             mesh,
             origin,
             Format::BakedSectionSolid,
-            Limits {
-                max_buffer_bytes: GEOMETRY_BUDGET,
-                geometry_bytes: GEOMETRY_BUDGET,
-                texture_layers: layers,
-            },
+            limits,
             &mut indices,
         )?;
-        let Some(prepared) = export.solid.mesh() else {
-            return Ok(None);
+        let mut transparent_indices = Vec::new();
+        let transparent = if translucent {
+            Some(adapter::expanded_translucent(
+                mesh,
+                origin,
+                limits,
+                &mut transparent_indices,
+            )?)
+        } else {
+            None
         };
+        if solid_len == 0 && blended_len == 0 {
+            return Ok(None);
+        }
         let bounds = mesh
             .bounds
             .or_else(|| mesh.compute_bounds())
             .ok_or("missing section bounds")?;
+        let vertex_bytes = solid.vertex_bytes + blended.vertex_bytes;
         let mut vertices = Vec::new();
         vertices
-            .try_reserve_exact(prepared.vertices.len())
+            .try_reserve_exact(vertex_bytes)
             .map_err(|_| "section retention allocation failed")?;
-        if vertices.capacity() != prepared.vertices.len() {
-            return Err("unexpected retained geometry capacity".into());
+        if let Some(opaque) = export.solid.mesh() {
+            vertices.extend_from_slice(opaque.vertices);
         }
-        vertices.extend_from_slice(prepared.vertices);
-        if indices
-            .capacity()
-            .checked_mul(4)
-            .and_then(|n| n.checked_add(vertices.capacity()))
-            .is_none_or(|n| n > GEOMETRY_BUDGET)
+        if vertices.capacity() != vertex_bytes
+            || indices.capacity() * size_of::<u32>() + vertices.capacity() > GEOMETRY_BUDGET
         {
             return Err("retained geometry capacity exceeds policy".into());
+        }
+        if let Some(blended) = transparent.as_ref().and_then(|p| p.mesh()) {
+            vertices.extend_from_slice(blended.vertices);
+            // Combined layout was checked against a 2 MiB budget above.
+            indices.extend(blended.indices.iter().map(|i| i + solid_len as u32));
         }
         Ok(Some(Self {
             key,
@@ -188,7 +231,8 @@ impl Geometry {
             sequence,
             bounds: bounds.map(|p| p.to_array()),
             preparation_us: 0,
-            omitted_translucent_vertices: mesh.translucent.len(),
+            omitted_translucent_vertices: mesh.translucent.len() - blended_len,
+            opaque_indices: solid.index_count,
             vertices,
             indices,
         }))
@@ -212,7 +256,8 @@ impl Geometry {
             self.vertices,
             self.indices,
             GEOMETRY_BUDGET,
-        )
+        )?
+        .with_opaque_indices(self.opaque_indices)
     }
 
     fn mesh(&self) -> Mesh<'_> {
@@ -469,8 +514,15 @@ impl Controller {
         sections: AcceptedSections<'_>,
     ) {
         if let Some(live) = &mut self.live {
-            live.observe(materials.materials(), sections, self.world_epoch);
+            live.observe(materials.materials(), sections, self.world_epoch, true);
         }
+    }
+
+    #[cfg(target_os = "ios")]
+    pub fn native_restream_requested(&mut self) -> bool {
+        self.live
+            .as_mut()
+            .is_some_and(live::Live::take_restream_request)
     }
 
     #[cfg(target_os = "ios")]
@@ -479,6 +531,7 @@ impl Controller {
         materials: &horizon_client_render::gfx::NativeTerrainMaterials,
         camera: helium_render_scene::Camera,
         size: [u32; 2],
+        clear_rgb: [f32; 3],
     ) -> Result<(), String> {
         let live = self
             .live
@@ -491,7 +544,7 @@ impl Controller {
             size,
             self.window.as_deref(),
             self.world_epoch,
-            true,
+            Some(clear_rgb),
         )
     }
 
@@ -609,7 +662,7 @@ impl Controller {
     pub fn sections(&mut self, renderer: &Renderer, sections: AcceptedSections<'_>) {
         #[cfg(target_os = "ios")]
         if let Some(live) = &mut self.live {
-            live.observe(renderer.material_state(), sections, self.world_epoch);
+            live.observe(renderer.material_state(), sections, self.world_epoch, false);
             return;
         }
         if self.mode == Mode::Disabled {
@@ -1727,6 +1780,40 @@ mod tests {
             .unwrap()
             .unwrap()
     }
+    #[test]
+    fn native_scene_admits_the_production_translucent_range() {
+        let mut input = mesh();
+        let mut water = input.solid.clone();
+        for vertex in &mut water {
+            vertex.layer = 18;
+        }
+        input.translucent = water.clone();
+        let generation = State::new().generation();
+        let g = Geometry::capture_passes((2, 3, -4), -64, &input, generation, 42, 300, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(g.opaque_indices, 6);
+        assert_eq!(g.indices, [0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
+        assert_eq!(g.mesh().vertex(4).unwrap().layer, 18);
+        assert_eq!(g.omitted_translucent_vertices, 0);
+        let reference = Geometry::capture((2, 3, -4), -64, &input, generation, 42, 300)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reference.opaque_indices, 6);
+        assert_eq!(reference.indices.len(), 6);
+        assert_eq!(reference.omitted_translucent_vertices, 4);
+        input.solid.clear();
+        let water_only =
+            Geometry::capture_passes((2, 3, -4), -64, &input, generation, 43, 300, true)
+                .unwrap()
+                .unwrap();
+        assert_eq!(water_only.opaque_indices, 0);
+        assert_eq!(water_only.vertices, bytemuck::cast_slice::<_, u8>(&water));
+        assert!(
+            Geometry::capture_passes((2, 3, -4), -64, &input, generation, 43, 18, true).is_err()
+        );
+    }
+
     #[test]
     fn explicit_selection_and_disabled_path() {
         assert_eq!(Mode::parse(None).unwrap(), Mode::Disabled);

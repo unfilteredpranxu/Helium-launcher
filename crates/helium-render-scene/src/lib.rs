@@ -27,6 +27,7 @@ pub struct Section {
     pub origin: [i32; 3],
     pub bounds: [[f32; 3]; 2],
     pub omitted_translucent_vertices: usize,
+    opaque_indices: usize,
     vertices: Vec<u8>,
     indices: Vec<u32>,
 }
@@ -71,9 +72,24 @@ impl Section {
             origin,
             bounds,
             omitted_translucent_vertices,
+            opaque_indices: indices.len(),
             vertices,
             indices,
         })
+    }
+
+    /// Preserve the producer's pass boundary inside the shared index buffer.
+    /// The translucent range follows the opaque/cutout triangles.
+    pub fn with_opaque_indices(mut self, count: usize) -> Result<Self, String> {
+        if count > self.indices.len() || !count.is_multiple_of(3) {
+            return Err("invalid terrain pass boundary".into());
+        }
+        self.opaque_indices = count;
+        Ok(self)
+    }
+
+    pub fn opaque_indices(&self) -> usize {
+        self.opaque_indices
     }
 
     pub fn mesh(&self) -> Mesh<'_> {
@@ -121,6 +137,7 @@ pub struct Frame<S> {
     pub epoch: NonZeroU64,
     pub camera: Camera,
     pub lightmap: Lightmap,
+    pub clear_rgb: [f32; 3],
     pub materials: Arc<MaterialSet>,
     pub sections: Vec<S>,
 }

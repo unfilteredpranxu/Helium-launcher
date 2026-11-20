@@ -18486,6 +18486,10 @@ impl Game<'_> {
             );
         }
         self.tick_pregen();
+        #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
+        if self.options.native_gameplay {
+            self.remesh_native_spawn_area();
+        }
         // A headless game has nothing to draw sections with: like a server's, they aren't
         // meshed while it has no renderer.
         if self.options.headless {
@@ -22226,6 +22230,32 @@ fn gameplay_tables(
 /// the launch opens, whose data is preloaded meanwhile.
 #[allow(clippy::too_many_arguments)]
 fn load_resources(
+    root: PathBuf,
+    launch_world: Option<&str>,
+    vanilla_root: &std::path::Path,
+    settings: &Settings,
+    started: Instant,
+    menu: bool,
+    headless: bool,
+    progress: &Progress,
+    publish: &mut dyn FnMut(UiResources, &std::path::Path),
+) -> Result<Loaded> {
+    load_resources_for_game(
+        root,
+        launch_world,
+        vanilla_root,
+        settings,
+        started,
+        menu,
+        headless,
+        false,
+        progress,
+        publish,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_resources_for_game(
     mut root: PathBuf,
     launch_world: Option<&str>,
     vanilla_root: &std::path::Path,
@@ -24334,7 +24364,6 @@ fn run_game() -> Result<()> {
         started,
         false,
         options.dedicated.is_some(),
-        false,
         &Progress::new(),
         &mut |_, _| {},
     )?;

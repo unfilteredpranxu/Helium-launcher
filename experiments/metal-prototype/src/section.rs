@@ -135,7 +135,26 @@ pub fn prepare<'v, 'i>(
     limits: Limits,
     indices: &'i mut Vec<u32>,
 ) -> Result<Prepared<'v, 'i>, String> {
-    if input.version != VERSION || input.format != Format::BakedSectionSolid {
+    prepare_for(input, Format::BakedSectionSolid, limits, indices)
+}
+
+/// The production mesher's translucent quad stream has the same 24-byte
+/// layout but must be submitted with a distinct blending/depth policy.
+pub fn prepare_translucent<'v, 'i>(
+    input: Input<'v>,
+    limits: Limits,
+    indices: &'i mut Vec<u32>,
+) -> Result<Prepared<'v, 'i>, String> {
+    prepare_for(input, Format::Translucent, limits, indices)
+}
+
+fn prepare_for<'v, 'i>(
+    input: Input<'v>,
+    format: Format,
+    limits: Limits,
+    indices: &'i mut Vec<u32>,
+) -> Result<Prepared<'v, 'i>, String> {
+    if input.version != VERSION || input.format != format {
         return Err("unsupported section contract version or geometry/material encoding".into());
     }
     if !cfg!(target_endian = "little") || input.stride != STRIDE {

@@ -8,3 +8,14 @@ fragment float4 terrain_banked_fragment(Raster24 in [[stage_in]],
     if ((in.layer & 0x8000)==0 && texel.a<0.5) discard_fragment();
     return float4(texel.rgb*in.lit,1.0);
 }
+
+// Original terrain sprites use texture alpha for coverage. The production
+// vertex color's alpha byte encodes lighting metadata, not opacity.
+fragment float4 terrain_banked_translucent(Raster24 in [[stage_in]],
+    texture2d_array<float> sprites [[texture(0)]], constant uint& first [[buffer(0)]]) {
+    float2 uv = in.uv - max(ceil(in.uv)-1.0,float2(0.0));
+    constexpr sampler point(coord::normalized,address::clamp_to_edge,filter::nearest);
+    float4 texel=sprites.sample(point,uv,(in.layer & 0x7fff)-first);
+    if (texel.a < 0.01) discard_fragment();
+    return float4(texel.rgb*in.lit,texel.a);
+}

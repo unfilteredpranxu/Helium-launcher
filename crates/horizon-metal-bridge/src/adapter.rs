@@ -69,6 +69,27 @@ pub(crate) fn expanded_opaque_cutout<'v, 'i>(
     })
 }
 
+pub(crate) fn expanded_translucent<'v, 'i>(
+    source: &'v SectionMesh,
+    origin: [i32; 3],
+    limits: Limits,
+    indices: &'i mut Vec<u32>,
+) -> Result<Prepared<'v, 'i>, String> {
+    section::prepare_translucent(
+        Input {
+            version: section::VERSION,
+            format: Format::Translucent,
+            vertices: bytemuck::cast_slice(&source.translucent),
+            stride: size_of::<TerrainVertex>(),
+            vertex_count: source.translucent.len(),
+            quad_count: source.translucent.len() / 4,
+            origin,
+        },
+        limits,
+        indices,
+    )
+}
+
 #[cfg(test)]
 #[path = "section_adapter_tests.rs"]
 mod tests;
