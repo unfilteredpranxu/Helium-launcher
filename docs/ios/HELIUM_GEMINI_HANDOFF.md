@@ -1,6 +1,56 @@
-# Helium Launcher — S2D handoff for Gemini
+# Helium Launcher — S2E handoff for Gemini
 
-**Status: PARTIAL.** The isolated iOS build has a direct Metal gameplay terrain path in the real Rust game. Full playable rendering, wgpu-free gameplay linkage, and physical gameplay qualification remain open. The gameplay IPA is held.
+**PARTIAL.** The isolated iOS game now submits its existing Rust HUD and in-world menus through the direct Metal compositor. Physical inventory, touch, and world save/quit/reopen still require a qualified device session. Full gameplay linkage still reaches wgpu. The gameplay IPA is held.
+
+## S2E HUD, inventory and input
+
+- `Game::native_hud_frame` calls the production `Game::hud` (including `hud_layers` and `draw_inventory`), plus IME, mod hooks, and current map/font atlas patches. Those paths supply the live crosshair, selected hotbar slot, item icons/counts, player health, armor, hunger, XP, effects, text, inventory and menus. Main/world selection stays in the existing UIKit launcher.
+- `helium_render_scene::hud` owns the 36-byte `Vertex` also used by `HudBatch`, a physical `Viewport`, the complete frame and ordered triangle runs. `HudAtlas::share_native_pixels` hands the renderer the existing CPU RGBA bake through `Arc`. `Updates` keeps immutable, cumulative 64×64 tile patches so an overwrite in the latest-only request slot cannot lose a glyph or map update.
+- `Controller::native_frame_due` applies the existing 16 ms admission cadence before CPU UI construction. `Controller::native_frame`, `runtime/live/ios.rs` and `LiveScene::submit_scene_with_hud` carry one immutable HUD state with the world epoch and camera. The Metal worker composites it after opaque, cutout and translucent terrain and before drawable encoding. Pending frames retain their encoded resources until terminal commands. The worker owns a reusable vertex buffer, texture, and pipeline states. No extra full-screen UI texture is allocated. The UI-only depth runs clear and reuse the existing depth target after terrain finishes.
+- `Game::ui_viewport` combines physical window sizing with view-relative safe area from iOS winit. Drawing, cursor mapping, slot hit-testing, controller cursor, IME and touch all use that viewport. The touch inventory and pause controls still synthesize `KeyE` and `Escape`. Pointer events in a screen use that screen's own hit tests. `menu_click`, `menu_ops` and the remote container handler retain authority over slots, carried stacks and server transactions. Cancelling a touch clears a pending drag without finishing quick craft. Suspension clears held touch inputs and revokes the native attachment.
+- The ordinary in-game pause menu now owns Resume, Options and Save & Quit. `Game::close_world` requests the existing `begin_closing_save` and the game returns to the launcher only when retirement permits it. The old UIKit placeholder crosshair and Save & Quit controls are gone. An interactive in-world saving-progress overlay remains missing.
+- Unsupported HUD effects include enchantment glint, resource-pack text shader overrides, End Portal compositing and blurred menu backgrounds. High-resolution packs whose HUD bake exceeds the budget fail admission. Entity/held-item/world overlays, weather geometry, sprite animation parity, far LOD and MetalFX remain outside this change. Connection screens that need HUD before the first game camera remain a gap.
+
+### S2E resource limits and diagnostics
+
+- One Arc-backed CPU base atlas capped at 96 MiB. The default 4096×5120 packing is 80 MiB. A tile mirror can retain up to 12 MiB per version. The producer, replaceable newest request and worker request share unchanged tiles. Validated vertex capacity is capped at 4 MiB per CPU frame with at most 4,096 runs.
+- One reusable GPU atlas and up to 4 MiB shared HUD vertex capacity. The existing 192 MiB live-payload check now charges the HUD and all cached resident geometry even if some sections are offscreen. The existing drawable and terrain upload limits still apply. These are charged allocations and limits. Consult physical testing for iOS process memory and thermal behavior.
+- Live metrics include HUD resident bytes, uploaded atlas/tile bytes and HUD preparation in CPU percentiles. The game log emits a separate first completed HUD draw/present for each worker, and requires actual terrain draws for its world receipt. `NativeDisplay.swift` owns the separate UIKit reveal signal. Physical scanout requires device evidence.
+
+### S2E reproduction commands
+
+```bash
+cargo +1.95.0 test --locked -p helium-render-scene -p horizon-metal-bridge
+cargo +1.95.0 test --locked -p horizon-client-render --lib hud::tests::native_atlas
+cargo +1.95.0 test --locked -p horizon-client-render --lib touch::
+cargo +1.95.0 test --locked -p horizon-client-lib --no-default-features --lib menu::tests::native_ui_inventory
+cargo +1.95.0 test --locked -p horizon-client --no-default-features --lib game::native_ui_tests
+cargo +1.95.0 test --locked --manifest-path experiments/metal-prototype/Cargo.toml -- --ignored --nocapture --test-threads=1
+cargo +1.95.0 build --release --locked --target aarch64-apple-ios -p horizon-client --no-default-features --features audio,helium-native-metal-gameplay
+```
+
+`production_ui_uses_live_vitals_and_inventory_with_no_renderer` requires a legally prepared 26.3 pack through `HORIZON_TEST_RESOURCES` and an isolated test profile. To execute it, append `-- --ignored --test-threads=1` to the game-test command. It uses a temporary game instance and does not open a world. The asset-independent menu fixture verifies pickup and placement through the production inventory engine. The macOS Metal readback fixture uses synthetic terrain and HUD bytes. None of those tests exercise device touch input.
+
+### S2E qualification
+
+- Starting SHA `03eb3ede9fb9b6b9d4fdd4e195f51d0e7b15e9b2`. S2E tested implementation `f9fdb9bfba201687c41bc42b6ebebcf26f349639`. The branch includes this later documentation update. [Exact-source CI 44769759160](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44769759160)
+- Linux prototype ran 92 unit tests and one integration test. The independent scene and bridge ran 5 and 26, with one bridge fixture ignored for lack of prepared resources. The production atlas, HUD layout and inventory assertions passed one each. Existing CPU touch tests passed 38, and the Python iOS verifiers passed 19. Default and native-feature Linux game checks passed. The resource-backed game test compiled and was ignored. It remains a gap in end-to-end testing.
+- The Apple SDK job used Xcode 26.6, compiled the HUD shader for iOS 15, and ran 89 unit tests plus two integration tests in the regular suite. The separate GPU invocation passed all 12 tests, including HUD readback of terrain blending, safe-area scissor, zero reupload of unchanged atlas contents and terminal cancellation. The synthetic HUD test charged 516 bytes for its 1×1 atlas and reused vertex buffer. It uploaded 4, 4 and 0 atlas bytes over three frames. The measured encoding was 160.282 ms for cold setup and 0.901 and 0.946 ms for the two warm frames. These are Mac fixture numbers. [Apple SDK and real Metal job](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44769759160/job/136404167869)
+- Swift/C/Rust ran 19 recorder tests, the report and recovery round-trip, standalone evidence storage and the ARM64 UIKit framework build. The standalone native example still passes the wgpu-free ARM64 Mach-O audit. The full game Cargo graph still includes `wgpu 30.0.1` through `horizon-client`, `horizon-client-lib`, `horizon-client-render` and `horizon-hdr`, with the bridge reaching it through `horizon-client-render`. The new `helium-render-scene::hud` path uses `bytemuck` only. [Diagnostics and UIKit job](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44769759160/job/136404167543)
+- The macOS production bridge passed 26 tests with two ignored by default. It explicitly executed the Metal worker's production-format test successfully. The other ignored test requires prepared 26.3 resources. The bridge, CPU terrain input regressions, native game feature and iOS ARM64 game `cargo check` passed. [Production bridge and iOS check](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44769759160/job/136404166839)
+- Linux passed 93 save tests, 26 player durability tests, eight retirement tests, four integrated shutdown tests, two save coordinator tests, two fatal-return tests, two launcher termination tests and 26 streaming tests. The detailed job retains the child fixture and prepared-resource ignore reasons. [Linux save, recovery, and shutdown](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44769759160/job/136404167927)
+- macOS passed the same save, retirement and streaming counts and ran three launcher termination tests. The full Game UI fixture remained ignored for lack of prepared resources. [macOS save, recovery, and shutdown](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44769759160/job/136404167283)
+- The Linux mesher passed 59 tests with 18 ignored. The material snapshot suite passed 12, texture animation passed 12 with one ignored, and mipmaps passed two. The first S2E run exposed an untyped integer in the Apple HUD readback fixture. After typing the readback indices, later runs executed the real GPU fixture successfully. The inventory test originally used a helper that silently returned when game assets were absent. The final asset-independent fixture executes its assertions on both CI platforms. [Initial S2E run](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44767227148)
+- All seven execution jobs passed on `f9fdb9bfba201687c41bc42b6ebebcf26f349639`. The release build linked the actual Rust game, the UIKit app and the launcher framework. The bundle verifier matched the embedded executable to the Rust build and verified thin ARM64, device iOS 15.0 minimum, the direct Metal attachment ABI, and diagnostics ABI v2. CI validated and discarded the temporary archive and uploaded the evidence logs. The owner publication step was skipped. [ARM64 game, UIKit and package job](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44769759160/job/136411524362)
+
+| S2E CI-only package evidence | Value |
+| --- | --- |
+| Bundle and build | `dev.helium.g06ctest`, `12001` |
+| Game executable bytes | 84,305,432 |
+| Game executable SHA-256 | `9339586a76343038c2835549aafca6c1592b93d441528db1ea972f3fe15e085f` |
+| Swift launcher framework SHA-256 | `4a9d73f62269420abc26a76e64f5cab18b3215df983ba804d0970f240a36eafa` |
+| Temporary held archive SHA-256 | `be25700f8abc4fe440d7b4e58f6fb45950b7d1ee57f44c5d7a4c004db0d99b24` |
+| Physical device | NOT TESTED for S2E |
 
 ## Source and evidence
 
@@ -10,7 +60,7 @@
 - The S2C reference is `ea81dad30433d9e8e168115845ca0013fc6c8f1e`. [S2C qualification](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44475365740)
 - The roadmap is [HELIUM_MASTER_ROADMAP_2026-11-18.md](HELIUM_MASTER_ROADMAP_2026-11-18.md), including the November 20 cutover directive. S2C source and measurements are in [G07-A-S2C.md](../../experiments/metal-prototype/docs/G07-A-S2C.md).
 
-## Native gameplay path
+## Native gameplay path at S2D baseline
 
 1. `horizon-client` feature `helium-native-metal-gameplay` includes `helium-direct-metal`. Early `run_game` selection resolves the explicit `native-gameplay` mode before the first graphics factory. It requires iOS, the isolated UIKit launcher, and a visible interactive client. The gated host checks bundle `dev.helium.g06ctest` and diagnostics marker 2. Failed preflight exits through the normal startup error path. The normal package and the existing historical and inset modes keep their existing selection.
 2. `Loading::resumed`, `Loading::set_ui`, and `Loading::finish` bypass reference GPU splash, title, and world configuration in this mode. The normal Swift launcher still chooses, creates, or connects to a world through its existing bridge. Generic Play has no native title panorama, so the launcher asks for an explicit world selection instead. `load_resources_for_game` builds native CPU material banks on the existing resource-loader worker. The legacy `load_resources` signature remains available for over 70 game fixtures and the synchronous caller.
@@ -115,8 +165,8 @@ The initial S2D run caught a changed loader signature used by legacy test caller
 
 ## Save safety and device restrictions
 
-The UIKit Save & Quit action requests the existing owned retirement and only reopens the launcher after completion. A pending reply names a saving phase. The existing background checkpoint, locks, durable redo admission/replay and sticky error paths still govern storage. Force-kill may lose live mutations that have not reached durable admission. Apple runner save tests use synthetic temporary worlds and cannot qualify the iPad host shutdown path. Gameplay owner IPA remains **HELD** under G0. Keep the Actions hold and never use owner worlds for qualification.
+The in-game Save & Quit action requests the existing owned retirement and only reopens the launcher after completion. The existing background checkpoint, locks, durable redo admission/replay and sticky error paths still govern storage. Force-kill may lose live mutations that have not reached durable admission. Apple runner save tests use synthetic temporary worlds and cannot qualify the iPad host shutdown path. Gameplay owner IPA remains **HELD** under G0. Keep the Actions hold and never use owner worlds for qualification.
 
 ## HOW GEMINI SHOULD CONTINUE HELIUM WITHOUT REPEATING PREVIOUS WORK
 
-Port the essential in-world HUD and inventory input surface from the existing CPU `HudBatch` and game screen state to a native UIKit or Metal compositor. Use the current game and attachment rather than adding another no-world probe. Start with one real inventory open, select and close regression. Maintain existing gameplay control and save ownership. Keep wgpu dependency work, animation, entity passes and device qualification additional open gates. Use exact source SHA and genuine engine/GPU/device evidence for every later claim, and preserve upstream MIT attribution.
+Run the resource-backed `Game` inventory/vitals regression in an isolated fixture profile, then qualify a disposable-world standalone device session under G0. Verify slot pickup/placement, modal input and Save & Quit/reopen through the existing game and Metal attachment. Use the existing S2E HUD and S2D terrain to diagnose real device failures. Keep wgpu dependency extraction, additional rendering passes and advanced visual effects separate from this gate. Preserve upstream MIT attribution.
