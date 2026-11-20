@@ -2,7 +2,7 @@
 //! MIT; Copyright (c) 2026 Horizon contributors.
 #![forbid(unsafe_code)]
 pub mod adapter;
-pub use helium_render_scene::Camera;
+pub use helium_render_scene::{Camera, hud};
 mod runtime;
 pub use runtime::{Controller, Mode, enabled, retirement_pending};
 

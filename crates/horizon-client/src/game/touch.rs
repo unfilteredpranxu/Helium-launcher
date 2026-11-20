@@ -130,7 +130,7 @@ impl Game<'_> {
     /// Where touches land, in GUI pixels: the screen the game draws on, or the phone's window when the
     /// phone is splitscreen's controller ([`Self::touch_on_phone`]).
     fn touch_batch(&self) -> Option<HudBatch> {
-        if self.touch_on_phone() || self.options.native_gameplay {
+        if self.touch_on_phone() {
             return self.window.as_ref().map(|w| {
                 let size = w.inner_size();
                 HudBatch::new([size.width, size.height])
@@ -141,9 +141,7 @@ impl Game<'_> {
 
     /// The screen the game draws on, in GUI pixels.
     fn screen_batch(&self) -> Option<HudBatch> {
-        self.renderer
-            .as_ref()
-            .map(|r| HudBatch::new([r.config.width, r.config.height]))
+        self.ui_frame_size().map(HudBatch::new)
     }
 
     /// Splitscreen's second player on the AirPlay display (game/splitscreen.rs): the phone is their
@@ -239,10 +237,21 @@ impl Game<'_> {
         let Some(batch) = self.touch_batch() else {
             return Ok(());
         };
-        let at = (
-            touch.location.x as f32 / batch.scale,
-            touch.location.y as f32 / batch.scale,
-        );
+        let at = if self.options.native_gameplay {
+            let Some(viewport) = self.ui_viewport() else {
+                return Ok(());
+            };
+            let point = [touch.location.x, touch.location.y];
+            if touch.phase == TouchPhase::Started && !viewport.contains(point) {
+                return Ok(());
+            }
+            viewport.to_gui(point, batch.scale)
+        } else {
+            (
+                touch.location.x as f32 / batch.scale,
+                touch.location.y as f32 / batch.scale,
+            )
+        };
         let playing = self.touch_playing();
         if playing {
             // Loading or keyboard navigation can consume a menu finger's release.
@@ -251,7 +260,7 @@ impl Game<'_> {
         } else {
             if touch.phase == TouchPhase::Cancelled {
                 if self.touch.menu.as_ref().is_some_and(|f| f.id == touch.id) {
-                    self.touch_release_menu(event_loop);
+                    self.cancel_touch_menu();
                 }
             } else {
                 self.touch_menu(event_loop, touch.id, touch.phase, at);
@@ -590,6 +599,25 @@ impl Game<'_> {
         }
     }
 
+    pub(super) fn suspend_native_touch(&mut self, event_loop: &dyn EventLoopCtl) {
+        self.cancel_touch_menu();
+        let releases = self.touch.fingers.release_all();
+        let scale = self.touch_batch().map_or(1.0, |b| b.scale);
+        if let Err(error) = self
+            .touch_act(event_loop, releases, scale)
+            .and_then(|()| self.touch_release_toggles(event_loop))
+        {
+            log::warn!("Horizon: suspended touch: {error}");
+        }
+        self.touch.late.clear();
+        self.touch.late_keys.clear();
+        self.touch.pressed_at.clear();
+        self.keys.clear();
+        self.left = false;
+        self.right = false;
+        self.agent_pointer = false;
+    }
+
     /// A keyboard event the player's button stands for, through the same path as a real key.
     fn synthetic_key(
         &mut self,
@@ -711,6 +739,14 @@ impl Game<'_> {
         }
     }
 
+    fn cancel_touch_menu(&mut self) {
+        self.touch.menu = None;
+        self.inv_drag = None;
+        self.dragging = false;
+        self.track_drag_button(MouseButton::Left, false);
+        self.physical_buttons.remove(&MouseButton::Left);
+    }
+
     /// Abandon a menu gesture when another input device or the world takes over.
     /// A missing UIKit end event must neither latch all later fingers nor create a click.
     fn touch_release_menu(&mut self, event_loop: &dyn EventLoopCtl) {
@@ -749,8 +785,11 @@ impl Game<'_> {
             return;
         };
         let at = self.screen_point(at);
-        let position =
-            PhysicalPosition::new(f64::from(at.0 * batch.scale), f64::from(at.1 * batch.scale));
+        let Some(viewport) = self.ui_viewport() else {
+            return;
+        };
+        let (x, y) = viewport.from_gui(at, batch.scale);
+        let position = PhysicalPosition::new(x, y);
         self.handle_window_event(
             event_loop,
             id,

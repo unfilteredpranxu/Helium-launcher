@@ -153,7 +153,7 @@ private func nativeDisplayRequestImpl(_ id: UInt64, _ pointer: UnsafeMutableRawP
     if attachment == .gameplay { setMetalDebugMode("NATIVE-GAMEPLAY-TERRAIN") }
     let target=NativeSession(id,parent,cancel,ready,attachment:attachment)
     let view=target.view; let metal=view.layer as! CAMetalLayer
-    view.isUserInteractionEnabled = attachment == .gameplay
+    view.isUserInteractionEnabled = false
     view.autoresizingMask = !attachment.fullscreen ? [.flexibleLeftMargin, .flexibleWidth, .flexibleHeight] : [.flexibleWidth, .flexibleHeight]; view.alpha=0
     view.initialPixels=pixels; metal.device=device; metal.pixelFormat = .bgra8Unorm
     metal.colorspace=CGColorSpace(name: CGColorSpace.linearSRGB); metal.framebufferOnly=true
@@ -166,43 +166,10 @@ private func nativeDisplayRequestImpl(_ id: UInt64, _ pointer: UnsafeMutableRawP
     case .inset:
         label.text = "HELIUM S2B · LIVE NATIVE OPAQUE/CUTOUT\nwgpu reference and input remain active"
     case .gameplay:
-        label.text = "HELIUM S2D · DIRECT METAL TERRAIN\nTerrain only · early blend pass"
+        label.text = "HELIUM S2E · DIRECT METAL GAMEPLAY"
     }
     label.textColor = .yellow; label.backgroundColor = .black; label.numberOfLines=2; label.font = .systemFont(ofSize:12)
     view.addSubview(label)
-    if attachment == .gameplay {
-        let close = UIButton(type: .system)
-        close.setTitle("Save & Quit", for: .normal)
-        close.tintColor = .white
-        close.backgroundColor = UIColor.black.withAlphaComponent(0.85)
-        close.translatesAutoresizingMaskIntoConstraints = false
-        close.addAction(UIAction { [weak close] _ in
-            close?.isEnabled = false
-            Task { @MainActor in
-                let answer = await Bridge.send("native-terrain-save-quit")
-                if answer["phase"] as? String != "saving" {
-                    close?.isEnabled = true
-                }
-            }
-        }, for: .touchUpInside)
-        view.addSubview(close)
-        NSLayoutConstraint.activate([
-            close.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
-            close.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
-            close.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
-            close.widthAnchor.constraint(greaterThanOrEqualToConstant: 100)
-        ])
-        let crosshair = UILabel()
-        crosshair.text = "+"
-        crosshair.textColor = .white
-        crosshair.font = .monospacedSystemFont(ofSize: 20, weight: .semibold)
-        crosshair.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(crosshair)
-        NSLayoutConstraint.activate([
-            crosshair.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            crosshair.centerYAnchor.constraint(equalTo: view.centerYAnchor)
-        ])
-    }
     nativeTargets[id]=target; view.invalid={ cause,old,new in cancelNative(id,cause,old,new) }; parent.addSubview(view)
     diagnosticEvent(id,14,0,UInt64(pixels.width),UInt64(pixels.height));liftMetalHUD()
     target.timer=Timer.scheduledTimer(withTimeInterval:0.1,repeats:true){[weak target] _ in

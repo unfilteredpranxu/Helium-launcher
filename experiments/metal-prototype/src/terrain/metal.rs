@@ -10,6 +10,7 @@ use objc2_metal::*;
 use std::{ffi::c_void, ptr::NonNull};
 
 pub(crate) mod frames;
+mod hud;
 pub(crate) mod live;
 pub(crate) mod material_upload;
 pub(crate) mod presentation;

@@ -217,13 +217,12 @@ impl Game<'_> {
                 "launcher-world" => self.launcher_world(request),
                 "native-terrain-save-quit" if self.options.native_gameplay => {
                     let result = if self.player.is_some() && self.title.is_none() {
-                        self.begin_closing_save(false)
+                        self.close_world()
                     } else {
                         Err("no active world to save".into())
                     };
                     match result {
                         Ok(()) => {
-                            self.native_return_to_launcher = true;
                             request.answer(r#"{"phase":"saving"}"#);
                         }
                         Err(error) => {

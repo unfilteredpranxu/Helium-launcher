@@ -105,12 +105,35 @@ impl Game<'_> {
     pub(super) fn shader_packs_dir() -> std::path::PathBuf {
         Self::game_dir().join(horizon_client::shader_pack_list::DIR)
     }
+    /// The same physical rectangle drives GUI layout, drawing and pointer input.
+    pub(super) fn ui_viewport(&self) -> Option<horizon_client::hud::HudViewport> {
+        use horizon_client::hud::HudViewport;
+        if let Some(r) = &self.renderer {
+            return Some(HudViewport::new([r.config.width, r.config.height], [0; 4]));
+        }
+        if self.options.native_gameplay {
+            let window = self.window.as_ref()?;
+            let size = window.inner_size();
+            let size = [size.width, size.height];
+            if size.contains(&0) {
+                return None;
+            }
+            #[cfg(target_os = "ios")]
+            let insets = winit::platform::ios::WindowExtIOS::safe_area_insets(&**window);
+            #[cfg(not(target_os = "ios"))]
+            let insets = [0; 4];
+            return Some(HudViewport::new(size, insets));
+        }
+        None
+    }
+
+    pub(super) fn ui_frame_size(&self) -> Option<[u32; 2]> {
+        self.ui_viewport()
+            .map(horizon_client::hud::HudViewport::size)
+    }
+
     pub(super) fn gui_size(&self) -> (f32, f32) {
-        let size = self
-            .renderer
-            .as_ref()
-            .map_or([1280, 720], |r| [r.config.width, r.config.height]);
-        let b = HudBatch::new(size);
+        let b = HudBatch::new(self.ui_frame_size().unwrap_or([1280, 720]));
         (b.width, b.height)
     }
     /// Open the options screens (OptionsScreen) from the title or pause menu.
@@ -250,9 +273,10 @@ impl Game<'_> {
             self.dragging = true;
         }
         let size = self.gui_size();
-        let framebuffer = self.renderer.as_ref().map_or([1280, 720], |r| {
-            [r.config.width as i32, r.config.height as i32]
-        });
+        let framebuffer = self
+            .ui_frame_size()
+            .unwrap_or([1280, 720])
+            .map(|n| n as i32);
         let mut ui = std::mem::take(&mut self.ui.options);
         ui.shift = self.modifiers.shift_key();
         let events = ui.click(
@@ -270,9 +294,10 @@ impl Game<'_> {
     }
     pub(super) fn options_drag(&mut self) -> Result<()> {
         let size = self.gui_size();
-        let framebuffer = self.renderer.as_ref().map_or([1280, 720], |r| {
-            [r.config.width as i32, r.config.height as i32]
-        });
+        let framebuffer = self
+            .ui_frame_size()
+            .unwrap_or([1280, 720])
+            .map(|n| n as i32);
         let mut ui = std::mem::take(&mut self.ui.options);
         let events = ui.click(
             &mut self.settings,
@@ -290,9 +315,10 @@ impl Game<'_> {
     pub(super) fn options_key(&mut self, key: KeyCode, text: Option<&str>) -> Result<()> {
         let size = self.gui_size();
         let shift = self.has_shift_down();
-        let framebuffer = self.renderer.as_ref().map_or([1280, 720], |r| {
-            [r.config.width as i32, r.config.height as i32]
-        });
+        let framebuffer = self
+            .ui_frame_size()
+            .unwrap_or([1280, 720])
+            .map(|n| n as i32);
         self.ui.options.size = size;
         self.ui.options.framebuffer = framebuffer;
         let mut ui = std::mem::take(&mut self.ui.options);
@@ -317,9 +343,10 @@ impl Game<'_> {
                 .scroll_at(&self.settings, size, self.cursor, amount);
             return Ok(());
         }
-        let framebuffer = self.renderer.as_ref().map_or([1280, 720], |r| {
-            [r.config.width as i32, r.config.height as i32]
-        });
+        let framebuffer = self
+            .ui_frame_size()
+            .unwrap_or([1280, 720])
+            .map(|n| n as i32);
         if self.ui.options.video_open() && self.has_control_down() {
             // VideoSettingsScreen.mouseScrolled: Ctrl with the wheel steps the GUI scale.
             let mut ui = std::mem::take(&mut self.ui.options);

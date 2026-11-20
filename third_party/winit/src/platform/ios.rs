@@ -97,6 +97,9 @@ impl<T: 'static> EventLoopExtIOS for EventLoop<T> {
 
 /// Additional methods on [`Window`] that are specific to iOS.
 pub trait WindowExtIOS {
+    /// Insets of the render view, in physical pixels, as [left, top, right, bottom].
+    fn safe_area_insets(&self) -> [u32; 4];
+
     /// Sets the [`contentScaleFactor`] of the underlying [`UIWindow`] to `scale_factor`.
     ///
     /// The default value is device dependent, and it's recommended GLES or Metal applications set
@@ -195,6 +198,10 @@ pub trait WindowExtIOS {
 }
 
 impl WindowExtIOS for Window {
+    fn safe_area_insets(&self) -> [u32; 4] {
+        self.window.maybe_wait_on_main(|w| w.safe_area_insets())
+    }
+
     #[inline]
     fn set_scale_factor(&self, scale_factor: f64) {
         self.window.maybe_queue_on_main(move |w| w.set_scale_factor(scale_factor))

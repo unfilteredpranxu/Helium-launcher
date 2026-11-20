@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod geometry;
+pub mod hud;
 mod materials;
 
 pub use geometry::{Mesh, OPAQUE_LAYER, STRIDE, TerrainVertex, View};

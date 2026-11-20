@@ -139,6 +139,8 @@ struct Metrics {
     cull_us: u64,
     encode_us: u64,
     gpu_us: Option<u64>,
+    hud_bytes: usize,
+    hud_uploaded: u64,
     stalls_50: u64,
     stalls_100: u64,
     #[cfg(target_os = "ios")]
@@ -151,6 +153,8 @@ impl Metrics {
         self.completed += 1;
         self.draws += result.draws;
         self.encode_us = result.encode_time.as_micros() as u64;
+        self.hud_bytes = result.hud_bytes;
+        self.hud_uploaded += result.hud_uploaded_bytes as u64;
         self.gpu_us = result.gpu_time.map(|t| t.as_micros() as u64);
         self.last_present_us = result.completion_latency.as_micros() as u64;
         if self.cpu.len() == 120 {
@@ -199,7 +203,7 @@ impl Metrics {
             "Helium S2B source=game epoch={epoch} complete={completed} skipped={skipped} replaced_requests={dropped} \
              draws={draws} geometry_uploads={uploads} evicted={evicted} cpu_geometry={cpu_geometry} \
              gpu_geometry={gpu_geometry} peak_gpu_geometry={peak_geometry} material={material} \
-             staging_peak={staging} targets={targets} cpu_us_p50={p50:?} p95={p95:?} p99={p99:?} \
+             staging_peak={staging} targets={targets} hud_bytes={hud_bytes} hud_uploaded_bytes={hud_uploaded} cpu_us_p50={p50:?} p95={p95:?} p99={p99:?} \
              admit_us={admitted_us} cull_us={cull_us} encode_us={encode_us} upload_us={upload_us} \
              completion_us={last_present_us} gpu_us={gpu_us:?} completed_hz={rate_hz:.1} \
              cpu_evictions={cpu_evictions} omitted_translucent_vertices={omitted_vertices} \
@@ -212,6 +216,8 @@ impl Metrics {
             peak_geometry = self.peak_geometry,
             material = self.material,
             staging = self.staging,
+            hud_bytes = self.hud_bytes,
+            hud_uploaded = self.hud_uploaded,
             p50 = quantile(50),
             p95 = quantile(95),
             p99 = quantile(99),

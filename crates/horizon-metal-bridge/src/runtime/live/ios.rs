@@ -19,6 +19,7 @@ use std::num::NonZeroU64;
 
 struct Request {
     scene: CpuFrame<Arc<PinnedGeometry>>,
+    hud: Option<helium_render_scene::hud::Frame>,
     prepared_us: u64,
     admitted_us: u64,
     omitted_vertices: usize,
@@ -213,9 +214,9 @@ impl Live {
         size: [u32; 2],
         window: Option<&winit::window::Window>,
         epoch: u64,
-        gameplay_clear: Option<[f32; 3]>,
+        gameplay: Option<([f32; 3], helium_render_scene::hud::Frame)>,
     ) -> Result<(), String> {
-        let fullscreen = gameplay_clear.is_some();
+        let fullscreen = gameplay.is_some();
         let start = Instant::now();
         self.camera = camera.position;
         self.generation(state.generation());
@@ -243,7 +244,7 @@ impl Live {
         if size.contains(&0) || start < self.next_input {
             return Ok(());
         }
-        if self.meshes.entries.is_empty() {
+        if self.meshes.entries.is_empty() && !fullscreen {
             self.cancel(false);
             return Ok(());
         }
@@ -306,11 +307,16 @@ impl Live {
             }
         }
         self.next_input = start + INPUT_INTERVAL;
+        let (clear_rgb, hud) = match gameplay {
+            Some((clear, hud)) => (clear, Some(hud)),
+            None => ([0.0; 3], None),
+        };
         let request = Request {
+            hud,
             scene: CpuFrame {
                 epoch,
                 camera,
-                clear_rgb: gameplay_clear.unwrap_or([0.0; 3]),
+                clear_rgb,
                 sections: self.meshes.entries.values().cloned().collect(),
                 materials: self.banks.as_ref().unwrap().clone(),
                 lightmap: Lightmap {
@@ -361,6 +367,7 @@ fn run(
     let mut report = Instant::now();
     let mut report_count = 0;
     let mut available = Instant::now();
+    let mut reported_world = false;
     while !cancel.load(Ordering::Acquire) {
         let Some(request) = input.take(Duration::from_millis(25)) else {
             if available.elapsed() >= Duration::from_millis(500) {
@@ -404,7 +411,7 @@ fn run(
                 .total_cmp(&distance(b.0.mesh.origin, frame.camera.position))
         });
         metrics.cull_us = started.elapsed().as_micros() as u64;
-        if visible.is_empty() {
+        if visible.is_empty() && request.hud.is_none() {
             metrics.skipped += 1;
             if available.elapsed() >= Duration::from_millis(500) {
                 break;
@@ -509,20 +516,28 @@ fn run(
                 Some((section, *view))
             })
             .collect();
-        if draw.is_empty() {
+        if draw.is_empty() && request.hud.as_ref().is_none_or(|h| h.vertices().is_empty()) {
             metrics.skipped += 1;
             if available.elapsed() >= Duration::from_millis(500) {
                 break;
             }
             continue;
         }
-        match scene.submit_scene(&renderer, material, Some(&display), frame, &draw, cancel)? {
+        match scene.submit_scene_with_hud(
+            &renderer,
+            material,
+            Some(&display),
+            frame,
+            &draw,
+            request.hud.as_ref(),
+            cancel,
+        )? {
             LiveSubmission::Submitted => {
                 let deadline = Instant::now() + GPU_DEADLINE;
                 loop {
                     if let Some(result) = scene.poll(Some(&display), cancel)? {
-                        let first = metrics.completed == 0;
-                        if fullscreen && first {
+                        if fullscreen && !reported_world && result.draws > 0 {
+                            reported_world = true;
                             log::info!(
                                 "Helium S2D REAL game Metal draw and present completed epoch={epoch} draw_calls={}; physical scanout unverified",
                                 result.draws,

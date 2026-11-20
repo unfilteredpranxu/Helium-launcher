@@ -68,6 +68,7 @@ pub struct HudAtlas {
     /// `pixels` compressed (lz4) on a thread of its own once the renderer
     /// has uploaded them: only rebuilding a renderer reads them again.
     packed: Option<Arc<OnceLock<Vec<u8>>>>,
+    native_pixels: Option<Arc<Vec<u8>>>,
     /// The width each Standard Galactic letter uses in `font/ascii_sga`'s
     /// cell, by ASCII code (the enchanting table's text), read when built.
     pub galactic_widths: [u16; 128],
@@ -746,6 +747,9 @@ impl HudAtlas {
     /// The atlas's pixels: as built, or uncompressed again after
     /// `pack_pixels` (a renderer being rebuilt).
     pub fn pixels(&self) -> std::borrow::Cow<'_, [u8]> {
+        if let Some(pixels) = &self.native_pixels {
+            return std::borrow::Cow::Borrowed(pixels);
+        }
         let Some(packed) = self.packed.as_ref().filter(|_| self.pixels.is_empty()) else {
             return std::borrow::Cow::Borrowed(&self.pixels);
         };
@@ -756,6 +760,21 @@ impl HudAtlas {
                 .filter(|p| p.len() == size)
                 .unwrap_or_else(|| vec![0; size]),
         )
+    }
+    /// The native game shares the original CPU bake with its render worker.
+    /// The reference renderer uses its existing compression path.
+    pub fn share_native_pixels(&mut self) -> Arc<Vec<u8>> {
+        if let Some(pixels) = &self.native_pixels {
+            return pixels.clone();
+        }
+        let pixels = if self.pixels.is_empty() {
+            self.pixels().into_owned()
+        } else {
+            std::mem::take(&mut self.pixels)
+        };
+        let pixels = Arc::new(pixels);
+        self.native_pixels = Some(pixels.clone());
+        pixels
     }
     /// Keep the pixels compressed from now on, once a renderer has them: the
     /// window's GPU holds the atlas, and a copy as built only serves a
@@ -932,6 +951,7 @@ impl HudAtlas {
             revision: Self::next_revision(),
             pixels: Vec::new(),
             packed: None,
+            native_pixels: None,
             galactic_widths: [0; 128],
             width: 1,
             height: 1,
@@ -997,6 +1017,7 @@ impl HudAtlas {
             galactic_widths: galactic_widths(&sprites, &pixels, width, height),
             pixels,
             packed: None,
+            native_pixels: None,
             width,
             height,
             sprites,
@@ -1468,6 +1489,7 @@ impl HudAtlas {
             galactic_widths: galactic_widths(&sprites, &pixels, width, height),
             pixels,
             packed: None,
+            native_pixels: None,
             width,
             height,
             sprites,
@@ -1498,20 +1520,7 @@ impl HudAtlas {
         decode(&path).map_or((vec![0; 4], 1, 1), |(w, h, pixels)| (pixels, w, h))
     }
 }
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct HudVertex {
-    pub pos: [f32; 2],
-    pub uv: [f32; 2],
-    pub color: u32,
-    pub depth: f32,
-    /// The `GLINT_TEXTURING` UV into the repeating glint texture, unused
-    /// unless `uv.x >= 2`.
-    pub glint_uv: [f32; 2],
-    /// 1 for the GUI's text (`RenderPipelines.GUI_TEXT`), which a resource
-    /// pack's text shader draws when it has one.
-    pub text: u32,
-}
+pub use helium_render_scene::hud::{Vertex as HudVertex, Viewport as HudViewport};
 /// Sutherland-Hodgman against one half plane, interpolating every attribute.
 fn clip_polygon(poly: &[HudVertex], axis: usize, limit: f32, keep_below: bool) -> Vec<HudVertex> {
     let inside = |v: &HudVertex| {

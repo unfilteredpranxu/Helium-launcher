@@ -195,6 +195,16 @@ impl Inner {
         self.window.setBounds(bounds);
     }
 
+    pub(crate) fn safe_area_insets(&self) -> [u32; 4] {
+        if !app_state::os_capabilities().safe_area {
+            return [0; 4];
+        }
+        let insets = self.view.safeAreaInsets();
+        let scale = self.scale_factor();
+        [insets.left, insets.top, insets.right, insets.bottom]
+            .map(|inset| (inset as f64 * scale).round() as u32)
+    }
+
     pub fn inner_size(&self) -> PhysicalSize<u32> {
         let scale_factor = self.scale_factor();
         // The Metal layer and input events use the entire render view. Safe-area

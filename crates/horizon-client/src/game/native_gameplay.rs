@@ -4,7 +4,9 @@ use horizon_client::{
     Result,
     environment::Sky,
     gfx::{self, NativeTerrainMaterials},
+    hud::Blend,
 };
+use horizon_metal_bridge::hud as native_hud;
 
 pub(super) fn prepare(pack: &PackResources) -> Result<NativeTerrainMaterials> {
     let assets = &pack.render;
@@ -51,11 +53,56 @@ impl Game<'_> {
         }
     }
 
+    fn native_hud_frame(&mut self, viewport: native_hud::Viewport) -> Result<native_hud::Frame> {
+        let mut batch = self.hud(viewport.size());
+        self.flush_ime(&mut batch);
+        self.native_gui_render_post(&mut batch, self.ui.hide_gui, self.focused);
+        self.resolve_inline_profiles(&batch.inline_profiles);
+        batch.patches.append(&mut self.map_patches);
+        batch.patches.extend(self.gui.atlas.font.take_patches());
+
+        let atlas = &mut self.gui.atlas;
+        if self
+            .native_hud
+            .as_ref()
+            .is_none_or(|updates| updates.revision() != atlas.revision)
+        {
+            let source = native_hud::Atlas::new(
+                atlas.revision,
+                [atlas.width, atlas.height],
+                atlas.share_native_pixels(),
+            )?;
+            self.native_hud = Some(native_hud::Updates::new(source));
+        }
+        let updates = self.native_hud.as_mut().unwrap();
+        for patch in batch.patches.drain(..) {
+            updates.patch([patch.x, patch.y, patch.width, patch.height], &patch.rgba)?;
+        }
+        let runs = batch
+            .runs()
+            .into_iter()
+            .map(|(range, blend)| {
+                let blend = match blend {
+                    Blend::Alpha => native_hud::Blend::Alpha,
+                    Blend::Invert => native_hud::Blend::Invert,
+                    Blend::Additive => native_hud::Blend::Additive,
+                    Blend::Depth(rect) => native_hud::Blend::Depth(rect),
+                    Blend::Vignette => native_hud::Blend::Vignette,
+                    Blend::EndPortal | Blend::CitGlint(_) => native_hud::Blend::Skip,
+                };
+                (range, blend)
+            })
+            .collect();
+        let frame = updates.frame(viewport, batch.scale, batch.vertices, runs)?;
+        self.native_ui_frames = self.native_ui_frames.wrapping_add(1);
+        Ok(frame)
+    }
+
     pub(super) fn render_native_terrain(
         &mut self,
         view: Option<(glam::DVec3, f32, f32)>,
         sky: &Sky,
-        size: [u32; 2],
+        viewport: native_hud::Viewport,
         alpha: f32,
         camera_alpha: f32,
     ) -> Result<()> {
@@ -68,6 +115,7 @@ impl Game<'_> {
         let Some((camera, yaw, pitch)) = view else {
             return Ok(());
         };
+        let size = viewport.drawable();
         if size.contains(&0) {
             return Ok(());
         }
@@ -94,6 +142,7 @@ impl Game<'_> {
         } else {
             sky.fog_color
         };
+        let hud = self.native_hud_frame(viewport)?;
         let materials = self
             .native_terrain
             .as_mut()
@@ -113,6 +162,7 @@ impl Game<'_> {
                 },
                 size,
                 clear_rgb.map(|c| c.clamp(0.0, 1.0)),
+                hud,
             )
             .map_err(|error| format!("direct Metal gameplay frame: {error}").into())
     }

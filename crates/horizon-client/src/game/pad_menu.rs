@@ -326,9 +326,7 @@ impl Game<'_> {
     }
 
     pub(super) fn gui_scale(&self) -> Option<HudBatch> {
-        self.renderer
-            .as_ref()
-            .map(|r| HudBatch::new([r.config.width, r.config.height]))
+        self.ui_frame_size().map(HudBatch::new)
     }
 
     /// Focus drives the open screen: every menu but inventories and
@@ -546,8 +544,11 @@ impl Game<'_> {
             at.0.clamp(0.0, batch.width - 1.0),
             at.1.clamp(0.0, batch.height - 1.0),
         );
-        let position =
-            PhysicalPosition::new(f64::from(at.0 * batch.scale), f64::from(at.1 * batch.scale));
+        let Some(viewport) = self.ui_viewport() else {
+            return;
+        };
+        let (x, y) = viewport.from_gui(at, batch.scale);
+        let position = PhysicalPosition::new(x, y);
         self.pad_synthetic_event(
             event_loop,
             id,

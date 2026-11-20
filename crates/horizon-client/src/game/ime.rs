@@ -83,8 +83,11 @@ impl Game<'_> {
             return;
         };
         let scale = hud.scale;
-        let x = (x0 * scale).round() as i32;
-        let y = (y0 * scale).round() as i32;
+        let (x, y) = self.ui_viewport().map_or_else(
+            || (f64::from(x0 * scale), f64::from(y0 * scale)),
+            |viewport| viewport.from_gui((x0, y0), scale),
+        );
+        let (x, y) = (x.round() as i32, y.round() as i32);
         let width = (((x1 - x0) * scale).round() as i32).max(1);
         let height = (((y1 - y0) * scale).round() as i32).max(1);
         let area = [x, y, width, height];

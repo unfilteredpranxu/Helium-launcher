@@ -191,7 +191,11 @@ impl Game<'_> {
                 self.pending_bench = Some((deadline, reply));
             }
         }
-        horizon_client::widgets::end_frame(self.frames);
+        horizon_client::widgets::end_frame(if self.options.native_gameplay {
+            self.native_ui_frames
+        } else {
+            self.frames
+        });
         self.narrate_screen();
         self.poll_repro(event_loop);
         self.advance_agent();

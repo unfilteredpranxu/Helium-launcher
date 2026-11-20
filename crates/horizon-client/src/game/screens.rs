@@ -447,14 +447,8 @@ impl Game<'_> {
         Ok(())
     }
     pub(super) fn pause_click(&mut self) -> Result<()> {
-        let (w, h) = {
-            let size = self
-                .renderer
-                .as_ref()
-                .map_or([1, 1], |r| [r.config.width, r.config.height]);
-            let b = HudBatch::new(size);
-            (b.width, b.height)
-        };
+        let batch = HudBatch::new(self.ui_frame_size().unwrap_or([1, 1]));
+        let (w, h) = (batch.width, batch.height);
         let links = !self.server_links().is_empty();
         let additions = self.pause_screen_additions();
         let icons = pause_icons(
@@ -503,14 +497,8 @@ impl Game<'_> {
         Ok(())
     }
     pub(super) fn pause_key(&mut self, key: KeyCode) -> Result<()> {
-        let (w, h) = {
-            let size = self
-                .renderer
-                .as_ref()
-                .map_or([1, 1], |r| [r.config.width, r.config.height]);
-            let b = HudBatch::new(size);
-            (b.width, b.height)
-        };
+        let batch = HudBatch::new(self.ui_frame_size().unwrap_or([1, 1]));
+        let (w, h) = (batch.width, batch.height);
         let links = !self.server_links().is_empty();
         let buttons = pause_buttons(
             w,
@@ -783,10 +771,7 @@ impl Game<'_> {
             }
             return Ok(());
         }
-        let size = self
-            .renderer
-            .as_ref()
-            .map_or([1, 1], |r| [r.config.width, r.config.height]);
+        let size = self.ui_frame_size().unwrap_or([1, 1]);
         let b = HudBatch::new(size);
         let hit = death_buttons(b.width, b.height, self.level.hardcore)
             .into_iter()

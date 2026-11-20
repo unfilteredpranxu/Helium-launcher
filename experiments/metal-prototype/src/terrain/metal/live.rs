@@ -1,11 +1,12 @@
 //! Worker-owned resident terrain. Metal retains encoded resources; a copied
 //! completion block holds the process-wide permit even if the worker exits.
-use super::*;
+use super::{hud::Hud, *};
 use crate::{
     display::Display,
     upload::{self, Source},
 };
 use block2::RcBlock;
+use helium_render_scene::hud::Frame as HudFrame;
 use helium_render_scene::{Frame as CpuFrame, MaterialBank, Section};
 use objc2_quartz_core::CAMetalDrawable;
 use std::num::NonZeroU64;
@@ -170,6 +171,8 @@ pub struct LiveCompletion {
     pub encode_time: Duration,
     pub completion_latency: Duration,
     pub gpu_time: Option<Duration>,
+    pub hud_bytes: usize,
+    pub hud_uploaded_bytes: usize,
 }
 
 struct Pending {
@@ -179,6 +182,8 @@ struct Pending {
     submitted: Instant,
     encode_time: Duration,
     draws: u64,
+    hud_bytes: usize,
+    hud_uploaded_bytes: usize,
 }
 
 pub struct LiveScene {
@@ -188,6 +193,7 @@ pub struct LiveScene {
     depth: Texture,
     light: Texture,
     staging: Buffer,
+    hud: Option<Hud>,
     pending: Option<Pending>,
 }
 impl LiveScene {
@@ -230,6 +236,7 @@ impl LiveScene {
             depth,
             light,
             staging: upload(&renderer.device, &[0; LIGHT_STAGING])?,
+            hud: None,
             pending: None,
         })
     }
@@ -247,23 +254,42 @@ impl LiveScene {
         sections: &[(&LiveSection<u64>, View)],
         cancelled: &AtomicBool,
     ) -> Result<LiveSubmission, String> {
+        self.submit_scene_with_hud(
+            renderer, material, display, frame, sections, None, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_scene_with_hud<S>(
+        &mut self,
+        renderer: &TerrainRenderer,
+        material: &upload::Material<MaterialBank>,
+        display: Option<&Display>,
+        frame: &CpuFrame<S>,
+        sections: &[(&LiveSection<u64>, View)],
+        hud: Option<&HudFrame>,
+        cancelled: &AtomicBool,
+    ) -> Result<LiveSubmission, String> {
         if frame.lightmap.revision == 0
             || sections.iter().any(|(s, _)| s.epoch != Some(frame.epoch))
         {
             return Err("scene draw has a stale epoch or missing lightmap revision".into());
         }
-        self.submit(
-            renderer,
-            material,
-            display,
-            LiveFrame {
-                sections,
-                identity: frame.materials.banks()[0].description().identity,
-                lightmap: &frame.lightmap.rgba,
-                clear_rgb: frame.clear_rgb,
-            },
-            cancelled,
-        )
+        autoreleasepool(|_| {
+            self.encode_and_submit(
+                renderer,
+                material,
+                display,
+                LiveFrame {
+                    sections,
+                    identity: frame.materials.banks()[0].description().identity,
+                    lightmap: &frame.lightmap.rgba,
+                    clear_rgb: frame.clear_rgb,
+                },
+                hud,
+                cancelled,
+            )
+        })
     }
 
     pub fn submit<S: Source<Authority = AtomicBool> + Send + Sync + 'static>(
@@ -274,7 +300,9 @@ impl LiveScene {
         scene: LiveFrame<'_, S::Generation>,
         cancelled: &AtomicBool,
     ) -> Result<LiveSubmission, String> {
-        autoreleasepool(|_| self.encode_and_submit(renderer, material, display, scene, cancelled))
+        autoreleasepool(|_| {
+            self.encode_and_submit(renderer, material, display, scene, None, cancelled)
+        })
     }
     fn encode_and_submit<S: Source<Authority = AtomicBool> + Send + Sync + 'static>(
         &mut self,
@@ -282,6 +310,7 @@ impl LiveScene {
         material: &upload::Material<S>,
         display: Option<&Display>,
         scene: LiveFrame<'_, S::Generation>,
+        hud: Option<&HudFrame>,
         cancelled: &AtomicBool,
     ) -> Result<LiveSubmission, String> {
         let started = Instant::now();
@@ -296,11 +325,14 @@ impl LiveScene {
         } = scene;
         if self.device != renderer.upload_device
             || cancelled.load(Ordering::Acquire)
-            || sections.is_empty()
+            || (sections.is_empty() && hud.is_none_or(|f| f.vertices().is_empty()))
             || sections.len() > MAX_SECTIONS
             || !clear_rgb.iter().all(|c| (0.0..=1.0).contains(c))
         {
             return Err("invalid/cancelled live frame".into());
+        }
+        if hud.is_some_and(|f| f.size().map(|n| n as usize) != self.size) {
+            return Ok(LiveSubmission::DrawableUnavailable);
         }
         material.resident(renderer, cancelled)?;
         let banks = material.bindings()?;
@@ -328,8 +360,10 @@ impl LiveScene {
                 .checked_add(section.bytes())
                 .ok_or("live geometry overflow")?;
         }
+        let hud_bytes = hud.map_or(0, |frame| Hud::budget(self.hud.as_ref(), frame));
         let live = bytes
             .checked_add(self.bytes())
+            .and_then(|n| n.checked_add(hud_bytes))
             .and_then(|n| n.checked_add(material.counters().texture_payload))
             .and_then(|n| n.checked_add(material.source_payload().ok()?))
             .ok_or("live frame accounting overflow")?;
@@ -478,6 +512,25 @@ impl LiveScene {
             }
         }
         encoder.endEncoding();
+        let mut hud_uploaded_bytes = 0;
+        if let Some(frame) = hud {
+            if self
+                .hud
+                .as_ref()
+                .is_none_or(|h| h.revision() != frame.atlas().revision())
+            {
+                self.hud = None;
+                self.hud = Some(Hud::new(&renderer.device, frame)?);
+                hud_uploaded_bytes = frame.atlas().pixels().len();
+            }
+            hud_uploaded_bytes += self.hud.as_mut().unwrap().encode(
+                &renderer.device,
+                &command,
+                &self.color,
+                &self.depth,
+                frame,
+            )?;
+        }
         if let (Some(display), Some((drawable, viewport))) = (display, &drawable) {
             display.encode(&command, &self.color, &drawable.texture(), *viewport)?;
             command.presentDrawable(ProtocolObject::from_ref(&**drawable));
@@ -492,7 +545,7 @@ impl LiveScene {
             material.source_payload()?,
         );
         permit.account_frame(
-            bytes + self.bytes() - LIGHT_STAGING
+            bytes + self.bytes() + hud_bytes - LIGHT_STAGING
                 + display.map_or(0, |d| {
                     let [w, h] = d.dimensions();
                     w * h * 12
@@ -515,6 +568,8 @@ impl LiveScene {
             submitted: Instant::now(),
             encode_time: started.elapsed(),
             draws,
+            hud_bytes,
+            hud_uploaded_bytes,
         });
         self.pending.as_ref().unwrap().command.commit();
         Ok(LiveSubmission::Submitted)
@@ -548,6 +603,8 @@ impl LiveScene {
         let end = pending.command.GPUEndTime();
         Ok(Some(LiveCompletion {
             draws: pending.draws,
+            hud_bytes: pending.hud_bytes,
+            hud_uploaded_bytes: pending.hud_uploaded_bytes,
             encode_time: pending.encode_time,
             completion_latency: pending.submitted.elapsed(),
             gpu_time: (start > 0. && end.is_finite() && end >= start)
@@ -612,6 +669,108 @@ mod tests {
             assert!(Instant::now() < deadline, "GPU permit did not retire");
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    #[ignore = "requires Apple Metal; CI executes the ignored GPU suite serially"]
+    fn native_hud_blends_over_live_color_with_safe_scissor_and_keeps_dirty_glyphs() {
+        use helium_render_scene::hud::{Atlas, Blend, Updates, Vertex, Viewport};
+        autoreleasepool(|_| {
+            let renderer = TerrainRenderer::new().unwrap();
+            let cancel = AtomicBool::new(false);
+            let (mut fixture, _) = fixture();
+            fixture.description.version = upload::BANKED_VERSION;
+            let bank = Synthetic(fixture);
+            let identity = bank.description().identity;
+            let mut material = renderer
+                .create_material_set(&[bank.clone()], &cancel, budget())
+                .unwrap();
+            let target = material.bank_mut(0).unwrap();
+            target
+                .begin_upload(&renderer, bank, &cancel, upload::Update::Full, budget())
+                .unwrap();
+            let limit = Instant::now() + Duration::from_secs(3);
+            loop {
+                match target.poll_upload(&renderer, &cancel) {
+                    upload::Poll::Completed(_) => break,
+                    upload::Poll::Pending => assert!(Instant::now() < limit),
+                    _ => panic!("fixture atlas upload failed"),
+                }
+            }
+            retire(&renderer);
+            let mut scene = LiveScene::new(&renderer, [64, 64]).unwrap();
+            let viewport = Viewport::new([64, 64], [4, 8, 4, 4]);
+            let mut updates = Updates::new(Atlas::new(1, [1, 1], Arc::new(vec![255; 4])).unwrap());
+            let quad = |color| {
+                let positions = [[0.0, 0.0], [16.0, 0.0], [16.0, 16.0], [0.0, 16.0]];
+                [0, 1, 2, 0, 2, 3].map(|i| Vertex {
+                    pos: positions[i],
+                    uv: [0.5; 2],
+                    color,
+                    depth: 0.5,
+                    glint_uv: [0.0; 2],
+                    text: 0,
+                })
+            };
+            let vertices = [quad(0x800000ff), quad(0xff00ff00)].concat();
+            let runs = vec![(0..6, Blend::Alpha), (6..12, Blend::Depth([8, 8, 8, 8]))];
+            let mut encode_times = Vec::new();
+            for changed in [false, true] {
+                if changed {
+                    updates.patch([0, 0, 1, 1], &[255, 0, 0, 255]).unwrap();
+                }
+                let hud = updates
+                    .frame(viewport, 2.0, vertices.clone(), runs.clone())
+                    .unwrap();
+                assert!(matches!(
+                    scene
+                        .encode_and_submit(
+                            &renderer,
+                            &material,
+                            None,
+                            LiveFrame {
+                                sections: &[],
+                                identity,
+                                lightmap: &[255; 1024],
+                                clear_rgb: [0.0, 0.0, 1.0],
+                            },
+                            Some(&hud),
+                            &cancel
+                        )
+                        .unwrap(),
+                    LiveSubmission::Submitted
+                ));
+                let limit = Instant::now() + Duration::from_secs(3);
+                loop {
+                    if let Some(done) = scene.poll(None, &cancel).unwrap() {
+                        assert_eq!(done.hud_bytes, 516);
+                        assert_eq!(done.hud_uploaded_bytes, 4);
+                        encode_times.push(done.encode_time.as_micros());
+                        break;
+                    }
+                    assert!(Instant::now() < limit);
+                }
+                retire(&renderer);
+                let bytes = readback(&renderer, &scene);
+                let at = |x, y| &bytes[(y * 64 + x) * 4..][..4];
+                assert_eq!(at(1, 1), [0, 0, 255, 255]);
+                assert!(
+                    at(6, 10)
+                        .iter()
+                        .zip([128u8, 0, 127, 255])
+                        .all(|(&a, b)| a.abs_diff(b) <= 1)
+                );
+                assert_eq!(
+                    at(13, 17),
+                    if changed {
+                        [0, 0, 0, 255]
+                    } else {
+                        [0, 255, 0, 255]
+                    }
+                );
+            }
+            eprintln!("S2E SYNTHETIC macOS Metal HUD frame encode_us={encode_times:?}");
+        });
     }
 
     #[test]

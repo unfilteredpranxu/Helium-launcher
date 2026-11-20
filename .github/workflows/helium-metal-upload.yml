@@ -20,6 +20,9 @@ on:
       - 'crates/horizon-ios-launcher/**'
       - 'third_party/winit/src/platform_impl/macos/**'
       - 'third_party/winit/src/platform/macos.rs'
+      - 'third_party/winit/src/platform/ios.rs'
+      - 'third_party/winit/src/platform_impl/ios/**'
+      - 'crates/horizon-client-render/src/hud.rs'
       - 'crates/horizon-client-render/src/lod.rs'
       - 'crates/horizon-client-render/src/streaming.rs'
       - 'crates/horizon-client/src/game/remote.rs'
@@ -110,6 +113,8 @@ jobs:
               experiments/metal-prototype/src/terrain.metal -o "$RUNNER_TEMP/helium-upload/g01.air"
             xcrun --sdk iphoneos metal -target air64-apple-ios15.0 -std=ios-metal2.0 -c \
               experiments/metal-prototype/src/terrain/terrain24.metal -o "$RUNNER_TEMP/helium-upload/g02.air"
+            xcrun --sdk iphoneos metal -target air64-apple-ios15.0 -std=ios-metal2.0 -c \
+              experiments/metal-prototype/src/terrain/metal/hud.metal -o "$RUNNER_TEMP/helium-upload/hud.air"
           } 2>&1 | tee "$RUNNER_TEMP/helium-upload/msl.log"
       - name: Compile banked terrain entry for iOS15
         run: |
@@ -237,6 +242,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/bridge"
           cargo +1.95.0 test --locked -p horizon-metal-bridge 2>&1 | tee "$RUNNER_TEMP/bridge/tests.log"
+          cargo +1.95.0 test --locked -p helium-render-scene hud::tests 2>&1 | tee "$RUNNER_TEMP/bridge/hud.log"
           cargo +1.95.0 test --locked -p horizon-client-render --lib gfx::tests::native_terrain 2>&1 | tee "$RUNNER_TEMP/bridge/cpu-native-input.log"
           HORIZON_SPRITE_SPLIT=512 cargo +1.95.0 test --locked -p horizon-metal-bridge --lib runtime::ownership_tests::native_worker_from_production_owned_bank_and_typed_section -- --ignored --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/bridge/native.log"
           cargo +1.95.0 check --locked -p horizon-client --no-default-features --features helium-native-metal-gameplay 2>&1 | tee "$RUNNER_TEMP/bridge/game.log"
@@ -248,7 +254,7 @@ jobs:
         with:
           script: |
             const fs=require('fs'), path=require('path');
-            const summary=['tests.log','cpu-native-input.log','native.log','game.log','ios.log','ios-game.log'].map(n=>{
+            const summary=['tests.log','hud.log','cpu-native-input.log','native.log','game.log','ios.log','ios-game.log'].map(n=>{
               const p=path.join(process.env.RUNNER_TEMP,'bridge',n);
               return '### '+n+'\n```text\n'+(fs.existsSync(p)?fs.readFileSync(p,'utf8').slice(-10000):'NOT RUN')+'\n```';
             }).join('\n');

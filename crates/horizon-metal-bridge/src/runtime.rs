@@ -532,6 +532,7 @@ impl Controller {
         camera: helium_render_scene::Camera,
         size: [u32; 2],
         clear_rgb: [f32; 3],
+        hud: helium_render_scene::hud::Frame,
     ) -> Result<(), String> {
         let live = self
             .live
@@ -544,7 +545,7 @@ impl Controller {
             size,
             self.window.as_deref(),
             self.world_epoch,
-            Some(clear_rgb),
+            Some((clear_rgb, hud)),
         )
     }
 

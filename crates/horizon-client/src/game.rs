@@ -2612,8 +2612,11 @@ struct Game<'a> {
     /// Single player's server while it loads its world (`Minecraft.doWorldLoad`).
     integrated_starting: Option<integrated::Starting>,
     world_renderer_ready: bool,
+    native_ui_frames: u64,
     #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
     native_terrain: Option<horizon_client::gfx::NativeTerrainMaterials>,
+    #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
+    native_hud: Option<horizon_metal_bridge::hud::Updates>,
     collision: &'a BlockCollisionRegistry<'a>,
     motion: &'a MotionResources,
     /// This world's frozen damage definitions and reloadable tag snapshot.
@@ -11015,11 +11018,7 @@ impl Game<'_> {
         let Some(key) = self.settings.keys.container_hotbar_key(code) else {
             return false;
         };
-        let Some(size) = self
-            .renderer
-            .as_ref()
-            .map(|r| [r.config.width, r.config.height])
-        else {
+        let Some(size) = self.ui_frame_size() else {
             return false;
         };
         let batch = HudBatch::new(size);
@@ -11042,11 +11041,7 @@ impl Game<'_> {
     /// slot or the off hand, THROW one or the whole stack.
     fn inventory_hotkey(&mut self, key: KeyCode) -> bool {
         use horizon_client::menu::Input;
-        let Some(size) = self
-            .renderer
-            .as_ref()
-            .map(|r| [r.config.width, r.config.height])
-        else {
+        let Some(size) = self.ui_frame_size() else {
             return false;
         };
         let batch = HudBatch::new(size);
@@ -11075,11 +11070,7 @@ impl Game<'_> {
         let menu = (self.screen == Screen::Inventory
             || (self.screen == Screen::Creative && !self.creative_screen.tab().search))
             && !self.dialog_open();
-        let Some(size) = self
-            .renderer
-            .as_ref()
-            .map(|r| [r.config.width, r.config.height])
-        else {
+        let Some(size) = self.ui_frame_size() else {
             return;
         };
         let batch = HudBatch::new(size);
@@ -11255,10 +11246,10 @@ impl Game<'_> {
         let Some((ty, slots)) = self.inv_drag.clone() else {
             return;
         };
-        let Some(r) = self.renderer.as_ref() else {
+        let Some(size) = self.ui_frame_size() else {
             return;
         };
-        let batch = HudBatch::new([r.config.width, r.config.height]);
+        let batch = HudBatch::new(size);
         if let Some(slot) = self.slot_at(&batch, self.cursor.0, self.cursor.1)
             && slot != 200
             && slot < Creative::DISPLAY
@@ -11271,10 +11262,10 @@ impl Game<'_> {
     }
     /// The hovered slot and whether the cursor is outside the window.
     fn inventory_target(&self) -> (Option<usize>, bool) {
-        let Some(r) = self.renderer.as_ref() else {
+        let Some(size) = self.ui_frame_size() else {
             return (None, false);
         };
-        let batch = HudBatch::new([r.config.width, r.config.height]);
+        let batch = HudBatch::new(size);
         (
             self.slot_at(&batch, self.cursor.0, self.cursor.1),
             self.clicked_outside(&batch),
@@ -11523,11 +11514,7 @@ impl Game<'_> {
         if self.remote.is_some() {
             return self.remote_click(right);
         }
-        let Some(size) = self
-            .renderer
-            .as_ref()
-            .map(|r| [r.config.width, r.config.height])
-        else {
+        let Some(size) = self.ui_frame_size() else {
             return;
         };
         let batch = HudBatch::new(size);
@@ -13729,6 +13716,11 @@ impl Game<'_> {
         self.clear_waypoints();
         self.post_effects.clear();
         self.spectated_post_effect = None;
+        if self.options.native_gameplay {
+            self.begin_closing_save(false)?;
+            self.native_return_to_launcher = true;
+            return Ok(());
+        }
         if self.external_server() {
             return self.leave_server(None);
         }
@@ -17008,22 +17000,10 @@ impl Game<'_> {
             }
             return Ok(false);
         }
-        let Some(size) = self
-            .renderer
-            .as_ref()
-            .map(|r| [r.config.width, r.config.height])
-            .or_else(|| {
-                self.window
-                    .as_ref()
-                    .filter(|_| self.options.native_gameplay)
-                    .map(|window| {
-                        let size = window.inner_size();
-                        [size.width, size.height]
-                    })
-            })
-        else {
+        let Some(viewport) = self.ui_viewport() else {
             return Ok(false);
         };
+        let size = viewport.drawable();
         pr.lap("pr_setup");
         let alpha = self.clock.fraction();
         // Camera.getCameraEntityPartialTicks: the view, the hand and the
@@ -17140,7 +17120,7 @@ impl Game<'_> {
         pr.lap("pr_environment");
         #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
         if self.options.native_gameplay {
-            self.render_native_terrain(view, &sky, size, alpha as f32, camera_alpha as f32)?;
+            self.render_native_terrain(view, &sky, viewport, alpha as f32, camera_alpha as f32)?;
             // Completion is asynchronous. Never increment reference frame counters.
             return Ok(false);
         }
@@ -18725,7 +18705,10 @@ fn autosave_interval(rate: f32) -> i64 {
     i64::from((rate * 300.0) as i32).max(100)
 }
 impl ApplicationHandler for Game<'_> {
-    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        if self.options.native_gameplay {
+            self.suspend_native_touch(event_loop);
+        }
         horizon_client::save::shutdown::global().record(
             self.save.shutdown_id(),
             horizon_client::save::shutdown::Actor::Main,
@@ -19158,8 +19141,8 @@ impl Game<'_> {
             let upgrade = starting.handle.upgrade();
             match &event {
                 WindowEvent::CursorMoved { position, .. } => {
-                    if let Some(r) = &self.renderer {
-                        let b = HudBatch::new([r.config.width, r.config.height]);
+                    if let Some(size) = self.ui_frame_size() {
+                        let b = HudBatch::new(size);
                         self.cursor = (position.x as f32 / b.scale, position.y as f32 / b.scale);
                     }
                 }
@@ -19468,10 +19451,10 @@ impl Game<'_> {
                     }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
-                    if let Some(r) = &self.renderer {
-                        let b = HudBatch::new([r.config.width, r.config.height]);
+                    if let Some(viewport) = self.ui_viewport() {
+                        let b = HudBatch::new(viewport.size());
                         let previous = self.cursor;
-                        self.cursor = (position.x as f32 / b.scale, position.y as f32 / b.scale);
+                        self.cursor = viewport.to_gui([position.x, position.y], b.scale);
                         if self.screen_mouse_dragged(previous) {
                             return Ok(());
                         }
@@ -20797,6 +20780,8 @@ impl<'a> Game<'a> {
             },
             #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
             native_terrain: None,
+            #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
+            native_hud: None,
             world_biomes: None,
             world_biomes_base: None,
             res: res.clone(),
@@ -20817,6 +20802,7 @@ impl<'a> Game<'a> {
             dialogs: Default::default(),
             integrated_starting: None,
             world_renderer_ready: false,
+            native_ui_frames: 0,
             collision: res.collision(),
             motion: res.motion(),
             health_resources: res.motion().health.clone(),
