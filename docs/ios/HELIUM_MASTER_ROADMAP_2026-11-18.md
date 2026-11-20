@@ -167,3 +167,24 @@ UNCHANGED PRODUCT GOAL: direct native Metal; no final iOS wgpu rendering.
 5. **Keep the master one-prompt/one-review workflow:** Codex delivers source + exact CI + evidence; independent review determines the next prompt. No automatic leap to S2B or G5. The existing general gameplay IPA hold remains in effect.
 
 **Success means proven gameplay smoothness, frame-time stability, bounded memory, visual fidelity and reliable saves—not rendering a test triangle, reporting synthetic GPU FPS or superficially turning on a feature.**
+
+---
+## Owner-approved final-session directive — 20 November 2026
+### COMPLETE THE NATIVE-METAL GAMEPLAY CUTOVER BEFORE OPTIONAL FEATURES
+
+**Owner change request:** The remaining paid-AI coding window is to be spent on making Minecraft genuinely run on Helium's own direct-Metal backend, **not** on more isolated synthetic graphics tests, a persistent wgpu overlay, optional shader packs, MetalFX or visual polish. Preserve the earlier G0 world/save release hold and release qualifications. Following the paid session, Gemini or other AI may continue enhancement work from a reproducible GitHub handoff.
+
+**Definition of the target, not a claim of current status:** A playable iOS game session where real Minecraft world loading/simulation, textured near terrain, camera, input, indispensable overlays/menus and enough core gameplay visuals run with **no wgpu or WebGPU GPU object/device/surface/submission**, using Rust scene data and Helium-owned direct MTLDevice/MTLCommandQueue/MTLRenderPipelineState/MTLBuffer/MTLTexture/CAMetalLayer. Ordinary world and multiplayer code may be reused. A missing rendering pass that makes normal gameplay effectively blind or impossible is a blocker; no hidden wgpu fallback is allowed in a native-only build. A native UIKit/SwiftUI interface is acceptable; not everything needs to be drawn in Metal if there is no wgpu fallback.
+
+**Acceptance gates:**
+1. Actual production world and resource loading run through backend-independent game/scene producers without instantiating a wgpu Renderer, queue or adapter.
+2. The native Metal path owns the entire active gameplay display; demonstrate continuous real-world frames and moving camera on actual Apple hardware, not just synthetic CI.
+3. Required visible passes for a usable play session include near opaque/cutout terrain, transparent fluids, entities/player-relevant visuals, sky and essential HUD/menus. Track additional missing/parity effects explicitly. Keep shaders, advanced LOD, MetalFX and frame generation out of the critical cutover unless they are required to unblock this core.
+4. Native-only configuration fails closed on Metal initialization; no hidden wgpu/graphics fallback; audit compiled iOS dependency graph, linked executable, runtime instrumentation and actual native presents. Full game is **not complete** if only the isolated no-world example is wgpu-free.
+5. Preserve chunk geometry cache, bounded CPU and GPU residency, scene/world epoch invalidation, latest-only frame input, resource retirement after GPU completion, async texture uploads, budget accounting, and no blocking UI operations. Test frame-time percentiles and real device memory/thermal trends where available; never promise impossible zero stutter/crash.
+6. Protect save/journal/host lifecycle. Do not publish an ordinary owner gameplay IPA until the G0 safety gate and disposable-world reopen are independently qualified. A game compiled in CI is not a physically verified safe playable game.
+7. Commit and push coherent checkpoints before usage expires, require exact-SHA macOS Metal + iOS ARM64 qualification, and produce a durable `docs/ios/HELIUM_GEMINI_HANDOFF.md` with branch/commits, exact build steps, current native-only status, working/prohibited operations, limitations, missing passes, verified tests and physical device requirements.
+
+**Priority order for time-limited coding:** (i) real native-only game boot/world/render frame; (ii) required scene passes and input/UI; (iii) stability, streaming, memory, GPU frame pacing; (iv) exact CI/device validation; (v) immutable Gemini handoff. If time expires, **report partial honestly** and prioritize a compilable, testable native-only gameplay vertical slice over unintegrated subsystem breadth. Full correctness/performance cannot be certified without running the actual game on the actual iPad.
+
+**Supersedes the earlier prompt-specific S2A/S2B stop rules for the final paid session:** Codex may implement as many tightly related cutover steps as can be coherently validated in one execution. It does **not** supersede world-save release controls or the requirement to clearly distinguish implementation, CI, physical verification and product completion.
