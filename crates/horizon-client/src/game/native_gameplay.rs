@@ -119,6 +119,14 @@ impl Game<'_> {
         if size.contains(&0) {
             return Ok(());
         }
+        if !self
+            .direct_metal
+            .as_ref()
+            .ok_or("missing direct Metal controller")?
+            .native_frame_due()
+        {
+            return Ok(());
+        }
         let clip = gfx::terrain_clip(
             yaw,
             pitch,
@@ -142,7 +150,9 @@ impl Game<'_> {
         } else {
             sky.fog_color
         };
+        let started = std::time::Instant::now();
         let hud = self.native_hud_frame(viewport)?;
+        let hud_prepared = started.elapsed();
         let materials = self
             .native_terrain
             .as_mut()
@@ -163,6 +173,7 @@ impl Game<'_> {
                 size,
                 clear_rgb.map(|c| c.clamp(0.0, 1.0)),
                 hud,
+                hud_prepared,
             )
             .map_err(|error| format!("direct Metal gameplay frame: {error}").into())
     }

@@ -526,6 +526,11 @@ impl Controller {
     }
 
     #[cfg(target_os = "ios")]
+    pub fn native_frame_due(&self) -> bool {
+        self.live.as_ref().is_some_and(live::Live::frame_due)
+    }
+
+    #[cfg(target_os = "ios")]
     pub fn native_frame(
         &mut self,
         materials: &horizon_client_render::gfx::NativeTerrainMaterials,
@@ -533,6 +538,7 @@ impl Controller {
         size: [u32; 2],
         clear_rgb: [f32; 3],
         hud: helium_render_scene::hud::Frame,
+        hud_prepared: std::time::Duration,
     ) -> Result<(), String> {
         let live = self
             .live
@@ -545,7 +551,7 @@ impl Controller {
             size,
             self.window.as_deref(),
             self.world_epoch,
-            Some((clear_rgb, hud)),
+            Some((clear_rgb, hud, hud_prepared)),
         )
     }
 

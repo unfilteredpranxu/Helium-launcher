@@ -83,6 +83,10 @@ impl Live {
     pub fn take_restream_request(&mut self) -> bool {
         Instant::now() >= self.pressure_until && std::mem::take(&mut self.restream_after_pressure)
     }
+    pub fn frame_due(&self) -> bool {
+        let now = Instant::now();
+        now >= self.next_input && (self.session.is_some() || now >= self.next_start)
+    }
     pub fn remove_columns(&mut self, columns: impl Iterator<Item = (i32, i32)>) {
         for column in columns {
             self.meshes.entries.retain(|key, mesh| {
@@ -214,7 +218,7 @@ impl Live {
         size: [u32; 2],
         window: Option<&winit::window::Window>,
         epoch: u64,
-        gameplay: Option<([f32; 3], helium_render_scene::hud::Frame)>,
+        gameplay: Option<([f32; 3], helium_render_scene::hud::Frame, Duration)>,
     ) -> Result<(), String> {
         let fullscreen = gameplay.is_some();
         let start = Instant::now();
@@ -307,9 +311,9 @@ impl Live {
             }
         }
         self.next_input = start + INPUT_INTERVAL;
-        let (clear_rgb, hud) = match gameplay {
-            Some((clear, hud)) => (clear, Some(hud)),
-            None => ([0.0; 3], None),
+        let (clear_rgb, hud, hud_prepared) = match gameplay {
+            Some((clear, hud, elapsed)) => (clear, Some(hud), elapsed),
+            None => ([0.0; 3], None, Duration::ZERO),
         };
         let request = Request {
             hud,
@@ -324,7 +328,7 @@ impl Live {
                     rgba,
                 },
             },
-            prepared_us: start.elapsed().as_micros() as u64,
+            prepared_us: (start.elapsed() + hud_prepared).as_micros() as u64,
             admitted_us: self.admitted_us,
             omitted_vertices: self
                 .meshes
@@ -368,6 +372,7 @@ fn run(
     let mut report_count = 0;
     let mut available = Instant::now();
     let mut reported_world = false;
+    let mut reported_hud = false;
     while !cancel.load(Ordering::Acquire) {
         let Some(request) = input.take(Duration::from_millis(25)) else {
             if available.elapsed() >= Duration::from_millis(500) {
@@ -529,6 +534,7 @@ fn run(
             Some(&display),
             frame,
             &draw,
+            live_bytes,
             request.hud.as_ref(),
             cancel,
         )? {
@@ -541,6 +547,18 @@ fn run(
                             log::info!(
                                 "Helium S2D REAL game Metal draw and present completed epoch={epoch} draw_calls={}; physical scanout unverified",
                                 result.draws,
+                            );
+                        }
+                        if !reported_hud
+                            && request
+                                .hud
+                                .as_ref()
+                                .is_some_and(|h| !h.vertices().is_empty())
+                        {
+                            reported_hud = true;
+                            log::info!(
+                                "Helium S2E game Metal HUD draw and present completed epoch={epoch} hud_bytes={}; physical scanout unverified",
+                                result.hud_bytes,
                             );
                         }
                         metrics.record(result, request.prepared_us);

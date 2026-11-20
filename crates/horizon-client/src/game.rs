@@ -296,6 +296,8 @@ mod native_terrain_model;
 pub mod native_text_field;
 mod native_ticks;
 mod native_travel;
+#[cfg(test)]
+mod native_ui_tests;
 mod native_view_distance;
 mod native_visuals;
 mod native_world_border;

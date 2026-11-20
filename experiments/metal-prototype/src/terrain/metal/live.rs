@@ -255,7 +255,7 @@ impl LiveScene {
         cancelled: &AtomicBool,
     ) -> Result<LiveSubmission, String> {
         self.submit_scene_with_hud(
-            renderer, material, display, frame, sections, None, cancelled,
+            renderer, material, display, frame, sections, 0, None, cancelled,
         )
     }
 
@@ -267,6 +267,7 @@ impl LiveScene {
         display: Option<&Display>,
         frame: &CpuFrame<S>,
         sections: &[(&LiveSection<u64>, View)],
+        retained_geometry_bytes: usize,
         hud: Option<&HudFrame>,
         cancelled: &AtomicBool,
     ) -> Result<LiveSubmission, String> {
@@ -287,6 +288,7 @@ impl LiveScene {
                     clear_rgb: frame.clear_rgb,
                 },
                 hud,
+                retained_geometry_bytes,
                 cancelled,
             )
         })
@@ -301,7 +303,7 @@ impl LiveScene {
         cancelled: &AtomicBool,
     ) -> Result<LiveSubmission, String> {
         autoreleasepool(|_| {
-            self.encode_and_submit(renderer, material, display, scene, None, cancelled)
+            self.encode_and_submit(renderer, material, display, scene, None, 0, cancelled)
         })
     }
     fn encode_and_submit<S: Source<Authority = AtomicBool> + Send + Sync + 'static>(
@@ -311,6 +313,7 @@ impl LiveScene {
         display: Option<&Display>,
         scene: LiveFrame<'_, S::Generation>,
         hud: Option<&HudFrame>,
+        retained_geometry_bytes: usize,
         cancelled: &AtomicBool,
     ) -> Result<LiveSubmission, String> {
         let started = Instant::now();
@@ -360,6 +363,8 @@ impl LiveScene {
                 .checked_add(section.bytes())
                 .ok_or("live geometry overflow")?;
         }
+        // The production worker may retain offscreen resident geometry too.
+        let bytes = bytes.max(retained_geometry_bytes);
         let hud_bytes = hud.map_or(0, |frame| Hud::budget(self.hud.as_ref(), frame));
         let live = bytes
             .checked_add(self.bytes())
@@ -755,7 +760,15 @@ mod tests {
                     .unwrap();
                 assert!(matches!(
                     scene
-                        .encode_and_submit(&renderer, &material, None, live(), Some(&hud), &cancel)
+                        .encode_and_submit(
+                            &renderer,
+                            &material,
+                            None,
+                            live(),
+                            Some(&hud),
+                            terrain.bytes(),
+                            &cancel
+                        )
                         .unwrap(),
                     LiveSubmission::Submitted
                 ));
@@ -791,13 +804,29 @@ mod tests {
             let hud = updates.frame(viewport, 2.0, vertices, runs).unwrap();
             assert!(matches!(
                 scene
-                    .encode_and_submit(&renderer, &material, None, live(), Some(&hud), &cancel)
+                    .encode_and_submit(
+                        &renderer,
+                        &material,
+                        None,
+                        live(),
+                        Some(&hud),
+                        terrain.bytes(),
+                        &cancel
+                    )
                     .unwrap(),
                 LiveSubmission::Submitted
             ));
             assert!(matches!(
                 scene
-                    .encode_and_submit(&renderer, &material, None, live(), Some(&hud), &cancel)
+                    .encode_and_submit(
+                        &renderer,
+                        &material,
+                        None,
+                        live(),
+                        Some(&hud),
+                        terrain.bytes(),
+                        &cancel
+                    )
                     .unwrap(),
                 LiveSubmission::Pending
             ));
