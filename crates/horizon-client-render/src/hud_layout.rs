@@ -938,3 +938,70 @@ pub fn abgr(color: u32) -> u32 {
     let [a, r, g, b] = color.to_be_bytes();
     crate::hud::rgba(r, g, b, a)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_ui_layout_uses_current_slots_health_and_food() {
+        let mut inputs = HotbarInputs {
+            selected: 0,
+            right_handed: true,
+            offhand: false,
+            slots: [None; 9],
+            offhand_pop: 0.0,
+            attack: None,
+        };
+        inputs.slots[0] = Some(0.0);
+        let first = hotbar(480, 320, &inputs);
+        inputs.selected = 1;
+        inputs.slots[1] = inputs.slots[0].take();
+        let second = hotbar(480, 320, &inputs);
+        assert!(matches!((&first[1], &second[1]),
+            (GuiDraw::Sprite { x: a, .. }, GuiDraw::Sprite { x: b, .. }) if *b - *a == 20));
+        assert!(matches!(first[2], GuiDraw::Item { slot: 0, .. }));
+        assert!(matches!(second[2], GuiDraw::Item { slot: 1, .. }));
+
+        let mut health = HealthHud::default();
+        let mut vitals = HealthInputs {
+            tick: 1,
+            millis: 1200,
+            health: 20.0,
+            max_health: 20.0,
+            absorption: 0.0,
+            armor: 3,
+            food: 20,
+            saturation: 1.0,
+            kind: HeartKind::Normal,
+            regeneration: false,
+            hunger: false,
+            hardcore: false,
+            damage_cooldown: false,
+            air: 300,
+            max_air: 300,
+            under_water: false,
+            vehicle_hearts: 0,
+        };
+        let full = health.layout(&vitals, 480, 320);
+        vitals.health = 7.0;
+        vitals.food = 5;
+        let hurt = health.layout(&vitals, 480, 320);
+        let count = |draws: &[GuiDraw], id: &str| {
+            draws
+                .iter()
+                .filter(|draw| {
+                    matches!(draw,
+                GuiDraw::Sprite { sprite, .. } if sprite == id)
+                })
+                .count()
+        };
+        assert_eq!(count(&full, "hud/heart/full"), 10);
+        assert_eq!(count(&hurt, "hud/heart/full"), 3);
+        assert_eq!(count(&hurt, "hud/heart/half"), 1);
+        assert_eq!(count(&full, "hud/food_full"), 10);
+        assert_eq!(count(&hurt, "hud/food_full"), 2);
+        assert_eq!(count(&hurt, "hud/food_half"), 1);
+        assert_eq!(count(&hurt, "hud/armor_half"), 1);
+    }
+}

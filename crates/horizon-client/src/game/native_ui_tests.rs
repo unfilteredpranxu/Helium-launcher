@@ -22,7 +22,7 @@ fn production_ui_uses_live_vitals_and_inventory_with_no_renderer() {
         &settings,
         Instant::now(),
         false,
-        true,
+        false,
         &Progress::new(),
         &mut |_, _| unreachable!("no menu handoff"),
     )

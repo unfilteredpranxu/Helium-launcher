@@ -23,6 +23,8 @@ on:
       - 'third_party/winit/src/platform/ios.rs'
       - 'third_party/winit/src/platform_impl/ios/**'
       - 'crates/horizon-client-render/src/hud.rs'
+      - 'crates/horizon-client-render/src/hud_layout.rs'
+      - 'crates/horizon-client/src/menu.rs'
       - 'crates/horizon-client-render/src/lod.rs'
       - 'crates/horizon-client-render/src/streaming.rs'
       - 'crates/horizon-client/src/game/remote.rs'
@@ -245,6 +247,8 @@ jobs:
           cargo +1.95.0 test --locked -p helium-render-scene hud::tests 2>&1 | tee "$RUNNER_TEMP/bridge/hud.log"
           cargo +1.95.0 test --locked -p horizon-client-render --lib gfx::tests::native_terrain 2>&1 | tee "$RUNNER_TEMP/bridge/cpu-native-input.log"
           cargo +1.95.0 test --locked -p horizon-client-render --lib hud::tests::native_atlas 2>&1 | tee "$RUNNER_TEMP/bridge/cpu-hud-atlas.log"
+          cargo +1.95.0 test --locked -p horizon-client-render --lib hud_layout::tests 2>&1 | tee -a "$RUNNER_TEMP/bridge/cpu-hud-atlas.log"
+          cargo +1.95.0 test --locked -p horizon-client-render --lib touch:: 2>&1 | tee -a "$RUNNER_TEMP/bridge/cpu-hud-atlas.log"
           HORIZON_SPRITE_SPLIT=512 cargo +1.95.0 test --locked -p horizon-metal-bridge --lib runtime::ownership_tests::native_worker_from_production_owned_bank_and_typed_section -- --ignored --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/bridge/native.log"
           cargo +1.95.0 check --locked -p horizon-client --no-default-features --features helium-native-metal-gameplay 2>&1 | tee "$RUNNER_TEMP/bridge/game.log"
           cargo +1.95.0 check --locked --target aarch64-apple-ios -p horizon-metal-bridge 2>&1 | tee "$RUNNER_TEMP/bridge/ios.log"
