@@ -680,8 +680,10 @@ mod tests {
             let cancel = AtomicBool::new(false);
             let (mut fixture, _) = fixture();
             fixture.description.version = upload::BANKED_VERSION;
+            fixture.pixels = Arc::new([0, 0, 255, 255].repeat(15));
             let bank = Synthetic(fixture);
-            let identity = bank.description().identity;
+            let d = bank.description();
+            let identity = d.identity;
             let mut material = renderer
                 .create_material_set(&[bank.clone()], &cancel, budget())
                 .unwrap();
@@ -698,6 +700,35 @@ mod tests {
                 }
             }
             retire(&renderer);
+            let terrain = [
+                [-1.0, -1.0, 0.5],
+                [1.0, -1.0, 0.5],
+                [1.0, 1.0, 0.5],
+                [-1.0, 1.0, 0.5],
+            ]
+            .map(|pos| TerrainVertex {
+                pos,
+                uv: [0; 2],
+                layer: OPAQUE_LAYER,
+                light: 0,
+                color: 0xffffff,
+            });
+            let terrain = LiveSection::new(
+                &renderer,
+                &Mesh::from_vertices(&terrain, &[0, 1, 2, 0, 2, 3]),
+                identity,
+                d.split,
+                d.sprites,
+                4096,
+            )
+            .unwrap();
+            let sections = [(&terrain, View::identity())];
+            let live = || LiveFrame {
+                sections: &sections,
+                identity,
+                lightmap: &[255; 1024],
+                clear_rgb: [0.0; 3],
+            };
             let mut scene = LiveScene::new(&renderer, [64, 64]).unwrap();
             let viewport = Viewport::new([64, 64], [4, 8, 4, 4]);
             let mut updates = Updates::new(Atlas::new(1, [1, 1], Arc::new(vec![255; 4])).unwrap());
@@ -715,8 +746,8 @@ mod tests {
             let vertices = [quad(0x800000ff), quad(0xff00ff00)].concat();
             let runs = vec![(0..6, Blend::Alpha), (6..12, Blend::Depth([8, 8, 8, 8]))];
             let mut encode_times = Vec::new();
-            for changed in [false, true] {
-                if changed {
+            for frame in 0..3 {
+                if frame == 1 {
                     updates.patch([0, 0, 1, 1], &[255, 0, 0, 255]).unwrap();
                 }
                 let hud = updates
@@ -724,19 +755,7 @@ mod tests {
                     .unwrap();
                 assert!(matches!(
                     scene
-                        .encode_and_submit(
-                            &renderer,
-                            &material,
-                            None,
-                            LiveFrame {
-                                sections: &[],
-                                identity,
-                                lightmap: &[255; 1024],
-                                clear_rgb: [0.0, 0.0, 1.0],
-                            },
-                            Some(&hud),
-                            &cancel
-                        )
+                        .encode_and_submit(&renderer, &material, None, live(), Some(&hud), &cancel)
                         .unwrap(),
                     LiveSubmission::Submitted
                 ));
@@ -744,7 +763,7 @@ mod tests {
                 loop {
                     if let Some(done) = scene.poll(None, &cancel).unwrap() {
                         assert_eq!(done.hud_bytes, 516);
-                        assert_eq!(done.hud_uploaded_bytes, 4);
+                        assert_eq!(done.hud_uploaded_bytes, if frame < 2 { 4 } else { 0 });
                         encode_times.push(done.encode_time.as_micros());
                         break;
                     }
@@ -752,7 +771,7 @@ mod tests {
                 }
                 retire(&renderer);
                 let bytes = readback(&renderer, &scene);
-                let at = |x, y| &bytes[(y * 64 + x) * 4..][..4];
+                let at = |x: usize, y: usize| &bytes[(y * 64 + x) * 4..][..4];
                 assert_eq!(at(1, 1), [0, 0, 255, 255]);
                 assert!(
                     at(6, 10)
@@ -762,13 +781,30 @@ mod tests {
                 );
                 assert_eq!(
                     at(13, 17),
-                    if changed {
+                    if frame > 0 {
                         [0, 0, 0, 255]
                     } else {
                         [0, 255, 0, 255]
                     }
                 );
             }
+            let hud = updates.frame(viewport, 2.0, vertices, runs).unwrap();
+            assert!(matches!(
+                scene
+                    .encode_and_submit(&renderer, &material, None, live(), Some(&hud), &cancel)
+                    .unwrap(),
+                LiveSubmission::Submitted
+            ));
+            assert!(matches!(
+                scene
+                    .encode_and_submit(&renderer, &material, None, live(), Some(&hud), &cancel)
+                    .unwrap(),
+                LiveSubmission::Pending
+            ));
+            cancel.store(true, Ordering::Release);
+            drop(hud);
+            drop(scene);
+            retire(&renderer);
             eprintln!("S2E SYNTHETIC macOS Metal HUD frame encode_us={encode_times:?}");
         });
     }

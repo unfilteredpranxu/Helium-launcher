@@ -4004,6 +4004,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn native_ui_inventory_picks_up_moves_and_preserves_item_counts() {
+        with_menu(Kind::Inventory, |env, menu| {
+            menu.creative = false;
+            menu.set_player_item(0, stack("stick", 11));
+            // Player menu wire indices 36 and 37 are the first two hotbar slots.
+            menu.click(env, 36, 0, Input::Pickup).unwrap();
+            assert!(menu.player_item(0).is_none());
+            assert_eq!(menu.carried.as_ref().map(|s| s.count), Some(11));
+            menu.click(env, 37, 0, Input::Pickup).unwrap();
+            assert!(menu.carried.is_none());
+            assert_eq!(menu.player_item(1).map(|s| s.count), Some(11));
+            menu.click(env, 37, 0, Input::Pickup).unwrap();
+            menu.click(env, 36, 0, Input::Pickup).unwrap();
+            assert_eq!(menu.player_item(0).map(|s| s.count), Some(11));
+            assert!(menu.player_item(1).is_none());
+        });
+    }
+
+    #[test]
     fn a_quick_craft_drag_previews_each_slot_and_the_rest_in_hand() {
         with_menu(Kind::Inventory, |env, menu| {
             // 9 + 36 player slots: 9 is the first main inventory slot.

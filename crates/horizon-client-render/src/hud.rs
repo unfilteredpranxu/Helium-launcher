@@ -2943,6 +2943,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_atlas_pins_the_production_bake_without_copying() {
+        let mut atlas = HudAtlas::boot();
+        let bytes = atlas.pixels.as_ptr();
+        let size = atlas.pixels.len();
+        let shared = atlas.share_native_pixels();
+        assert_eq!(shared.as_ptr(), bytes);
+        assert_eq!(shared.len(), size);
+        assert_eq!(atlas.pixels().as_ptr(), bytes);
+        assert!(Arc::ptr_eq(&shared, &atlas.share_native_pixels()));
+    }
+
+    #[test]
     fn object_skin_revision_tracks_changes_and_capacity_clear() {
         let mut atlas = HudAtlas::boot();
         atlas.set_object_skin("name:player".into(), "skins/server".into());

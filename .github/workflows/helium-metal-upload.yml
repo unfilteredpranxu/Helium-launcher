@@ -244,6 +244,7 @@ jobs:
           cargo +1.95.0 test --locked -p horizon-metal-bridge 2>&1 | tee "$RUNNER_TEMP/bridge/tests.log"
           cargo +1.95.0 test --locked -p helium-render-scene hud::tests 2>&1 | tee "$RUNNER_TEMP/bridge/hud.log"
           cargo +1.95.0 test --locked -p horizon-client-render --lib gfx::tests::native_terrain 2>&1 | tee "$RUNNER_TEMP/bridge/cpu-native-input.log"
+          cargo +1.95.0 test --locked -p horizon-client-render --lib hud::tests::native_atlas 2>&1 | tee "$RUNNER_TEMP/bridge/cpu-hud-atlas.log"
           HORIZON_SPRITE_SPLIT=512 cargo +1.95.0 test --locked -p horizon-metal-bridge --lib runtime::ownership_tests::native_worker_from_production_owned_bank_and_typed_section -- --ignored --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/bridge/native.log"
           cargo +1.95.0 check --locked -p horizon-client --no-default-features --features helium-native-metal-gameplay 2>&1 | tee "$RUNNER_TEMP/bridge/game.log"
           cargo +1.95.0 check --locked --target aarch64-apple-ios -p horizon-metal-bridge 2>&1 | tee "$RUNNER_TEMP/bridge/ios.log"
@@ -254,7 +255,7 @@ jobs:
         with:
           script: |
             const fs=require('fs'), path=require('path');
-            const summary=['tests.log','hud.log','cpu-native-input.log','native.log','game.log','ios.log','ios-game.log'].map(n=>{
+            const summary=['tests.log','hud.log','cpu-native-input.log','cpu-hud-atlas.log','native.log','game.log','ios.log','ios-game.log'].map(n=>{
               const p=path.join(process.env.RUNNER_TEMP,'bridge',n);
               return '### '+n+'\n```text\n'+(fs.existsSync(p)?fs.readFileSync(p,'utf8').slice(-10000):'NOT RUN')+'\n```';
             }).join('\n');
@@ -284,6 +285,7 @@ jobs:
           cargo +1.95.0 test --locked -p horizon-threads --lib jobs:: 2>&1 | tee "$RUNNER_TEMP/g07r3/threads.log"
           cargo +1.95.0 test --locked -p horizon-client-lib --no-default-features --lib save:: -- --test-threads=4 2>&1 | tee "$RUNNER_TEMP/g07r3/save.log"
           cargo +1.95.0 test --locked -p horizon-client-lib --no-default-features --lib lan::playerdata::tests:: 2>&1 | tee "$RUNNER_TEMP/g07r3/player.log"
+          cargo +1.95.0 test --locked -p horizon-client-lib --no-default-features --lib menu::tests::native_ui_inventory 2>&1 | tee -a "$RUNNER_TEMP/g07r3/player.log"
           cargo +1.95.0 test --locked -p horizon-client --no-default-features --lib game::integrated::shutdown_tests -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/g07r3/game-exit.log"
           cargo +1.95.0 test --locked -p horizon-client --no-default-features --lib game::saving::shutdown_tests -- --test-threads=1 2>&1 | tee -a "$RUNNER_TEMP/g07r3/game-exit.log"
           cargo +1.95.0 test --locked -p horizon-client --no-default-features --lib game::runtime_exit::tests -- --test-threads=1 2>&1 | tee -a "$RUNNER_TEMP/g07r3/game-exit.log"
