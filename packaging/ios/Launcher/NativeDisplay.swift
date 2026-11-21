@@ -140,9 +140,15 @@ public func qualificationEvent(_ code: UInt32, _ id: UInt64) {
         case 7: value = .metalDeviceReady
         case 8: value = .metalDeviceUnavailable
         case 9: value = .probeAttachmentUnavailable
-        case 10, 11, 12:
+        case 10, 11, 12, 16, 17:
             guard nativeTargets[id]?.attachment == .qualification else { return }
-            value = code == 10 ? .metalRendererReady : (code == 11 ? .presentSubmitted : .presentCompleted)
+            switch code {
+            case 10: value = .metalRendererReady
+            case 11: value = .presentSubmitted
+            case 12: value = .presentCompleted
+            case 16: value = .drawableAttempted
+            default: value = .probeUploadCompleted
+            }
         case 13: value = .probeRetired
         case 14: value = .metalFailed
         case 15: value = .probeShutdown

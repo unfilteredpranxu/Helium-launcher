@@ -83,6 +83,8 @@ pub enum Event {
     Retired,
     WorkerFailed,
     Shutdown,
+    DrawableAttempted,
+    UploadCompleted,
 }
 
 #[cfg(target_os = "ios")]

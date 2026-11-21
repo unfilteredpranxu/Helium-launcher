@@ -12,7 +12,7 @@ public enum HostStage: String {
     case checkpointRequested, checkpointDurable, checkpointFailed, checkpointAbandoned
     case backgroundTimeDenied, backgroundTimeExpired
     case probeAdmitted, probeMemoryPressure, probeLayerRevealed, probeRetired, probeShutdown
-    case probeAttachmentUnavailable
+    case probeAttachmentUnavailable, probeUploadCompleted
 }
 
 /// A fixed-size boot snapshot. Writes only short, enumerated stages in the

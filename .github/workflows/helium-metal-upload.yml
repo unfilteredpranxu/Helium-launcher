@@ -343,7 +343,7 @@ jobs:
           set -euo pipefail
           folder="$RUNNER_TEMP/attached-game"
           cargo +1.95.0 tree --locked --target aarch64-apple-ios -p horizon-ios-launcher --no-default-features --features host-qualification -e normal,build > "$folder/host-dependencies.log"
-          if grep -E '(wgpu|horizon-(client|world|assets|prepare|metal-bridge|protocol)|(^|[^[:alnum:]])naga) v' "$folder/host-dependencies.log"; then exit 1; fi
+          if grep -E '(wgpu[^[:space:]]*|horizon-(client[^[:space:]]*|world|assets|prepare|metal-bridge|protocol)|(^|[^[:alnum:]])naga[^[:space:]]*) v' "$folder/host-dependencies.log"; then exit 1; fi
           cargo +1.95.0 build --release --locked --target aarch64-apple-ios -p horizon-ios-launcher --no-default-features --features host-qualification --bin helium-host-qualification 2>&1 | tee "$folder/host-link.log"
           command -v xcodegen >/dev/null || brew install xcodegen
           (cd packaging/ios && xcodegen generate)

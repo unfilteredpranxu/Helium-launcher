@@ -139,9 +139,11 @@ fn present(layer: &Layer, cancel: &AtomicBool) -> Result<(), String> {
     while renderer.upload_retention().busy {
         wait(cancel, deadline)?;
     }
+    event(Event::UploadCompleted, id);
     let mut scene = LiveScene::new(&renderer, display.dimensions())?;
     let section = LiveSection::from_scene(&renderer, &frame.sections[0], &frame, 4096)?;
     let draws = [(&section, frame.camera.section_view([0; 3])?)];
+    event(Event::DrawableAttempted, id);
     loop {
         match scene.submit_scene(
             &renderer,
