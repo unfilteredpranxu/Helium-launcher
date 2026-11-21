@@ -138,3 +138,33 @@ fn repeated_background_requests_share_one_checkpoint_and_allow_future_requests()
     drop(second);
     assert!(CheckpointRequest::claim(&flags).is_none());
 }
+
+#[test]
+fn background_while_opening_queues_one_checkpoint_on_the_authoritative_server() {
+    let (tasks, server_tasks) = channel();
+    let (_ready, ready) = channel();
+    let flags = Arc::new(Flags::default());
+    let opening = Starting {
+        handle: Integrated {
+            flags: flags.clone(),
+            thread: None,
+            finished: None,
+            tasks,
+            world_name: String::new(),
+        },
+        ready,
+        player: String::new(),
+        folder: String::new(),
+        new_world: true,
+    };
+    checkpoint_world(None, Some(&opening));
+    checkpoint_world(None, Some(&opening));
+    assert!(flags.checkpoint_queued.load(Ordering::Acquire));
+    let checkpoint = server_tasks.try_recv().expect("one queued checkpoint");
+    assert!(server_tasks.try_recv().is_err());
+    drop(checkpoint);
+    assert!(!flags.checkpoint_queued.load(Ordering::Acquire));
+    opening.handle.request_stop();
+    checkpoint_world(None, Some(&opening));
+    assert!(server_tasks.try_recv().is_err());
+}

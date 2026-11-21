@@ -18722,9 +18722,7 @@ impl ApplicationHandler for Game<'_> {
         if let Some(native) = self.direct_metal.as_mut() {
             native.invalidate("application suspended");
         }
-        if let Some(server) = &self.integrated {
-            server.request_checkpoint();
-        }
+        integrated::checkpoint_world(self.integrated.as_ref(), self.integrated_starting.as_ref());
     }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         horizon_client::save::shutdown::mark_event_thread();
@@ -20613,7 +20611,7 @@ impl Game<'_> {
             && let Err(error) = self.open_world(&folder, None, None, false, None)
         {
             self.error = Some(error);
-            event_loop.exit();
+            self.exit_on_error(event_loop);
             return;
         }
         // A Realm's address came back (GetServerDetailsTask hands over to ConnectScreen).
@@ -20621,7 +20619,7 @@ impl Game<'_> {
             && let Err(error) = self.title_action(event_loop, action)
         {
             self.error = Some(error);
-            event_loop.exit();
+            self.exit_on_error(event_loop);
             return;
         }
         horizon_client::spans::time("server_packs", || self.tick_server_packs());

@@ -426,6 +426,13 @@ pub(super) struct Starting {
     new_world: bool,
 }
 
+/// Both stages of an integrated session can own dirty world data.
+pub(super) fn checkpoint_world(active: Option<&Integrated>, opening: Option<&Starting>) {
+    if let Some(server) = active.or_else(|| opening.map(|s| &s.handle)) {
+        server.request_checkpoint();
+    }
+}
+
 /// The world to open and the player who owns it.
 struct Launch {
     folder: String,

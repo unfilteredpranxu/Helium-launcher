@@ -15,6 +15,30 @@ pub(super) struct ClosingSave {
     stage: Stage,
 }
 impl ClosingSave {
+    fn initial_close(
+        quit: bool,
+        has_server: bool,
+        title_or_saved: bool,
+        retire: impl FnOnce() -> bool,
+    ) -> Option<Self> {
+        // World creation can retain the title screen while the integrated
+        // server owns a session. Resolve that owner before treating the UI as idle.
+        let stage = if has_server && retire() {
+            Stage::Retiring
+        } else if title_or_saved {
+            Stage::Quit
+        } else {
+            return None;
+        };
+        Some(Self {
+            quit,
+            close: true,
+            reply: None,
+            started: Instant::now(),
+            stage,
+        })
+    }
+
     fn retire_after_error(&mut self) {
         self.quit = true;
         self.close = true;
@@ -63,30 +87,27 @@ impl Game<'_> {
             save.quit |= quit;
             return Ok(());
         }
-        if self.title.is_some() || self.saved_for_exit {
-            // A quit from the title still needs the event loop to finish.
-            self.pending_save = Some(ClosingSave {
-                quit,
-                close: true,
-                reply: None,
-                started: Instant::now(),
-                stage: Stage::Quit,
-            });
+        let has_server = self.integrated.is_some()
+            || self.integrated_starting.is_some()
+            || self.remote.is_some();
+        if let Some(save) = ClosingSave::initial_close(
+            quit,
+            has_server,
+            self.title.is_some() || self.saved_for_exit,
+            || self.begin_owned_ui_shutdown(),
+        ) {
+            let retiring = matches!(save.stage, Stage::Retiring);
+            self.pending_save = Some(save);
+            if retiring {
+                self.capture(false);
+            }
             return Ok(());
         }
         // Stop client-side terrain work before the integrated server is shut down. The
         // server's own stop path aborts its workers, but the window's streaming registration
         // is dropped only after the event loop exits and would otherwise wait for queued work.
         self.streaming.abort_generation();
-        if (self.integrated.is_some() || self.remote.is_some()) && self.begin_owned_ui_shutdown() {
-            self.pending_save = Some(ClosingSave {
-                quit,
-                close: true,
-                reply: None,
-                started: Instant::now(),
-                stage: Stage::Retiring,
-            });
-        } else if let Some(integrated) = &self.integrated {
+        if let Some(integrated) = &self.integrated {
             integrated.request_stop();
             self.pending_save = Some(ClosingSave {
                 quit,
@@ -348,6 +369,36 @@ impl Game<'_> {
 #[cfg(test)]
 mod shutdown_tests {
     use super::*;
+
+    #[test]
+    fn closing_from_title_waits_for_an_opening_world_owner() {
+        use horizon_threads::retirement::{Coordinator, Status};
+        use std::sync::mpsc::channel;
+
+        let coordinator = Coordinator::default();
+        let (release, wait) = channel();
+        let mut ticket = None;
+        let save = ClosingSave::initial_close(true, true, true, || {
+            ticket = Some(coordinator.submit(move || wait.recv().map_err(|e| e.to_string())));
+            true
+        })
+        .unwrap();
+        assert!(matches!(save.stage, Stage::Retiring));
+        let ticket = ticket.unwrap();
+        assert_eq!(ticket.status(), Status::Pending);
+        release.send(()).unwrap();
+        coordinator.wait_for_exit_change(Status::Pending);
+        assert_eq!(ticket.status(), Status::Complete);
+    }
+
+    #[test]
+    fn idle_title_close_never_creates_a_retirement_ticket() {
+        let save = ClosingSave::initial_close(true, false, true, || {
+            panic!("there is no world owner to retire")
+        })
+        .unwrap();
+        assert!(matches!(save.stage, Stage::Quit));
+    }
     #[test]
     fn interrupted_control_save_cannot_reply_success_or_restart_a_local_save_after_retirement() {
         let (reply, receive) = std::sync::mpsc::channel();

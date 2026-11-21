@@ -44,7 +44,8 @@ impl Game<'_> {
         let placeholder = Streaming::new(Arc::new(remote::NoTerrain), self.worker_context(), 1);
         let mut streaming = Some(std::mem::replace(&mut self.streaming, placeholder));
         let mut lod = self.lod.take();
-        self.shutdown_singleplayer = self.integrated.is_some();
+        self.shutdown_singleplayer =
+            self.integrated.is_some() || self.integrated_starting.is_some();
         let mut server = self.integrated.take();
         let mut starting = self.integrated_starting.take();
         let mut resources = self.rest_loader.take();
