@@ -1,6 +1,54 @@
-# Helium Launcher — S2F handoff for Gemini
+# Helium Launcher — S2G handoff for Gemini
 
-**PARTIAL.** The isolated iOS game now submits its existing Rust HUD and in-world menus through the direct Metal compositor. Physical inventory, touch, and world save/quit/reopen still require a qualified device session. Full gameplay linkage still reaches wgpu. The gameplay IPA is held.
+**PARTIAL.** S2G enforces a standalone disposable-world namespace in the iOS native gameplay candidate. Physical inventory, touch, and world save/quit/reopen still require a qualified device session. Full gameplay linkage still reaches wgpu. The gameplay IPA is held.
+
+## S2G disposable-world boundary
+
+- Starting HEAD `f7c5510e4477b7507fd49d129820891d4e67bb81`. S2G implementation `604a03ae7bec30c4494da0f47db3a04e392be0fa`. [Exact-source Actions run 44873463476](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44873463476)
+- The iOS `helium-native-metal-gameplay` build activates `game/disposable.rs` at entry, before ordinary boot imports, argument parsing, or world lookup. It requires the isolated `dev.helium.g06ctest` bundle with `HeliumDisposableWorldTestVersion=1`, checks the app executable against dyld's process main image, checks the canonical iOS app installation and data container layouts, and verifies the Foundation container. The original native launcher and Metal availability checks are still required. This package selects Direct Metal gameplay itself and rejects launch arguments, mode files, and incompatible renderer overrides. The packaging job applies and verifies the marker on the held app.
+- The fixed namespace is `Library/Application Support/Helium-Disposable-v1` inside that app's private data container. The namespace has an exclusive lock for the process lifetime. The existing engine starts with this directory as its working directory, so relative saves, backups, options, and other game state have the private base. The only supported world selector is the exact spelling `disposable-world`. The storage policy exclusively creates `saves/disposable-world`, syncs its parent, and records the directory inode and creation time in a synced receipt outside `saves`. An existing world without a matching receipt is rejected. The root, saves, and backups are pinned by filesystem identity. The world and backup workers check their trees for symlinks, hard-linked files, mount changes, aliases, and special files before using the game's path-based persistence code.
+- `Game::open_world` and `open_integrated` check the selector before title recovery, datapacks, or a server launch. `WorldRequest::new` reserves or validates the slot on a worker, and `prepare_world` checks the authorized path before taking the original world session lock. The live world, saved player data, metadata, region writes, and redo use the same `SaveDir` owner and lock. Reopen can replay the first durably admitted level record before requiring level metadata. If creation never admitted usable metadata, the slot fails closed without deleting it or generating a replacement. Save & Quit and fatal errors retain S2F retirement semantics. Backups are Rust-validated worker operations inside `backups` under the same world lock. Swift neither loads candidate world thumbnails nor opens ordinary save paths on behalf of candidate world actions.
+- Ordinary world imports, mixed resource/world ZIPs, content mods, LAN and external server actions, and broad file/control commands are blocked on the experimental path. A prepared resource-only ZIP delivered through the existing launcher importer must be a regular, unaliased direct child of the verified test app's `Documents` directory. Rust opens that file read-only, classifies it before install, and uses the private resource destination. The original archive remains available. The automatic boot worker can recover an interrupted private resource install and skips Documents archive scanning. Get the archive from the owner's legal preparation procedure and use the launcher's existing Game Files URL flow. `Documents/logs` remains the evidence exchange folder.
+- This boundary assumes a normal signed standalone iOS container. The path and mode checks fail closed on the guest layouts tested in fixtures. The implementation does not certify a hooked host or an actor with access to rewrite private app state during execution. LiveContainer guest unload is a separate unqualified runtime. The source contains no release authorization for the standalone candidate.
+
+### S2G tests and remaining gates
+
+The first S2G run found that the pinned `libc` declares `_dyld_get_image_name` only on macOS. The iOS host adapter now declares the public `<mach-o/dyld.h>` function. The ARM64 iOS Rust type-check for `horizon-ios-launcher` passed locally after that correction. [First-run failure](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44872569217/job/136750137005)
+
+```bash
+cargo +1.95.0 test --locked -p horizon-client --no-default-features --lib game::disposable::tests -- --test-threads=1
+cargo +1.95.0 test --locked -p horizon-client --no-default-features --features helium-native-metal-gameplay --lib game::disposable::tests -- --test-threads=1
+cargo +1.95.0 test --locked -p horizon-client-lib --no-default-features --lib import::tests -- --test-threads=1
+cargo +1.95.0 test --locked -p horizon-client --no-default-features --lib shutdown_tests -- --test-threads=1
+cargo +1.95.0 test --locked -p horizon-client --no-default-features --lib game::runtime_exit::tests -- --test-threads=1
+cargo +1.95.0 test --locked -p horizon-client-lib --no-default-features --lib save:: -- --test-threads=4
+cargo +1.95.0 test --locked -p helium-render-scene -p horizon-metal-bridge
+python3 -m unittest discover -s tests -p 'test*ios*.py'
+```
+
+The temporary-directory sandbox suite passed seven tests locally in each of the two feature configurations. One subprocess case is ignored in the ordinary harness and invoked by its parent. The fixtures use production level metadata, player state, region entity writes, journal admission and recovery, backups, directory and file aliases, and process kill/reopen. They verify that an ordinary sentinel save stays byte-identical and acquires no session lock. The import suite passed 18 and the package guards passed 20. No test used an owner world.
+
+The [Linux shutdown job](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44873463476/job/136752907678) and [macOS shutdown job](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44873463476/job/136752907439) each ran seven sandbox, 18 import, eight retirement, 93 save, 26 player durability, nine shutdown and two controlled runtime-return tests successfully. The killed-process and fatal-return subprocess fixtures ran through their parents. The six separately ignored save fixtures and the prepared-resource UI fixture did not run in these jobs.
+
+The [Apple SDK job](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44873463476/job/136752907402) passed all 12 explicitly executed Metal tests, including translucent terrain, HUD composition, layer ownership and upload retirement. The synthetic resident terrain test completed 120 frames and four detached presentations, with 0.260 ms median encoding and 1.020 ms median GPU command time. The three synthetic HUD encoding samples took 95.392 ms cold, 0.367 ms and 0.415 ms warm. The isolated native example completed 12 frames and four presentations and passed its wgpu-free iOS ARM64 audit. The [Swift/C/Rust round-trip and UIKit job](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44873463476/job/136752907462) passed 19 recorder tests and built the standalone UIKit host. These measurements and build results do not establish A16 gameplay performance or physical scanout.
+
+The [production bridge job](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44873463476/job/136752907278) passed 26 bridge tests, three CPU HUD scene tests, two production CPU terrain tests, two atlas/layout tests and 38 touch tests. Its separately invoked Metal worker completed uploads, draw and presentation with handcrafted geometry in the production format. That fixture ran successfully on the Mac and left the remaining prepared-resource bridge fixture ignored. The job passed the actual `horizon-client` native-feature ARM64 iOS check after the dyld correction.
+
+All seven execution jobs passed on `604a03ae7bec30c4494da0f47db3a04e392be0fa`. The release command was `cargo +1.95.0 build --release --locked --target aarch64-apple-ios -p horizon-client --no-default-features --features audio,helium-native-metal-gameplay`. Xcode 26.6 linked the UIKit host against the iPhoneOS 26.5 SDK. Four binary guard tests passed in the release job. The verifier matched the embedded 84,516,912-byte ARM64 game to the Rust output, confirmed the iOS 15.0 deployment target, `HorizonLauncherKit`, the disposable-host export and the isolated `dev.helium.g06ctest` bundle with version `0.2.8` and build `12001`. Executable SHA-256 is `0b0468849e9d91858c07370504574bbb112cba8898ff6a797bb59f8db8a3bdca`. CI verified and discarded `held.ipa` with SHA-256 `ca27b400efe1da8c13baf2be8e4fb77ccd32c2031dade8f2e308b84a4bf5635b`. The owner packaging and upload steps were skipped. Only evidence logs were published. [ARM64 game, UIKit and package job](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44873463476/job/136756227315)
+
+The precise resource-backed UI test remains **BLOCKED**. `horizon-prepare --check` found no prepared 26.3 tree, and the workspace contained no authorized 26.3 client and server inputs. Use the preparation and isolated execution commands in [Prepared-resource UI gate](#prepared-resource-ui-gate). The synthetic ZIP fixture only verifies the import boundary. It supplies no authentic assets or UI evidence.
+
+On a machine with the tester's owned installation, use JDK 25, the official 26.3 launcher profile and assets, and the pinned server JAR named by that profile. Validate the resulting prepared directory before running the test or building the private import archive. Keep these files local or on the owner's private resource transport.
+
+```bash
+cargo +1.95.0 run --locked --release -p horizon-prepare -- \
+  --prepare --minecraft-dir "$owned_minecraft" --server-jar "$owned_server_jar" --output "$assets"
+cargo +1.95.0 run --locked --release -p horizon-prepare -- --check --output "$assets"
+cargo +1.95.0 run --locked --release -p horizon-client --no-default-features -- \
+  --pack-resources "$assets" --out "$private_archive"
+```
+
+**Gameplay IPA held.** Before owner distribution, qualify the exact-SHA package and exercise the S2G host/container checks and owned shutdown on a standalone iPad under development provisioning, using a synthetic fixture in its private test container. LiveContainer requires separate evidence. The acceptance sequence in [Owner device procedure after explicit clearance](#owner-device-procedure-after-explicit-clearance) is inactive until G0 clears. Preserve the app's test bundle ID when signing an eventually approved unsigned build. Use a fresh slot and capture native activation, displayed terrain/HUD, inventory movement, save/reopen, and background recovery. The full binary still links the existing wgpu graph. Entity and held-item rendering, outlines, sky and weather geometry, and material animation parity remain open.
 
 ## S2F host and save qualification
 
@@ -199,7 +247,7 @@ cargo +1.95.0 tree --locked --target aarch64-apple-ios -p horizon-client --no-de
 python3 -m unittest discover -s tests -p 'test*ios*.py'
 ```
 
-On an Apple runner, generate the Xcode project with `xcodegen generate` from `packaging/ios`, set `HORIZON_GAME_PREBUILT=1`, and build `HorizonGame` for `iphoneos` arm64 with minimum iOS 15 and signing disabled. The current Actions job runs `verify-attached-ios-game.py <app> <Rust executable> --native-gameplay` then inspects a temporary unsigned archive. The workflow keeps owner gameplay publication disabled. The explicit isolated runtime selection is `native-gameplay` in `Documents/helium-metal-test.txt` or `HELIUM_DIRECT_METAL=native-gameplay` when supplied by a development launch. The bundle marker or mode flag is no authorization to install.
+On an Apple runner, generate the Xcode project with `xcodegen generate` from `packaging/ios`, set `HORIZON_GAME_PREBUILT=1`, and build `HorizonGame` for `iphoneos` arm64 with minimum iOS 15 and signing disabled. The current Actions job runs `verify-attached-ios-game.py <app> <Rust executable> --native-gameplay` then inspects a temporary unsigned archive. The workflow keeps owner gameplay publication disabled. At S2D, the runtime selector was `native-gameplay` in `Documents/helium-metal-test.txt` or `HELIUM_DIRECT_METAL=native-gameplay` in a development launch. The current standalone iOS build uses S2G’s mandatory host and storage checks above.
 
 [S2D qualification](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44746911766)
 
@@ -228,4 +276,4 @@ The in-game Save & Quit action requests the existing owned retirement and only r
 
 ## HOW GEMINI SHOULD CONTINUE HELIUM WITHOUT REPEATING PREVIOUS WORK
 
-First run the resource-backed `Game` inventory/vitals regression in an isolated profile with prepared 26.3 data. Then enforce a standalone-only disposable save namespace at world creation, open, and import entry points and qualify the G0 lifecycle on it. Keep the publication guard active until those gates pass. Verify slot pickup/placement, modal input, background recovery and Save & Quit/reopen using the existing S2E HUD and S2D Metal terrain. Preserve upstream MIT attribution.
+Run the resource-backed `Game` inventory/vitals regression in an isolated profile with the owner's prepared 26.3 data. Qualify S2G's standalone host attestation and its disposable-world lifecycle before authorizing a test artifact. Verify slot pickup/placement, modal input, background recovery and Save & Quit/reopen using the existing S2E HUD and S2D Metal terrain. Use a separate effort for the remaining wgpu link graph and visual parity. Preserve upstream MIT attribution.
