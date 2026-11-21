@@ -1,6 +1,65 @@
-# Helium Launcher — S2E handoff for Gemini
+# Helium Launcher — S2F handoff for Gemini
 
 **PARTIAL.** The isolated iOS game now submits its existing Rust HUD and in-world menus through the direct Metal compositor. Physical inventory, touch, and world save/quit/reopen still require a qualified device session. Full gameplay linkage still reaches wgpu. The gameplay IPA is held.
+
+## S2F host and save qualification
+
+S2F started at `47286bfc7d0d850c451a11bc968522fd7305c4e7`. The opening integrated server can own the world while the UI still shows the title. `Game::begin_closing_save` now selects owned retirement before the idle-title fast path, even while a world is opening. Quit waits for the retirement receipt. Closing a starting integrated world also preserves its singleplayer return route. Scene suspension queues a checkpoint for the opening server when the active handle has yet to be installed. That still uses the single outstanding checkpoint guard and returns to UIKit before any save. Deferred world-open and connect errors now enter the standard owned error-close path. This matters on iOS because winit ignores a programmatic `exit()`.
+
+The tested S2F source is `7fbb0d55333a1d10b7dac962385de31088a2d179`. The later evidence commit only updates this file. [Exact-source CI run 44865468477](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44865468477)
+
+```bash
+cargo +1.95.0 test --locked -p horizon-client --no-default-features --lib shutdown_tests -- --test-threads=1
+cargo +1.95.0 test --locked -p horizon-client --no-default-features --lib game::runtime_exit::tests -- --test-threads=1
+cargo +1.95.0 test --locked -p horizon-client-lib --no-default-features --lib save:: -- --test-threads=4
+cargo +1.95.0 test --locked -p horizon-client-lib --no-default-features --lib lan::playerdata::tests::
+cargo +1.95.0 check --locked -p horizon-client --no-default-features --features helium-native-metal-gameplay
+python3 -m unittest discover -s tests -p 'test*ios*.py'
+```
+
+Local Linux ran nine shutdown tests and two runtime-return tests. One runtime-return subprocess fixture was invoked by its parent test. The new cases verify that a title-screen close remains pending while the opening world owner is held, an idle title creates no retirement work, and a background notification queues exactly one checkpoint while opening. Local Linux save and player tests passed 93 and 26, with six save fixtures ignored in the ordinary invocation. The native feature check and all 19 package guard tests passed.
+
+The [Apple SDK job](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44865468477/job/136728031079) passed all 12 explicitly executed Metal regressions. Synthetic terrain completed 120 consecutive frames and four detached presentations, with 0.341 ms median encoding and 1.028 ms median command GPU time. Synthetic HUD encoding took 113.097 ms cold, then 0.790 and 0.358 ms warm. The standalone fixture completed 12 frames and four presentations, retired all GPU work and passed its wgpu-free iOS ARM64 audit. These are Mac fixtures. No A16 performance or scanout has been measured for S2F. The [Swift/C/Rust diagnostics and UIKit job](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44865468477/job/136728031097) also passed.
+
+The pinned [Linux shutdown job](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44865468477/job/136728031108) and [macOS shutdown job](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44865468477/job/136728031284) each passed eight retirement, 93 save, 26 player durability, five integrated shutdown, four save coordination, two fatal-return and 26 streaming tests. The [production bridge job](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44865468477/job/136728030920) passed the production-format Metal worker test and compiled the actual game in the ARM64 iOS configuration. Those jobs ran without prepared game resources or a connected iPad.
+
+All seven execution jobs passed on `7fbb0d55333a1d10b7dac962385de31088a2d179`. The actual optimized Rust game, UIKit host and Swift framework linked. The verifier matched the ARM64 Rust executable with the one embedded in `dev.helium.g06ctest` build `12001` and confirmed the iOS 15.0 minimum and native attachment exports. The executable SHA-256 was `a5ba2334112a944cd66a09b3b9cf48922a504d4b1da609bf9df027e38b2da877`. CI verified the temporary `held.ipa` (SHA-256 `a9b9ecaa619cb115633d73398ad2068fb320a58b42bec9be182e6f82d0adcd3c`) and discarded it. The owner packaging and upload steps were skipped. Device boot, native mode activation with a real world, Save & Quit, and scanout remain unverified. [ARM64 release build and package verification](https://github.com/unfilteredpranxu/Helium-launcher/actions/runs/44865468477/job/136731064480)
+
+The full iOS graph still includes `wgpu 30.0.1` through `horizon-client`, `horizon-client-lib`, `horizon-client-render` and `horizon-hdr`. The bridge reaches it via `horizon-client-render`. Entity and held-item drawing, outlines, clouds and weather geometry, terrain material animation parity, and optional HUD effects remain missing or incomplete. S2F changes the save/lifecycle paths only. The existing native frame queue, GPU resource path and budgets retain their S2E behavior.
+
+The roadmap's original fatal-return bug predates S1. `game::run_with` runs inside `runtime_exit::run`, which waits until both storage ownership and native GPU retirement are terminal before the executable can reach its controlled process exit. A failed save retains ownership and cannot authorize a successful close. On iOS the ordinary runtime stays inside `UIApplicationMain`. The termination callback initiates retirement and returns. UIKit can still end the process or expire a background task while writes are pending. Published, durably admitted redo can replay. Live changes that never reached admission may be lost. The earlier LiveContainer process-exit watchdog report does not establish a GPU fault or identify the joined worker. The lifetime of a guest during unload remains unqualified.
+
+**G0 remains blocked for owner distribution.** The held CI build validates the game target. A separate bundle identifier alone cannot enforce disposable-only access. A candidate must enforce a new dedicated save namespace, reject world imports and pre-existing worlds from outside it, and allow reopen only for the world created by that candidate. Make its standalone package select `native-gameplay` explicitly and fail closed if that mode or its UIKit host is unavailable. Keep the publication hold while qualifying that boundary and standalone lifecycle. LiveContainer needs independent evidence.
+
+### Prepared-resource UI gate
+
+The resource-backed fixture must run with a complete prepared 26.3 directory containing the current `horizon-resources.json`, gameplay tables, and real GUI textures and fonts. The repository's `horizon-prepare --prepare` takes the tester's owned 26.3 client, launcher assets and pinned server JAR. Verify the result with `horizon-prepare --check --output "$assets"`. The cloud checkout had neither a prepared set nor the owned source installation. `horizon-prepare --check` returned 1, and invoking the UI fixture explicitly returned 101 at the missing `HORIZON_TEST_RESOURCES` setup assertion. No gameplay assertions ran. [Source-build instructions](../../README.md#build-from-source)
+
+Once an authorized local prepared tree is available, use this command from the checkout. It runs the real fixture in an isolated working directory and fails if preparation is incomplete.
+
+```bash
+repo=$(pwd -P)
+assets=/absolute/path/to/prepared/26.3
+profile=$(mktemp -d)
+cd "$profile"
+env HORIZON_TEST_RESOURCES="$assets" HORIZON_HOME="$profile/game" \
+    HORIZON_LAUNCHER_HOME="$profile/launcher" XDG_DATA_HOME="$profile/data" \
+    XDG_CONFIG_HOME="$profile/config" HORIZON_LAUNCHER_NO_SELF_UPDATE=1 \
+    HORIZON_NO_AUDIO=1 CARGO_TARGET_DIR="$repo/target" \
+    cargo +1.95.0 test --locked --manifest-path "$repo/Cargo.toml" \
+    -p horizon-client --no-default-features --lib \
+    game::native_ui_tests::production_ui_uses_live_vitals_and_inventory_with_no_renderer \
+    -- --ignored --exact --test-threads=1
+```
+
+### Owner device procedure after explicit clearance
+
+CI can build the unsigned ARM64 game, validate the UIKit bundle and run GPU and save fixtures. The owner must sign the exact approved artifact with their own trusted method, verify its checksum, install it into the standalone test sandbox, and perform the following checks. There is currently no approved archive or checksum to use for installation.
+
+1. Create a disposable world inside the test build. Confirm the Direct Metal gameplay label and moving terrain. Move the camera and player, then check the selected hotbar slot, health and hunger.
+2. Open inventory, move one item stack, close it, and verify that world input resumes. Pause and resume. Save & Quit, then reopen that same disposable world and check both the moved stack and a placed block.
+3. Background the app once and return. Confirm the input and native view recover, then repeat Save & Quit. Stop on any missing world, save failure, lock conflict, blank native view, or unexpected exit. Retain the disposable world for diagnosis.
+4. Record the exact build, host, iPadOS version and visible output. Preserve `Documents/horizon-boot.log` and the test app's `Documents/logs` entries, including `Helium-Host.txt`, `shutdown-save-numeric.txt`, `Helium-Metal-Report.txt`, and game `latest.log` when present. Use the Metal worker summaries for frame pacing and memory warnings. Share evidence privately after removing unrelated personal information.
 
 ## S2E HUD, inventory and input
 
@@ -169,4 +228,4 @@ The in-game Save & Quit action requests the existing owned retirement and only r
 
 ## HOW GEMINI SHOULD CONTINUE HELIUM WITHOUT REPEATING PREVIOUS WORK
 
-Run the resource-backed `Game` inventory/vitals regression in an isolated fixture profile, then qualify a disposable-world standalone device session under G0. Verify slot pickup/placement, modal input and Save & Quit/reopen through the existing game and Metal attachment. Use the existing S2E HUD and S2D terrain to diagnose real device failures. Keep wgpu dependency extraction, additional rendering passes and advanced visual effects separate from this gate. Preserve upstream MIT attribution.
+First run the resource-backed `Game` inventory/vitals regression in an isolated profile with prepared 26.3 data. Then enforce a standalone-only disposable save namespace at world creation, open, and import entry points and qualify the G0 lifecycle on it. Keep the publication guard active until those gates pass. Verify slot pickup/placement, modal input, background recovery and Save & Quit/reopen using the existing S2E HUD and S2D Metal terrain. Preserve upstream MIT attribution.
