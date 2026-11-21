@@ -22,12 +22,16 @@ use std::{
 #[cfg(target_os = "ios")]
 pub fn standalone_test_image(home: &std::path::Path) -> Option<std::path::PathBuf> {
     use std::{
-        ffi::{CStr, CString},
+        ffi::{CStr, CString, c_char},
         os::unix::ffi::OsStrExt,
         path::Path,
     };
+    // Public iOS declaration from <mach-o/dyld.h>; libc only exposes it on macOS.
+    unsafe extern "C" {
+        fn _dyld_get_image_name(image_index: u32) -> *const c_char;
+    }
     // SAFETY: index zero is dyld's process main image. Copy its static C string before use.
-    let raw = unsafe { libc::_dyld_get_image_name(0) };
+    let raw = unsafe { _dyld_get_image_name(0) };
     if raw.is_null() {
         return None;
     }
@@ -42,8 +46,7 @@ pub fn standalone_test_image(home: &std::path::Path) -> Option<std::path::PathBu
     let path = CString::new(home.as_os_str().as_bytes()).ok()?;
     let symbol = ios::symbol(c"horizon_disposable_container_matches")?;
     // SAFETY: fixed Swift C ABI, and path remains NUL terminated for the call.
-    let matches: extern "C" fn(*const std::ffi::c_char) -> bool =
-        unsafe { std::mem::transmute(symbol) };
+    let matches: extern "C" fn(*const c_char) -> bool = unsafe { std::mem::transmute(symbol) };
     matches(path.as_ptr()).then_some(image)
 }
 
