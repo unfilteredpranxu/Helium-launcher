@@ -1,5 +1,6 @@
 use super::*;
 use horizon_client::save::{Level, LevelShape, SaveDir, prepare_dat, read_dat};
+use horizon_ios_launcher::standalone_layout;
 use horizon_world::nbt::Tag;
 use std::os::unix::fs::symlink;
 
@@ -60,7 +61,7 @@ fn real_level_player_and_regions_reopen_with_replay_only_inside_admitted_slot() 
     assert!(Namespace::open(&home.0).is_err());
     assert!(require_level_data(&world).is_err());
 
-    let lock = SessionLock::acquire(&world).unwrap();
+    let lock = namespace.world_lock(&world).unwrap();
     let mut level = Level {
         name: "Disposable Test".into(),
         seed: 417,
@@ -76,7 +77,7 @@ fn real_level_player_and_regions_reopen_with_replay_only_inside_admitted_slot() 
     let pending = Tag::compound([("fixture", Tag::Int(28))]);
     let receipt = prepare_dat(world.join("data/disposable-replay.dat"), pending.clone()).unwrap();
     assert!(read_dat(&world.join("data/disposable-replay.dat")).is_none());
-    assert!(SessionLock::acquire(&world).is_err());
+    assert!(namespace.world_lock(&world).is_err());
     assert!(namespace.backup(SLOT).is_err());
     drop((receipt, save, lock, namespace));
 
@@ -86,7 +87,7 @@ fn real_level_player_and_regions_reopen_with_replay_only_inside_admitted_slot() 
     assert_eq!(listed[0].folder, SLOT);
     for _ in 0..2 {
         let reopened = namespace.prepare_world(SLOT, false).unwrap();
-        let lock = SessionLock::acquire(&reopened).unwrap();
+        let lock = namespace.world_lock(&reopened).unwrap();
         let level = Level::read(&reopened).unwrap();
         assert_eq!(level.seed, 417);
         assert_eq!(level.inventory, [(0, "minecraft:stone".into(), 13, 0)]);
@@ -110,6 +111,25 @@ fn real_level_player_and_regions_reopen_with_replay_only_inside_admitted_slot() 
         b"ordinary sentinel"
     );
     assert!(!ordinary.join("session.lock").exists());
+}
+
+#[test]
+fn lock_rechecks_links_after_world_admission_without_truncating_target() {
+    let home = Temp::new();
+    let namespace = Namespace::open(&home.0).unwrap();
+    let world = namespace.prepare_world(SLOT, true).unwrap();
+    let ordinary = namespace.documents.join("ordinary-sentinel");
+    fs::write(&ordinary, b"untouched").unwrap();
+    let file = world.join("session.lock");
+    assert_eq!(namespace.authorized_world().unwrap(), Some(world.clone()));
+    symlink(&ordinary, &file).unwrap();
+    assert!(namespace.world_lock(&world).is_err());
+    fs::remove_file(&file).unwrap();
+    fs::hard_link(&ordinary, &file).unwrap();
+    assert!(namespace.world_lock(&world).is_err());
+    assert_eq!(fs::read(&ordinary).unwrap(), b"untouched");
+    fs::remove_file(&file).unwrap();
+    assert!(namespace.world_lock(&world).is_ok());
 }
 
 #[test]

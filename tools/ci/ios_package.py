@@ -1,4 +1,4 @@
-"""Build and verify the exact unsigned S1H archive. Python 3.11+."""
+"""Build and verify the exact unsigned iOS archive. Python 3.11+."""
 from dataclasses import dataclass
 import argparse
 import hashlib
@@ -15,6 +15,9 @@ import zipfile
 
 PROBE = ("HeliumMetalProbe", "HeliumMetalProbe", "HeliumProbeKit", "dev.helium.metalprobe")
 GAME = ("HorizonGame", "Horizon", "HorizonLauncherKit", "dev.helium.g06ctest")
+HOST = ("HeliumHostQualification", "Horizon", "HorizonLauncherKit", "dev.helium.hostqualification")
+HOST_FORBIDDEN = {"HeliumDisposableWorldTestVersion", "HeliumNativeMetalTest", "HeliumMetalDiagnosticsVersion", "HeliumNoWorldProbe",
+                  "HorizonMSAClientID", "NSAppTransportSecurity", "NSLocalNetworkUsageDescription"}
 MAX_BYTES = 256 * 1024 * 1024
 ORIENTATIONS = {
     "UIInterfaceOrientationPortrait", "UIInterfaceOrientationPortraitUpsideDown",
@@ -178,8 +181,13 @@ def verify_bundle(folder, profile, source, expected_app_digest, expected_framewo
             or "UILaunchScreen" not in info or "UIMainStoryboardFile" in info or "NSPrincipalClass" in info):
         raise ValueError("invalid programmatic launch or scene manifest")
     config = manifest.get("UISceneConfigurations", {}).get("UIWindowSceneSessionRoleApplication", [])
-    if profile == GAME and (len(config) != 1 or config[0].get("UISceneDelegateClassName") != "WinitSceneDelegate"):
+    if profile in (GAME, HOST) and (len(config) != 1 or config[0].get("UISceneDelegateClassName") != "WinitSceneDelegate"):
         raise ValueError("wrong Rust game scene delegate")
+    if profile == HOST and (type(info.get("HeliumStandaloneHostQualificationVersion")) is not int
+                            or info["HeliumStandaloneHostQualificationVersion"] != 1
+                            or HOST_FORBIDDEN.intersection(info)
+                            or set(manifest["UISceneConfigurations"]) != {"UIWindowSceneSessionRoleApplication"}):
+        raise ValueError("mixed or missing standalone no-world host identity")
     if profile == GAME and (type(info.get("HeliumDisposableWorldTestVersion")) is not int
                             or info["HeliumDisposableWorldTestVersion"] != 1):
         raise ValueError("missing supported disposable world test marker")
@@ -233,6 +241,16 @@ def apple_checks(folder, profile):
                 "_OBJC_CLASS_$_HeliumProbeSceneDelegate",
             )):
                 raise ValueError("missing Rust probe bridge or UIKit scene delegate")
+        elif profile == HOST:
+            symbols = subprocess.check_output(["xcrun", "nm", str(path)], text=True)
+            if any(s in symbols for s in ("horizon_client", "horizon_world", "wgpu_core", "wgpu_hal", "HeliumProbeSceneDelegate")):
+                raise ValueError("game, world, wgpu, or legacy probe symbols in the standalone host")
+            required = ("_horizon_qualification_container_matches", "_horizon_qualification_metal_supported",
+                        "_horizon_qualification_event", "_horizon_native_display_request_qualification",
+                        "_horizon_native_display_publish", "_horizon_native_display_cancel") if path == library else (
+                            "helium_host_qualification", "WinitSceneDelegate")
+            if not all(s in symbols for s in required):
+                raise ValueError("missing current no-world Rust/UIKit attachment bridge")
         elif path == library:
             symbols = subprocess.check_output(["xcrun", "nm", "-g", str(path)], text=True)
             if not all(s in symbols for s in ("_helium_checkpoint_begin", "_helium_checkpoint_end")):
@@ -261,7 +279,7 @@ def verify_ipa(ipa, profile, source, app_digest, framework_digest, *, apple=Fals
         "framework_sha256": framework_digest, "bundle_id": bundle, "framework": framework,
         "version": info["CFBundleShortVersionString"], "build_number": info["CFBundleVersion"],
         "source": source, "verification": "PASS", "signing": "unsigned or linker-only ad-hoc",
-        "hardware": "NOT TESTED", "purpose": "NO-WORLD DEVICE PROBE" if profile == PROBE else "HELD GAME STRUCTURE CHECK",
+        "hardware": "NOT TESTED", "purpose": "NO-WORLD DEVICE PROBE" if profile in (PROBE, HOST) else "HELD GAME STRUCTURE CHECK",
     }
 
 
@@ -280,16 +298,32 @@ def build_archive(app, ipa, profile):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("profile", choices=["probe", "game"])
+    parser.add_argument("profile", choices=["probe", "game", "host"])
     parser.add_argument("app", type=Path)
     parser.add_argument("ipa", type=Path)
     parser.add_argument("source")
+    parser.add_argument("--expected-executable", type=Path)
     args = parser.parse_args()
-    profile = PROBE if args.profile == "probe" else GAME
+    profile = {"probe": PROBE, "game": GAME, "host": HOST}[args.profile]
     _, executable, framework, _ = profile
+    app_digest = digest(args.app / executable)
+    if profile == HOST:
+        if not args.expected_executable or app_digest != digest(args.expected_executable):
+            raise ValueError("embedded no-world executable did not match the exact Rust build")
+        info_path = args.app / "Info.plist"
+        info = read_info(info_path)
+        if HOST_FORBIDDEN.intersection(info) - {"HorizonMSAClientID", "NSAppTransportSecurity", "NSLocalNetworkUsageDescription"}:
+            raise ValueError("cannot convert a marked gameplay bundle to a no-world host")
+        for key in HOST_FORBIDDEN:
+            info.pop(key, None)
+        info["UIApplicationSceneManifest"]["UISceneConfigurations"].pop("UIWindowSceneSessionRoleExternalDisplayNonInteractive", None)
+        info.update(CFBundleIdentifier=HOST[3], CFBundleDisplayName="Helium Host Test",
+                    CFBundleVersion="14001", HeliumStandaloneHostQualificationVersion=1,
+                    HeliumDiagnosticSource=args.source)
+        info_path.write_bytes(plistlib.dumps(info))
     build_archive(args.app, args.ipa, profile)
     try:
-        result = verify_ipa(args.ipa, profile, args.source, digest(args.app / executable),
+        result = verify_ipa(args.ipa, profile, args.source, app_digest,
                             digest(args.app / "Frameworks" / (framework + ".framework") / framework), apple=True)
     except Exception:
         args.ipa.unlink()

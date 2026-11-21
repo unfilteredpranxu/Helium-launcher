@@ -169,13 +169,44 @@ impl Drop for SessionLock {
 }
 impl SessionLock {
     pub fn acquire(world: &Path) -> Result<Self> {
-        use std::io::Write;
         journal::directory(world)?;
-        let mut file = fs::OpenOptions::new()
+        let file = fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(false)
             .open(world.join("session.lock"))?;
+        Self::lock_and_recover(world, file)
+    }
+
+    /// Only for the private disposable namespace, whose game owner pins this
+    /// directory before legacy persistence begins. Never follow a substituted
+    /// session.lock or truncate anything other than an unaliased regular file.
+    #[cfg(unix)]
+    pub fn acquire_anchored(world: &Path, directory: &fs::File) -> Result<Self> {
+        use rustix::fs::{Mode, OFlags, openat};
+        use std::os::unix::fs::MetadataExt;
+        let file = fs::File::from(openat(
+            directory,
+            "session.lock",
+            OFlags::WRONLY | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )?);
+        let lock = file.metadata()?;
+        let pinned = directory.metadata()?;
+        let resolved = fs::symlink_metadata(world)?;
+        if !lock.is_file()
+            || lock.nlink() != 1
+            || !resolved.is_dir()
+            || pinned.dev() != resolved.dev()
+            || pinned.ino() != resolved.ino()
+        {
+            return Err("disposable session lock or world alias rejected".into());
+        }
+        Self::lock_and_recover(world, file)
+    }
+
+    fn lock_and_recover(world: &Path, mut file: fs::File) -> Result<Self> {
+        use std::io::Write;
         file.try_lock()
             .map_err(|_| format!("{} is already open in another instance", world.display()))?;
         file.set_len(0)?;

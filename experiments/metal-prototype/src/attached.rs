@@ -178,9 +178,14 @@ extern "C" fn invalidate(id: u64) {
         0,
         0,
     );
-    if let Ok(entry) = ENTRY.lock() {
+    if let Ok(mut entry) = ENTRY.lock() {
         if let Some(e) = entry.as_ref().filter(|e| e.id == id) {
             e.status.cancel();
+            // If Swift detached before its worker entered, no worker can
+            // retire this request. Release the unclaimed CPU closure here.
+            if !e.status.running() {
+                *entry = None;
+            }
         }
     }
 }
@@ -298,23 +303,50 @@ pub fn submit_live<T: Send + 'static>(
     fullscreen: bool,
     job: impl FnOnce(Layer) -> Result<T, String> + Send + 'static,
 ) -> Result<(Ticket, Receiver<Result<T, String>>), String> {
-    use std::sync::atomic::AtomicU64;
-    static NEXT_LIVE: AtomicU64 = AtomicU64::new(1 << 63);
-    let id = NEXT_LIVE
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .map_err(|_| "live attachment IDs exhausted")?;
     let attachment = if fullscreen {
         Attachment::Gameplay
     } else {
         Attachment::Inset
     };
-    submit_session(window, cancel, id, None, attachment, job)
+    submit_session(window, cancel, live_id()?, None, attachment, job)
+}
+
+/// The no-world executable uses the same full-screen attachment and exact GPU gate.
+pub fn submit_qualification(
+    window: &impl HasWindowHandle,
+    cancel: Arc<AtomicBool>,
+    job: impl FnOnce(Layer) -> Result<(), String> + Send + 'static,
+) -> Result<(Ticket, Receiver<Result<(), String>>), String> {
+    submit_session(
+        window,
+        cancel,
+        live_id()?,
+        None,
+        Attachment::Qualification,
+        job,
+    )
+}
+
+fn live_id() -> Result<u64, String> {
+    use std::sync::atomic::AtomicU64;
+    static NEXT_LIVE: AtomicU64 = AtomicU64::new(1 << 63);
+    NEXT_LIVE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .map_err(|_| "live attachment IDs exhausted".into())
 }
 
 enum Attachment {
     Capture,
     Inset,
     Gameplay,
+    Qualification,
+}
+
+pub fn qualification_device_available() -> Result<bool, String> {
+    let symbol = symbol("horizon_qualification_metal_supported")?;
+    // SAFETY: the probe-only Swift export uses a fixed C ABI without view pointers.
+    let available: extern "C" fn() -> bool = unsafe { std::mem::transmute(symbol) };
+    Ok(available())
 }
 
 /// Validate the gameplay-specific Swift ABI and test bundle before opening a world.
@@ -359,6 +391,7 @@ fn submit_session<T: Send + 'static>(
         Attachment::Capture => "horizon_native_display_request",
         Attachment::Inset => "horizon_native_display_request_live",
         Attachment::Gameplay => "horizon_native_display_request_gameplay",
+        Attachment::Qualification => "horizon_native_display_request_qualification",
     })?;
     // Paired publication/release ABI must exist BEFORE UI resources are created.
     let _ = symbol("horizon_native_display_publish")?;

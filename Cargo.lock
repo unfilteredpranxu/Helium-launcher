@@ -1744,8 +1744,11 @@ name = "horizon-ios-launcher"
 version = "0.2.8"
 dependencies = [
  "core-foundation",
+ "helium-metal-prototype",
+ "helium-render-scene",
  "libc",
  "log",
+ "winit",
 ]
 
 [[package]]

@@ -109,7 +109,10 @@ impl WorldRequest {
         {
             return Err("world preparation is outside the disposable admission".into());
         }
-        let session_lock = horizon_client::save::SessionLock::acquire(&save_root)?;
+        let session_lock = match disposable::active() {
+            Some(sandbox) => sandbox.world_lock(&save_root)?,
+            None => horizon_client::save::SessionLock::acquire(&save_root)?,
+        };
         if disposable::active().is_some() && create.is_none() {
             disposable::require_level_data(&save_root)?;
         }

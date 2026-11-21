@@ -25,13 +25,13 @@ def load_string(cmd, name):
     return struct.pack("<3I", cmd, size, floor).ljust(floor, b"\0") + body.ljust(size - floor, b"\0")
 
 
-def mach(kind, platform=2, dependency=INSTALL, rpath="@executable_path/Frameworks"):
+def mach(kind, platform=2, dependency=INSTALL, rpath="@executable_path/Frameworks", install=INSTALL):
     commands = [struct.pack("<6I", 0x32, 24, platform, 15 << 16, 0, 0)]
     if kind == 2:
         commands += [struct.pack("<IIQQ", 0x80000028, 24, 2048, 0),
                      load_string(0xC, dependency), load_string(0x8000001C, rpath)]
     else:
-        commands += [load_string(0xD, INSTALL),
+        commands += [load_string(0xD, install),
                      load_string(0xC, "/System/Library/Frameworks/Metal.framework/Metal")]
     return (struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, kind, len(commands),
                         sum(map(len, commands)), 0x200000, 0) + b"".join(commands)).ljust(4096, b"\0")
@@ -90,6 +90,42 @@ class IpaContract(unittest.TestCase):
         result = self.verify()
         self.assertEqual((result["verification"], result["bundle_id"], result["hardware"]),
                          ("PASS", BUNDLE, "NOT TESTED"))
+
+    def test_standalone_game_host_rejects_mixed_markers_and_external_scene(self):
+        import hashlib
+        name, executable, kit, bundle = package.HOST
+        folder = self.ipa.parent / (name + ".app")
+        fw = folder / "Frameworks" / (kit + ".framework")
+        fw.mkdir(parents=True)
+        install = f"@rpath/{kit}.framework/{kit}"
+        app_bytes, framework_bytes = mach(2, dependency=install), mach(6, install=install)
+        (folder / executable).write_bytes(app_bytes)
+        (fw / kit).write_bytes(framework_bytes)
+        (folder / "Assets.car").touch()
+        (fw / "Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleExecutable": kit, "CFBundleIdentifier": "dev.horizon.game.launcher",
+            "MinimumOSVersion": "15.0", "CFBundlePackageType": "FMWK",
+        }))
+        info = metadata()
+        info.pop("HeliumNoWorldProbe")
+        info.update(CFBundleExecutable=executable, CFBundleIdentifier=bundle,
+                    HeliumStandaloneHostQualificationVersion=1)
+        config = info["UIApplicationSceneManifest"]["UISceneConfigurations"]
+        config["UIWindowSceneSessionRoleApplication"][0]["UISceneDelegateClassName"] = "WinitSceneDelegate"
+        evidence = lambda: package.verify_bundle(folder, package.HOST, SOURCE,
+                                                  hashlib.sha256(app_bytes).hexdigest(),
+                                                  hashlib.sha256(framework_bytes).hexdigest())
+        (folder / "Info.plist").write_bytes(plistlib.dumps(info))
+        self.assertEqual(evidence()["CFBundleIdentifier"], bundle)
+        for patch in ({"HeliumDisposableWorldTestVersion": 1}, {"HeliumStandaloneHostQualificationVersion": True},
+                      {"NSLocalNetworkUsageDescription": "unexpected network capability"}):
+            (folder / "Info.plist").write_bytes(plistlib.dumps(dict(info, **patch)))
+            with self.assertRaisesRegex(ValueError, "no-world host identity"):
+                evidence()
+        config["UIWindowSceneSessionRoleExternalDisplayNonInteractive"] = []
+        (folder / "Info.plist").write_bytes(plistlib.dumps(info))
+        with self.assertRaisesRegex(ValueError, "no-world host identity"):
+            evidence()
 
     def test_game_requires_versioned_disposable_marker(self):
         name, executable, kit, bundle = package.GAME

@@ -17,10 +17,38 @@ use std::{
     sync::{Mutex, PoisonError},
 };
 
-/// Compare the guest-facing executable with dyld's process main image before
-/// accepting the Foundation container reported by the standalone test host.
+/// Exact standalone layouts shared by the writable candidate and no-world executable.
+pub fn standalone_layout(image: &std::path::Path, home: &std::path::Path) -> bool {
+    fn parts(path: &std::path::Path, prefix: &str, count: usize) -> bool {
+        let Ok(path) = path.strip_prefix(prefix) else {
+            return false;
+        };
+        let Some(parts) = path.iter().map(|s| s.to_str()).collect::<Option<Vec<_>>>() else {
+            return false;
+        };
+        parts.len() == count
+            && parts[0].len() == 36
+            && parts[0].bytes().enumerate().all(|(i, b)| match i {
+                8 | 13 | 18 | 23 => b == b'-',
+                _ => b.is_ascii_hexdigit(),
+            })
+            && (count == 1 || (parts[1].ends_with(".app") && parts[2] == "Horizon"))
+    }
+    parts(image, "/private/var/containers/Bundle/Application", 3)
+        && parts(home, "/private/var/mobile/Containers/Data/Application", 1)
+}
+
+/// Compare dyld's process main image, the on-disk layout, and Foundation's container.
 #[cfg(target_os = "ios")]
 pub fn standalone_test_image(home: &std::path::Path) -> Option<std::path::PathBuf> {
+    standalone_image(home, c"horizon_disposable_container_matches")
+}
+
+#[cfg(target_os = "ios")]
+fn standalone_image(
+    home: &std::path::Path,
+    verifier: &std::ffi::CStr,
+) -> Option<std::path::PathBuf> {
     use std::{
         ffi::{CStr, CString, c_char},
         os::unix::ffi::OsStrExt,
@@ -40,15 +68,20 @@ pub fn standalone_test_image(home: &std::path::Path) -> Option<std::path::PathBu
     ))
     .canonicalize()
     .ok()?;
-    if std::env::current_exe().ok()?.canonicalize().ok()? != image {
+    if std::env::current_exe().ok()?.canonicalize().ok()? != image
+        || !standalone_layout(&image, home)
+    {
         return None;
     }
     let path = CString::new(home.as_os_str().as_bytes()).ok()?;
-    let symbol = ios::symbol(c"horizon_disposable_container_matches")?;
+    let symbol = ios::load_symbol(verifier, false)?;
     // SAFETY: fixed Swift C ABI, and path remains NUL terminated for the call.
     let matches: extern "C" fn(*const c_char) -> bool = unsafe { std::mem::transmute(symbol) };
     matches(path.as_ptr()).then_some(image)
 }
+
+#[cfg(any(test, feature = "host-qualification"))]
+pub mod qualification;
 
 /// Service the current Apple run loop after the gameplay event handler has
 /// gone away. The scoped timer keeps the default mode runnable even with no
@@ -149,6 +182,9 @@ impl Drop for Request {
 
 static QUEUE: Mutex<VecDeque<Request>> = Mutex::new(VecDeque::new());
 
+#[cfg(all(target_os = "ios", feature = "host-qualification"))]
+static QUALIFICATION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Bundled iOS builds expose accounts and game management before Play.
 #[cfg(target_os = "ios")]
 const ENABLED: bool = true;
@@ -166,6 +202,11 @@ pub fn covered() -> bool {
 
 /// Queue a request for the game's next frame.
 pub fn push(request: Request) {
+    #[cfg(all(target_os = "ios", feature = "host-qualification"))]
+    if QUALIFICATION.load(std::sync::atomic::Ordering::Acquire) {
+        qualification::deny(request);
+        return;
+    }
     QUEUE
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -416,23 +457,35 @@ mod ios {
 
     /// Load the launcher framework and find `symbol_name` in it.
     pub(super) fn symbol(symbol_name: &CStr) -> Option<*mut c_void> {
+        load_symbol(symbol_name, true)
+    }
+
+    pub(super) fn load_symbol(symbol_name: &CStr, boot_log: bool) -> Option<*mut c_void> {
         static HANDLE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
         let handle = *HANDLE.get_or_init(|| {
             let Some(path) = framework() else {
                 log::info!("Horizon: no launcher framework in this bundle");
-                super::generated_boot_event("launcher-framework-missing");
+                if boot_log {
+                    super::generated_boot_event("launcher-framework-missing");
+                }
                 return None;
             };
-            super::generated_boot_event("launcher-framework-load-attempted");
+            if boot_log {
+                super::generated_boot_event("launcher-framework-load-attempted");
+            }
             // SAFETY: this is the absolute in-bundle framework path. A
             // successful handle remains retained for the process lifetime.
             let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW) };
             if handle.is_null() {
                 log::warn!("Horizon: the launcher framework did not load");
-                super::generated_boot_event("launcher-framework-load-failed");
+                if boot_log {
+                    super::generated_boot_event("launcher-framework-load-failed");
+                }
                 None
             } else {
-                super::generated_boot_event("launcher-framework-loaded");
+                if boot_log {
+                    super::generated_boot_event("launcher-framework-loaded");
+                }
                 Some(handle as usize)
             }
         });

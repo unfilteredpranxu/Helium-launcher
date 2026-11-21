@@ -181,15 +181,6 @@ jobs:
           cargo +1.95.0 tree --locked --target aarch64-apple-ios --manifest-path experiments/metal-prototype/Cargo.toml > "$RUNNER_TEMP/owner-probe/dependencies.txt"
           if grep -E '(^|[[:space:]])(horizon-|wgpu)' "$RUNNER_TEMP/owner-probe/dependencies.txt"; then exit 1; fi
           python3 tools/ci/ios_package.py probe "$app" "$RUNNER_TEMP/owner-probe/Helium-S1H-Metal-Probe-unsigned.ipa" "$GITHUB_SHA" 2>&1 | tee "$RUNNER_TEMP/helium-upload/probe-package.log"
-      - uses: actions/upload-artifact@v4
-        if: success() && github.event_name == 'workflow_dispatch' && inputs.publish_no_world_probe && github.ref == 'refs/heads/feature/helium-g07-immutable-capture'
-        with:
-          name: Helium-S1H-no-world-probe-unsigned
-          path: |
-            ${{ runner.temp }}/owner-probe/Helium-S1H-Metal-Probe-unsigned.ipa
-            ${{ runner.temp }}/owner-probe/dependencies.txt
-            ${{ runner.temp }}/helium-upload/probe-package.log
-          if-no-files-found: error
       - name: Report separate runtime outcome
         if: always()
         env:
@@ -197,7 +188,7 @@ jobs:
         run: |
           echo "Native Metal runtime step: $GPU_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
           echo "Only a successful runtime test proves this runner executed Metal; SDK compilation alone does not." >> "$GITHUB_STEP_SUMMARY"
-          echo "The no-world IPA is unsigned. Physical installation and display are unverified." >> "$GITHUB_STEP_SUMMARY"
+          echo "The legacy probe is a build fixture. Physical installation of this build and display are unverified." >> "$GITHUB_STEP_SUMMARY"
       - name: Publish readable evidence through the Checks API
         if: always()
         uses: actions/github-script@v7
@@ -296,7 +287,7 @@ jobs:
           cargo +1.95.0 test --locked -p horizon-client --no-default-features --lib game::native_ui_tests 2>&1 | tee -a "$RUNNER_TEMP/g07r3/game-exit.log"
           cargo +1.95.0 test --locked -p horizon-client --no-default-features --lib game::disposable::tests -- --test-threads=1 2>&1 | tee -a "$RUNNER_TEMP/g07r3/game-exit.log"
           cargo +1.95.0 test --locked -p horizon-client-lib --no-default-features --lib import::tests -- --test-threads=1 2>&1 | tee -a "$RUNNER_TEMP/g07r3/game-exit.log"
-          cargo +1.95.0 test --locked -p horizon-ios-launcher --lib 2>&1 | tee -a "$RUNNER_TEMP/g07r3/game-exit.log"
+          cargo +1.95.0 test --locked -p horizon-ios-launcher --features host-qualification --lib 2>&1 | tee -a "$RUNNER_TEMP/g07r3/game-exit.log"
           cargo +1.95.0 test --locked -p horizon-client-render --lib streaming:: 2>&1 | tee "$RUNNER_TEMP/g07r3/streaming.log"
           rustfmt +1.95.0 --check --edition 2024 --config skip_children=true crates/horizon-client/src/save.rs crates/horizon-client/src/save/journal.rs crates/horizon-client/src/save/journal/tests.rs crates/horizon-client/src/save/shutdown.rs crates/horizon-client/src/save/shutdown/tests.rs crates/horizon-client/src/lan/playerdata.rs crates/horizon-client/src/game.rs crates/horizon-client/src/game/shutdown.rs crates/horizon-client/src/game/saving.rs crates/horizon-client/src/game/integrated.rs crates/horizon-client/src/game/integrated/shutdown_tests.rs crates/horizon-client/src/game/remote.rs crates/horizon-client/src/game/levels.rs crates/horizon-client/src/game/world_loading.rs crates/horizon-client-render/src/streaming.rs crates/horizon-client-render/src/lod.rs crates/horizon-threads/src/retirement.rs
           rustfmt +1.95.0 --check --edition 2024 --config skip_children=true crates/horizon-client/src/game/runtime_exit.rs crates/horizon-ios-launcher/src/lib.rs
@@ -347,6 +338,17 @@ jobs:
           cargo +1.95.0 tree --locked -p horizon-client --no-default-features --target aarch64-apple-ios > "$RUNNER_TEMP/attached-game/default-tree.log"
           python3 -c 'import pathlib,sys; s=pathlib.Path(sys.argv[1]).read_text(); assert "horizon-metal-bridge" not in s and "helium-metal-prototype" not in s; print("disabled graph excludes native bridge/backend")' "$RUNNER_TEMP/attached-game/default-tree.log" | tee "$RUNNER_TEMP/attached-game/dependency-isolation.log"
           python3 -m unittest discover -s tests -p test_attached_ios_binary.py 2>&1 | tee "$RUNNER_TEMP/attached-game/binary-guard-tests.log"
+      - name: Qualify the current no-world UIKit host IPA
+        run: |
+          set -euo pipefail
+          folder="$RUNNER_TEMP/attached-game"
+          cargo +1.95.0 tree --locked --target aarch64-apple-ios -p horizon-ios-launcher --no-default-features --features host-qualification -e normal,build > "$folder/host-dependencies.log"
+          if grep -E '(wgpu|horizon-(client|world|assets|prepare|metal-bridge|protocol)|(^|[^[:alnum:]])naga) v' "$folder/host-dependencies.log"; then exit 1; fi
+          cargo +1.95.0 build --release --locked --target aarch64-apple-ios -p horizon-ios-launcher --no-default-features --features host-qualification --bin helium-host-qualification 2>&1 | tee "$folder/host-link.log"
+          command -v xcodegen >/dev/null || brew install xcodegen
+          (cd packaging/ios && xcodegen generate)
+          xcodebuild -project packaging/ios/HorizonIOS.xcodeproj -target HeliumHostQualification -configuration Release -sdk iphoneos -arch arm64 CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= CODE_SIGNING_REQUIRED=NO DEBUG_INFORMATION_FORMAT=dwarf CONFIGURATION_BUILD_DIR="$folder/host-build" build > "$folder/host-xcode.log" 2>&1 || { tail -80 "$folder/host-xcode.log"; exit 1; }
+          python3 tools/ci/ios_package.py host "$folder/host-build/HeliumHostQualification.app" "$folder/Helium-S2H-Host-Qualification-unsigned.ipa" "$GITHUB_SHA" --expected-executable target/aarch64-apple-ios/release/helium-host-qualification 2>&1 | tee "$folder/host-package.log"
       - name: Actually link the opt-in arm64 Rust GAME executable
         run: |
           set -euo pipefail
@@ -355,8 +357,6 @@ jobs:
       - name: Compile and link the actual UIKit launcher and game bundle
         run: |
           set -euo pipefail
-          command -v xcodegen >/dev/null || brew install xcodegen
-          (cd packaging/ios && xcodegen generate)
           HORIZON_GAME_PREBUILT=1 xcodebuild -project packaging/ios/HorizonIOS.xcodeproj -target HorizonGame -configuration Release -sdk iphoneos -arch arm64 CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= CODE_SIGNING_REQUIRED=NO DEBUG_INFORMATION_FORMAT=dwarf CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/attached-game/build" build > "$RUNNER_TEMP/attached-game/xcode.log" 2>&1 || { tail -80 "$RUNNER_TEMP/attached-game/xcode.log"; exit 1; }
           app="$RUNNER_TEMP/attached-game/build/HorizonGame.app"
           python3 tools/ci/verify-attached-ios-game.py "$app" target/aarch64-apple-ios/release/horizon-client --native-gameplay 2>&1 | tee "$RUNNER_TEMP/attached-game/verified.log"
@@ -375,11 +375,11 @@ jobs:
         with:
           script: |
             const fs=require('fs'),path=require('path');
-            const summary=['apple.log','default.log','dependency-isolation.log','binary-guard-tests.log','rust-link.log','game-wgpu-graph.log','xcode.log','verified.log','package-verifier.log'].map(n=>{
+            const summary=['apple.log','default.log','dependency-isolation.log','binary-guard-tests.log','rust-link.log','game-wgpu-graph.log','xcode.log','verified.log','package-verifier.log','host-link.log','host-xcode.log','host-package.log'].map(n=>{
               const p=path.join(process.env.RUNNER_TEMP,'attached-game',n);
               return '### '+n+'\n```text\n'+(fs.existsSync(p)?fs.readFileSync(p,'utf8').slice(-7500):'NOT RUN')+'\n```';
             }).join('\n');
-            await github.rest.checks.create({owner:context.repo.owner,repo:context.repo.repo,head_sha:context.sha,name:'Helium attached GAME link evidence',status:'completed',conclusion:'neutral',output:{title:'Actual game link and Swift symbols; NOT device/world runtime evidence',summary}});
+            await github.rest.checks.create({owner:context.repo.owner,repo:context.repo.repo,head_sha:context.sha,name:'Helium attached GAME link evidence',status:'completed',conclusion:'neutral',output:{title:'Actual game link and Swift symbols; NOT device/world runtime evidence',summary:summary.slice(-60000)}});
       - uses: actions/upload-artifact@v4
         if: success() && github.event_name == 'workflow_dispatch' && inputs.publish_owner_ipa
         with:
@@ -388,6 +388,15 @@ jobs:
             ${{ runner.temp }}/attached-game/Helium-G07A-game-unsigned.ipa
             experiments/metal-prototype/docs/G07-A-owner.md
             ${{ runner.temp }}/attached-game/verified.log
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: success() && github.ref == 'refs/heads/feature/helium-g07-immutable-capture' && (github.event_name == 'push' || inputs.publish_no_world_probe)
+        with:
+          name: Helium-S2H-no-world-host-unsigned
+          path: |
+            ${{ runner.temp }}/attached-game/Helium-S2H-Host-Qualification-unsigned.ipa
+            ${{ runner.temp }}/attached-game/host-package.log
+            ${{ runner.temp }}/attached-game/host-dependencies.log
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()

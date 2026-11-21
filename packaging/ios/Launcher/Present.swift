@@ -10,7 +10,7 @@ private var presentationPending = false
 /// being set up.
 @_cdecl("horizon_launcher_present")
 public func horizonLauncherPresent(_ submit: HorizonSubmit?) -> Bool {
-    guard Thread.isMainThread else { return false }
+    guard Thread.isMainThread, !isHostQualification() else { return false }
     HostEvidence.shared.record(.launcherRequested)
     cancelAllNativeTargets()
     Bridge.submit = submit

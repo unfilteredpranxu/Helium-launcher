@@ -46,7 +46,7 @@ private final class NativeMetalView: UIView {
     override func didMoveToWindow() { super.didMoveToWindow(); if window == nil { invalid?(11,0,0) } }
 }
 private enum TerrainAttachment {
-    case capture, inset, gameplay
+    case capture, inset, gameplay, qualification
 
     var live: Bool { self != .capture }
     var fullscreen: Bool { self != .inset }
@@ -90,6 +90,7 @@ private func cancelNative(_ id: UInt64,_ cause:UInt32=16,_ expected:UInt64=0,_ o
     diagnosticEvent(id,cause==20 ? 29 : 30,cause,old,new)
     guard let target=nativeTargets.removeValue(forKey:id) else { return }
     target.timer?.invalidate(); target.cancel(id); target.view.invalid=nil; target.view.removeFromSuperview()
+    if target.attachment == .qualification { qualificationEvidence.record(.metalCancelled, generation: id) }
     diagnosticEvent(id,29,0,UInt64(cause),0)
     LauncherLog.write("native session closed \(id) mode=\(target.attachment)")
 }
@@ -111,13 +112,86 @@ private func nativeGameplayBundle() -> Bool {
         Bundle.main.object(forInfoDictionaryKey: "HeliumDisposableWorldTestVersion") as? Int == 1
 }
 
+func isHostQualification() -> Bool {
+    Bundle.main.bundleIdentifier == "dev.helium.hostqualification" &&
+        Bundle.main.object(forInfoDictionaryKey: "HeliumStandaloneHostQualificationVersion") as? Int == 1 &&
+        Bundle.main.object(forInfoDictionaryKey: "HeliumDisposableWorldTestVersion") == nil
+}
+
+private let qualificationEvidence: HostEvidence = {
+    let source = Bundle.main.object(forInfoDictionaryKey: "HeliumDiagnosticSource") as? String ?? ""
+    let sha = source.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil ? source : "unknown"
+    return HostEvidence(folder: FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+        filename: "Helium-Host-Qualification.txt", header: "S2H NO-WORLD source=\(sha) scanout=DEVICE_REQUIRED")
+}()
+
+@_cdecl("horizon_qualification_event")
+public func qualificationEvent(_ code: UInt32, _ id: UInt64) {
+    let report = {
+        guard isHostQualification() else { return }
+        let value: HostStage
+        switch code {
+        case 1: value = .probeAdmitted
+        case 2: value = .sceneConnected
+        case 3: value = .sceneActive
+        case 4: value = .sceneInactive
+        case 5: value = .sceneBackground
+        case 6: value = .probeMemoryPressure
+        case 7: value = .metalDeviceReady
+        case 8: value = .metalDeviceUnavailable
+        case 9: value = .probeAttachmentUnavailable
+        case 10, 11, 12:
+            guard nativeTargets[id]?.attachment == .qualification else { return }
+            value = code == 10 ? .metalRendererReady : (code == 11 ? .presentSubmitted : .presentCompleted)
+        case 13: value = .probeRetired
+        case 14: value = .metalFailed
+        case 15: value = .probeShutdown
+        default: return
+        }
+        qualificationEvidence.record(value, generation: id)
+        if [UInt32(8), 9, 14].contains(code), let view = gameViewController()?.view {
+            let message = UILabel(frame: view.bounds.insetBy(dx: 16, dy: 16))
+            message.tag = 0x4832
+            message.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            message.text = NSLocalizedString("Helium host qualification failed. Stop and export Helium-Host-Qualification.txt from Files.", comment: "No-world diagnostic")
+            message.textColor = .white
+            message.backgroundColor = .black
+            message.textAlignment = .center
+            message.numberOfLines = 0
+            view.viewWithTag(message.tag)?.removeFromSuperview()
+            view.addSubview(message)
+        }
+    }
+    if Thread.isMainThread { report() } else { DispatchQueue.main.async(execute: report) }
+}
+
 @_cdecl("horizon_disposable_container_matches")
 public func disposableContainerMatches(_ home: UnsafePointer<CChar>?) -> Bool {
-    guard nativeGameplayBundle(), let home, let path = String(validatingUTF8: home),
+    nativeGameplayBundle() && foundationContainerMatches(home)
+}
+
+private func foundationContainerMatches(_ home: UnsafePointer<CChar>?) -> Bool {
+    guard let home, let path = String(validatingUTF8: home),
           let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
     else { return false }
     let expected = URL(fileURLWithPath: path).appendingPathComponent("Library/Application Support")
     return support.resolvingSymlinksInPath().path == expected.resolvingSymlinksInPath().path
+}
+
+@_cdecl("horizon_qualification_container_matches")
+public func qualificationContainerMatches(_ home: UnsafePointer<CChar>?) -> Bool {
+    isHostQualification() && foundationContainerMatches(home)
+}
+
+@_cdecl("horizon_qualification_metal_supported")
+public func qualificationMetalSupported() -> Bool {
+    isHostQualification() && MTLCreateSystemDefaultDevice() != nil
+}
+
+@_cdecl("horizon_native_display_request_qualification")
+public func nativeDisplayRequestQualification(_ id: UInt64, _ pointer: UnsafeMutableRawPointer?, _ work: NativeWork?, _ cancel: NativeCancel?, _ ready: NativeReady?) -> Bool {
+    guard isHostQualification() else { return false }
+    return nativeDisplayRequestImpl(id, pointer, work, cancel, ready, attachment: .qualification)
 }
 
 @_cdecl("horizon_native_display_gameplay_supported")
@@ -177,10 +251,14 @@ private func nativeDisplayRequestImpl(_ id: UInt64, _ pointer: UnsafeMutableRawP
         label.text = "HELIUM S2B · LIVE NATIVE OPAQUE/CUTOUT\nwgpu reference and input remain active"
     case .gameplay:
         label.text = "HELIUM S2E · DIRECT METAL GAMEPLAY"
+    case .qualification:
+        label.text = NSLocalizedString("HELIUM S2H · NO-WORLD HOST QUALIFICATION · DIRECT METAL", comment: "No-world diagnostic")
+        parent.viewWithTag(0x4832)?.removeFromSuperview()
     }
     label.textColor = .yellow; label.backgroundColor = .black; label.numberOfLines=2; label.font = .systemFont(ofSize:12)
     view.addSubview(label)
     nativeTargets[id]=target; view.invalid={ cause,old,new in cancelNative(id,cause,old,new) }; parent.addSubview(view)
+    if attachment == .qualification { qualificationEvidence.record(.metalLayerAttached, generation: id) }
     diagnosticEvent(id,14,0,UInt64(pixels.width),UInt64(pixels.height));liftMetalHUD()
     target.timer=Timer.scheduledTimer(withTimeInterval:0.1,repeats:true){[weak target] _ in
         guard let target=target else {return}
@@ -202,6 +280,7 @@ public func nativeDisplayPublish(_ id:UInt64) {
         let cause=target.invalidCause();guard cause==0, target.ready(id) else {cancelNative(id,cause==0 ? 16 : cause);return}
         if target.live {
             target.view.alpha = 1
+            if target.attachment == .qualification { qualificationEvidence.record(.probeLayerRevealed, generation: id) }
             LauncherLog.write("live native terrain revealed mode=\(target.attachment); physical scanout unverified")
             return
         }

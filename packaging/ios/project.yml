@@ -144,6 +144,35 @@ targets:
         # the hand-assembled one the workflow zips. Two ways to make the same app, one executable name.
         EXECUTABLE_NAME: Horizon
 
+  # Shares the game's scene manifest and launcher framework. Its required
+  # prebuilt Rust executable has no game or world dependencies.
+  HeliumHostQualification:
+    type: application
+    platform: iOS
+    sources:
+      - path: GameShell
+      - path: Assets.xcassets
+    dependencies:
+      - target: HorizonLauncherKit
+        embed: true
+    postCompileScripts:
+      - name: Put the Rust no-world host in the bundle
+        shell: /bin/bash
+        script: |
+          set -euo pipefail
+          probe="$SRCROOT/../../target/$IOS_TARGET/release/helium-host-qualification"
+          test -x "$probe"
+          cp "$probe" "$BUILT_PRODUCTS_DIR/$EXECUTABLE_PATH"
+          chmod +x "$BUILT_PRODUCTS_DIR/$EXECUTABLE_PATH"
+    settings:
+      base:
+        INFOPLIST_FILE: GameInfo.plist
+        GENERATE_INFOPLIST_FILE: NO
+        PRODUCT_NAME: HeliumHostQualification
+        PRODUCT_BUNDLE_IDENTIFIER: dev.helium.hostqualification
+        EXECUTABLE_NAME: Horizon
+        TARGETED_DEVICE_FAMILY: "1,2"
+
   # The launcher, in SwiftUI, as a framework the game's bundle embeds: one .ipa. The game owns the process
   # (winit runs UIKit's main loop), so the launcher cannot run first; horizon-ios-launcher dlopens this
   # framework once the game's window is up and calls its horizon_launcher_present, which covers the game until

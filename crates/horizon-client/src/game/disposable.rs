@@ -1,8 +1,10 @@
 //! MIT; Copyright (c) 2026 Horizon contributors.
 //! Storage policy for the standalone native gameplay qualification build.
 use horizon_client::{Result, save::SessionLock};
+#[cfg(unix)]
+use rustix::fs::{Mode, OFlags, mkdirat, open, openat};
 use std::{
-    fs::{self, File, Metadata, OpenOptions},
+    fs::{self, File, Metadata},
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
@@ -19,41 +21,14 @@ pub(crate) fn active() -> Option<&'static Namespace> {
 
 #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
 pub(crate) fn activate(home: &Path) -> Result<()> {
-    let image = horizon_ios_launcher::standalone_test_image(home)
+    horizon_ios_launcher::standalone_test_image(home)
         .ok_or("disposable gameplay requires the standalone test host")?;
-    if !standalone_layout(&image, home) {
-        return Err("disposable gameplay rejected the iOS installation/container layout".into());
-    }
     let namespace = Namespace::open(home)?;
     std::env::set_current_dir(&namespace.root)?;
     ACTIVE
         .set(namespace)
         .map_err(|_| "disposable sandbox already active")?;
     Ok(())
-}
-
-#[cfg(any(test, all(target_os = "ios", feature = "helium-native-metal-gameplay")))]
-fn standalone_layout(image: &Path, home: &Path) -> bool {
-    fn uuid(name: &str) -> bool {
-        name.len() == 36
-            && name.bytes().enumerate().all(|(i, b)| match i {
-                8 | 13 | 18 | 23 => b == b'-',
-                _ => b.is_ascii_hexdigit(),
-            })
-    }
-    fn parts(path: &Path, prefix: &str, count: usize) -> bool {
-        let Ok(path) = path.strip_prefix(prefix) else {
-            return false;
-        };
-        let Some(parts) = path.iter().map(|s| s.to_str()).collect::<Option<Vec<_>>>() else {
-            return false;
-        };
-        parts.len() == count
-            && uuid(parts[0])
-            && (count == 1 || (parts[1].ends_with(".app") && parts[2] == "Horizon"))
-    }
-    parts(image, "/private/var/containers/Bundle/Application", 3)
-        && parts(home, "/private/var/mobile/Containers/Data/Application", 1)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -150,12 +125,19 @@ pub(crate) struct Namespace {
     root_id: Identity,
     saves_id: Identity,
     backups_id: Identity,
+    #[cfg(unix)]
+    root_dir: File,
+    #[cfg(unix)]
+    saves_dir: File,
     _lock: File,
     resource_import: Mutex<()>,
 }
 
 impl Namespace {
-    #[cfg(any(test, all(target_os = "ios", feature = "helium-native-metal-gameplay")))]
+    #[cfg(all(
+        unix,
+        any(test, all(target_os = "ios", feature = "helium-native-metal-gameplay"))
+    ))]
     fn open(home: &Path) -> Result<Self> {
         let metadata = fs::symlink_metadata(home)?;
         if !metadata.is_dir() || fs::canonicalize(home)? != home {
@@ -168,6 +150,8 @@ impl Namespace {
         ensure_directory(&support)?;
         let root = support.join(ROOT);
         let root_id = ensure_directory(&root)?;
+        let dir_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let root_dir = File::from(open(&root, dir_flags, Mode::empty())?);
         let documents = home.join("Documents");
         ensure_directory(&documents)?;
         ensure_directory(&documents.join("logs"))?;
@@ -180,21 +164,24 @@ impl Namespace {
         }
         let saves_id = ensure_directory(&root.join("saves"))?;
         let backups_id = ensure_directory(&root.join("backups"))?;
+        let saves_dir = File::from(openat(&root_dir, "saves", dir_flags, Mode::empty())?);
         if [root_id, saves_id, backups_id]
             .iter()
             .any(|id| id.0 != home_id.0)
+            || identity(&root_dir.metadata()?)? != root_id
+            || identity(&saves_dir.metadata()?)? != saves_id
         {
             return Err("disposable storage is outside the data container volume".into());
         }
-        let lock = root.join("session.lock");
-        if optional(&lock)?.is_some_and(|meta| !regular(&meta)) {
+        let lock = File::from(openat(
+            &root_dir,
+            "session.lock",
+            OFlags::WRONLY | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )?);
+        if !regular(&lock.metadata()?) {
             return Err("disposable namespace lock alias rejected".into());
         }
-        let lock = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(lock)?;
         lock.try_lock()
             .map_err(|_| "disposable namespace is already in use")?;
         let namespace = Self {
@@ -204,6 +191,8 @@ impl Namespace {
             root_id,
             saves_id,
             backups_id,
+            root_dir,
+            saves_dir,
             resource_import: Mutex::new(()),
         };
         namespace.inspect()?;
@@ -248,14 +237,7 @@ impl Namespace {
         match (optional(&world)?, optional(&ledger)?) {
             (None, None) => Ok(None),
             (Some(_), Some(meta)) if regular(&meta) => {
-                let id = directory(&world)?;
-                let mut contents = String::new();
-                File::open(ledger)?
-                    .take(128)
-                    .read_to_string(&mut contents)?;
-                if id.0 != self.saves_id.0 || contents != receipt(&world, id)? {
-                    return Err("disposable world does not match its creation receipt".into());
-                }
+                self.checked_world_handle(&world)?;
                 Ok(Some(world))
             }
             _ => Err("disposable world has no complete creation receipt".into()),
@@ -276,16 +258,27 @@ impl Namespace {
     pub(super) fn prepare_world(&self, folder: &str, create: bool) -> Result<PathBuf> {
         self.check_selector(folder, create)?;
         if create {
-            let world = self.saves().join(SLOT);
-            fs::create_dir(&world)?; // Deliberately refuse all existing slots.
-            File::open(self.saves())?.sync_all()?;
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(self.root.join(ADMISSION))?;
-            file.write_all(receipt(&world, directory(&world)?)?.as_bytes())?;
-            file.sync_all()?;
-            File::open(&self.root)?.sync_all()?;
+            #[cfg(unix)]
+            {
+                mkdirat(&self.saves_dir, SLOT, Mode::RWXU)?;
+                self.saves_dir.sync_all()?;
+                let world = self.open_world_handle(&self.saves().join(SLOT))?;
+                let mut file = File::from(openat(
+                    &self.root_dir,
+                    ADMISSION,
+                    OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::WRONLY
+                        | OFlags::NOFOLLOW
+                        | OFlags::CLOEXEC,
+                    Mode::RUSR | Mode::WUSR,
+                )?);
+                file.write_all(receipt(&world.metadata()?)?.as_bytes())?;
+                file.sync_all()?;
+                self.root_dir.sync_all()?;
+            }
+            #[cfg(not(unix))]
+            return Err("disposable creation requires anchored filesystem operations".into());
         }
         self.authorized_world()?
             .ok_or_else(|| "disposable world missing".into())
@@ -299,6 +292,64 @@ impl Namespace {
         Ok(Some(world))
     }
 
+    #[cfg(unix)]
+    fn open_world_handle(&self, world: &Path) -> Result<File> {
+        let slot = File::from(openat(
+            &self.saves_dir,
+            SLOT,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?);
+        let id = identity(&slot.metadata()?)?;
+        if id.0 != self.saves_id.0 || id != directory(world)? {
+            return Err("disposable slot path and descriptor differ".into());
+        }
+        Ok(slot)
+    }
+
+    fn checked_world_handle(&self, world: &Path) -> Result<File> {
+        #[cfg(unix)]
+        {
+            let slot = self.open_world_handle(world)?;
+            let ledger = File::from(openat(
+                &self.root_dir,
+                ADMISSION,
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?);
+            if !regular(&ledger.metadata()?) {
+                return Err("disposable receipt alias rejected".into());
+            }
+            let mut contents = String::new();
+            ledger.take(128).read_to_string(&mut contents)?;
+            if contents != receipt(&slot.metadata()?)? {
+                return Err("disposable world does not match its creation receipt".into());
+            }
+            Ok(slot)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = world;
+            Err("disposable receipt verification requires anchored filesystem operations".into())
+        }
+    }
+
+    pub(super) fn world_lock(&self, world: &Path) -> Result<SessionLock> {
+        #[cfg(unix)]
+        {
+            if world != self.saves().join(SLOT) {
+                return Err("disposable lock requires the admitted world slot".into());
+            }
+            let slot = self.checked_world_handle(world)?;
+            SessionLock::acquire_anchored(world, &slot)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = world;
+            Err("disposable lock requires anchored filesystem operations".into())
+        }
+    }
+
     pub(super) fn list(&self) -> Result<Vec<horizon_client::title::WorldEntry>> {
         let Some(world) = self.authorized_world()? else {
             return Ok(Vec::new());
@@ -306,7 +357,7 @@ impl Namespace {
         // An interruption can leave only the durably admitted level record.
         // Recover through the same exclusive session lock before listing it.
         if !has_level_data(&world) {
-            let _lock = SessionLock::acquire(&world)?;
+            let _lock = self.world_lock(&world)?;
             require_level_data(&world)?;
         }
         Ok(horizon_client::title::list_worlds(&self.saves()))
@@ -315,7 +366,7 @@ impl Namespace {
     pub(super) fn backup(&self, folder: &str) -> Result<u64> {
         self.check_selector(folder, false)?;
         let world = self.authorized_world()?.ok_or("disposable world missing")?;
-        let _world_lock = SessionLock::acquire(&world)?;
+        let _world_lock = self.world_lock(&world)?;
         require_level_data(&world)?;
         validate_tree(&self.root.join("backups"), self.root_id.0)?;
         horizon_client::title::world_management::backup(&self.saves(), folder)
@@ -341,7 +392,6 @@ impl Namespace {
             {
                 return Err("prepared archive must be a .zip directly in Documents".into());
             }
-            use rustix::fs::{Mode, OFlags, open, openat};
             let dir = open(
                 &self.documents,
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW,
@@ -385,15 +435,14 @@ pub(super) fn require_level_data(world: &Path) -> Result<()> {
     Ok(())
 }
 
-fn receipt(world: &Path, id: Identity) -> Result<String> {
+#[cfg(unix)]
+fn receipt(metadata: &Metadata) -> Result<String> {
     // The device number is checked against this launch's private volume.
     // The inode and birth time identify the created directory across launches.
-    let created = fs::symlink_metadata(world)?
-        .created()?
-        .duration_since(std::time::UNIX_EPOCH)?;
+    let created = metadata.created()?.duration_since(std::time::UNIX_EPOCH)?;
     Ok(format!(
         "{}:{}:{}\n",
-        id.1,
+        identity(metadata)?.1,
         created.as_secs(),
         created.subsec_nanos()
     ))
