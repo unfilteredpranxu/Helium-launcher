@@ -368,6 +368,13 @@ impl Game<'_> {
         event_loop: &dyn EventLoopCtl,
     ) -> Result<Option<Value>> {
         let words: Vec<&str> = line.split_whitespace().collect();
+        if super::disposable::active().is_some()
+            && !words
+                .first()
+                .is_some_and(|command| super::disposable::allows_control(command))
+        {
+            return Err("command unavailable in disposable gameplay".into());
+        }
         self.screenshot_sequence_gate(words.first().copied())?;
         if words.first() == Some(&"screenshot-sequence") {
             return self.screenshot_sequence_command(line, reply);

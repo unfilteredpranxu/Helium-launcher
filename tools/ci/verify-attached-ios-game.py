@@ -95,6 +95,11 @@ def verify(app: Path, rust: Path, native_gameplay: bool = False) -> None:
     if value["CFBundleExecutable"] != "Horizon" or value["MinimumOSVersion"] != "15.0":
         raise ValueError("wrong actual game bundle contract")
     value.update(CFBundleIdentifier="dev.helium.g06ctest", CFBundleDisplayName="Helium G06C Test", HeliumNativeMetalTest=True, HeliumMetalDiagnosticsVersion=2, CFBundleVersion="12001", HeliumDiagnosticSource=os.environ.get("HELIUM_DIAGNOSTIC_SHA", "development-unidentified"))
+    if native_gameplay:
+        if "_horizon_disposable_container_matches" not in defined:
+            raise ValueError("missing standalone disposable host definition")
+        value["HeliumDisposableWorldTestVersion"] = 1
+        value["CFBundleDisplayName"] = "Helium Disposable Test"
     with info.open("wb") as stream:
         plistlib.dump(value, stream)
     print("Verified actual opt-in Rust executable == bundle executable; thin arm64 device iOS15.0")
@@ -103,7 +108,7 @@ def verify(app: Path, rust: Path, native_gameplay: bool = False) -> None:
     if native_gameplay:
         print("Direct Metal gameplay selector and UIKit attachment ABI verified in linked binaries; runtime remains unverified")
     print("No Java/JVM linkage, provisioning profile or distribution signature; diagnostics ABI v2 retained")
-    print("Configuration file absent: isolated marker v2 AUTO-ARMS; normal apps remain OFF. Device/world runtime remains UNVERIFIED.")
+    print("No bundled mode file. Device/world runtime remains UNVERIFIED.")
 
 
 if __name__ == "__main__":

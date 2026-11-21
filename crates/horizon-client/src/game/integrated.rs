@@ -492,6 +492,9 @@ impl Game<'_> {
         creative: bool,
         create: Option<&WorldOptions>,
     ) -> Result<()> {
+        if let Some(sandbox) = super::disposable::active() {
+            sandbox.check_selector(folder, create.is_some())?;
+        }
         // The window's mod configs before the server's, as on NeoForge.
         self.native_configs_client_start();
         horizon_client::command::vanilla::set_horizon_commands(
@@ -543,16 +546,22 @@ impl Game<'_> {
         // The window plays against the world's own biome table (its chunks
         // carry the packs' ids past the built-in list, `set_registries`
         // names them through it), as the server thread's copy does.
-        let world = std::env::current_dir()?.join("saves").join(folder);
-        let enabled_features = horizon_client::save::Level::read(&world)
-            .map(|l| l.enabled_features)
-            .unwrap_or_default();
-        self.world_biomes = Some(super::world_loading::packed_biomes(
-            &world,
-            &self.options.resources,
-            self.res.biomes(),
-            &enabled_features,
-        ));
+        self.world_biomes = if super::disposable::active().is_some() {
+            // No world data packs are admitted. The client receives the
+            // server's registry through its usual local connection.
+            None
+        } else {
+            let world = std::env::current_dir()?.join("saves").join(folder);
+            let enabled_features = horizon_client::save::Level::read(&world)
+                .map(|l| l.enabled_features)
+                .unwrap_or_default();
+            Some(super::world_loading::packed_biomes(
+                &world,
+                &self.options.resources,
+                self.res.biomes(),
+                &enabled_features,
+            ))
+        };
         self.world_biomes_base = self.world_biomes.clone();
         let (res, pack, settings) = (self.res.clone(), self.pack.clone(), self.settings.clone());
         let flags = Arc::new(Flags::default());
@@ -659,7 +668,9 @@ impl Game<'_> {
             return Ok(());
         };
         handle.world_name = world_name;
-        self.server_packs_world_pack(&folder);
+        if super::disposable::active().is_none() {
+            self.server_packs_world_pack(&folder);
+        }
         self.connect_local(pipe, &player)?;
         if let Some(r) = self.remote.as_mut() {
             r.save_folder = Some(folder.clone());
@@ -883,7 +894,9 @@ impl Game<'_> {
         opening: Opening,
     ) -> Result<()> {
         // The mods' server configs, read before the server starts.
-        if let Ok(dir) = std::env::current_dir() {
+        if super::disposable::active().is_none()
+            && let Ok(dir) = std::env::current_dir()
+        {
             self.native_configs_server_start(&dir.join("saves").join(&launch.folder), false);
         }
         // MinecraftServer.loadLevel's start: nothing is loaded yet.
@@ -1171,6 +1184,9 @@ impl Game<'_> {
     /// one) and announce the world. The socket is bound at once so a busy
     /// port fails here; the hub starts listening once it is at hand.
     pub(super) fn publish(&mut self, settings: LanSettings) -> std::result::Result<u16, String> {
+        if super::disposable::active().is_some() {
+            return Err("LAN publishing is disabled in disposable gameplay".into());
+        }
         let Some(s) = self.serving.as_mut() else {
             return Err("not an integrated server".into());
         };

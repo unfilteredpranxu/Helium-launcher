@@ -85,6 +85,20 @@ fn saves() -> Result<PathBuf> {
     Ok(std::env::current_dir()?.join("saves"))
 }
 
+fn world_list(worlds: Vec<title::WorldEntry>) -> Value {
+    let worlds: Vec<Value> = worlds.into_iter().map(|w| json!({
+        "folder": w.folder,
+        "name": w.name,
+        "mode": match w.game_mode { 1 => "creative", 2 => "adventure", 3 => "spectator", _ => "survival" },
+        "hardcore": w.hardcore,
+        "last_played": w.modified.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
+        "commands": w.commands,
+        "version": w.version,
+        "corrupted": w.corrupted,
+    })).collect();
+    json!({"worlds": worlds})
+}
+
 /// The commands that read and write files and need no game: the worlds, the server list and status pings. The
 /// phone's launcher asks them before the game is started (game/launcher.rs). Some(reply) for these commands
 /// (Some(None): the reply comes later), None for others.
@@ -93,25 +107,26 @@ pub(super) fn file_command(
     line: &str,
     reply: &Sender<String>,
 ) -> Result<Option<Option<Value>>> {
+    if let Some(sandbox) = super::disposable::active() {
+        return match words.first().copied() {
+            Some("worlds") => {
+                let reply = reply.clone();
+                std::thread::Builder::new()
+                    .name("disposable-world-list".into())
+                    .spawn(move || {
+                        let result = sandbox
+                            .list()
+                            .map_or_else(|e| json!({"error": e.to_string()}), world_list);
+                        let _ = reply.send(result.to_string());
+                    })?;
+                Ok(Some(None))
+            }
+            Some("world-create" | "state") => Ok(None),
+            _ => Err("file command unavailable in disposable gameplay".into()),
+        };
+    }
     let value = match words.first().copied().unwrap_or_default() {
-        "worlds" => {
-            let worlds: Vec<Value> = title::list_worlds(&saves()?)
-                    .iter()
-                    .map(|w| {
-                        json!({
-                            "folder": w.folder,
-                            "name": w.name,
-                            "mode": match w.game_mode { 1 => "creative", 2 => "adventure", 3 => "spectator", _ => "survival" },
-                            "hardcore": w.hardcore,
-                            "last_played": w.modified.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
-                            "commands": w.commands,
-                            "version": w.version,
-                            "corrupted": w.corrupted,
-                        })
-                    })
-                    .collect();
-            json!({ "worlds": worlds })
-        }
+        "worlds" => world_list(title::list_worlds(&saves()?)),
         "servers" => {
             let file = horizon_client::multiplayer::servers_file(&saves()?);
             let servers: Vec<Value> = horizon_protocol::servers::load(&file)
@@ -270,7 +285,11 @@ impl Game<'_> {
                     let (creative, options) = settings.options()?;
                     let name = settings.name.trim();
                     let name = if name.is_empty() { "New World" } else { name };
-                    let folder = title::new_world_folder(&saves()?, name);
+                    let folder = if super::disposable::active().is_some() {
+                        super::disposable::SLOT.to_owned()
+                    } else {
+                        title::new_world_folder(&saves()?, name)
+                    };
                     self.open_world(
                         &folder,
                         Some(name),
@@ -281,6 +300,9 @@ impl Game<'_> {
                     return Ok(Some(Some(
                         json!({ "ok": true, "folder": folder, "name": name }),
                     )));
+                }
+                if super::disposable::active().is_some() {
+                    return Err("disposable worlds require the native creation settings".into());
                 }
                 let mut seed = None;
                 let mut creative = false;

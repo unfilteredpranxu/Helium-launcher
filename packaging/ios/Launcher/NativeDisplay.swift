@@ -107,7 +107,17 @@ public func nativeDisplayRequestLive(_ id: UInt64, _ pointer: UnsafeMutableRawPo
 }
 private func nativeGameplayBundle() -> Bool {
     Bundle.main.bundleIdentifier == "dev.helium.g06ctest" &&
-        Bundle.main.object(forInfoDictionaryKey: "HeliumMetalDiagnosticsVersion") as? Int == 2
+        Bundle.main.object(forInfoDictionaryKey: "HeliumMetalDiagnosticsVersion") as? Int == 2 &&
+        Bundle.main.object(forInfoDictionaryKey: "HeliumDisposableWorldTestVersion") as? Int == 1
+}
+
+@_cdecl("horizon_disposable_container_matches")
+public func disposableContainerMatches(_ home: UnsafePointer<CChar>?) -> Bool {
+    guard nativeGameplayBundle(), let home, let path = String(validatingUTF8: home),
+          let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+    else { return false }
+    let expected = URL(fileURLWithPath: path).appendingPathComponent("Library/Application Support")
+    return support.resolvingSymlinksInPath().path == expected.resolvingSymlinksInPath().path
 }
 
 @_cdecl("horizon_native_display_gameplay_supported")

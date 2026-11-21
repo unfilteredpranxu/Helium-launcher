@@ -8,6 +8,23 @@ pub fn main() {
 
 /// Start the game with trait mods in dispatch order.
 pub fn main_with(mods: crate::mod_api::Mods) {
+    #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
+    {
+        let result = (|| -> crate::Result<()> {
+            if std::env::args_os().len() != 1 {
+                return Err("disposable gameplay does not accept launch arguments".into());
+            }
+            let home = std::env::var_os("HOME").ok_or("missing iOS data container")?;
+            let home = std::path::Path::new(&home).canonicalize()?;
+            game::disposable::activate(&home)
+        })();
+        if let Err(error) = result {
+            // Rejected before setting the game directory, reading an import,
+            // or opening any world. UIApplicationMain has not been entered.
+            eprintln!("Horizon: {error}");
+            return;
+        }
+    }
     boot_stage("entry");
     // First: a trait injection into anything below (logging, the crash handler) calls its mod.
     if crate::mod_api::MODS.set(mods).is_err() {
@@ -102,7 +119,13 @@ pub fn main_with(mods: crate::mod_api::Mods) {
         // and the resource loader waits for it.
         #[cfg(any(target_os = "ios", target_os = "android"))]
         {
-            crate::import::boot(&documents);
+            if game::disposable::active().is_some() {
+                if let Ok(private) = std::env::current_dir() {
+                    crate::import::boot_prepared_only(&private);
+                }
+            } else {
+                crate::import::boot(&documents);
+            }
             boot_stage("import started");
         }
     }
@@ -433,6 +456,9 @@ fn raise_open_file_limit() {
 /// with no argument to pass.
 #[cfg(target_os = "ios")]
 fn into_app_sandbox() -> Result<std::path::PathBuf, String> {
+    if let Some(sandbox) = game::disposable::active() {
+        return Ok(sandbox.documents().to_owned());
+    }
     let documents = std::env::var_os("HOME")
         .filter(|home| !home.is_empty())
         .map(|home| std::path::PathBuf::from(home).join("Documents"))

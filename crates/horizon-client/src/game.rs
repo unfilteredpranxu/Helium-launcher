@@ -119,6 +119,7 @@ mod dialogs;
 mod discord;
 mod dispense_fixture;
 mod dispenser;
+pub(crate) mod disposable;
 mod dragon;
 mod dynamic_lights;
 mod emote_wheel;
@@ -656,6 +657,9 @@ impl Options {
         else {
             return Ok(None);
         };
+        if disposable::active().is_some() && o.session_file.is_some() {
+            return Err("external session files are disabled in disposable gameplay".into());
+        }
         // Paths given on the command line stay relative to where the game was started.
         if o.game_dir.is_some() {
             o.control = o.control.map(std::path::absolute).transpose()?;
@@ -13187,6 +13191,10 @@ impl Game<'_> {
     }
     /// What the title screen asked for, from a click or Enter.
     fn title_action(&mut self, event_loop: &dyn EventLoopCtl, action: Action) -> Result<()> {
+        if disposable::active().is_some() && !matches!(&action, Action::Play { .. } | Action::None)
+        {
+            return Err("use the launcher to create and open the disposable world".into());
+        }
         match action {
             // A splitscreen player's title never ends the process (P1's does).
             Action::Quit if self.options.split_guest || self.splitscreen.guest => {
@@ -13248,12 +13256,29 @@ impl Game<'_> {
         creative: bool,
         create: Option<&horizon_client::title::WorldOptions>,
     ) -> Result<()> {
+        if let Some(sandbox) = disposable::active() {
+            if self.integrated.is_some()
+                || self.integrated_starting.is_some()
+                || self.remote.is_some()
+                || self.pending_entry.is_some()
+            {
+                return Err("close the current disposable session before opening a world".into());
+            }
+            if create.is_some_and(|options| {
+                options.pack_dir.is_some()
+                    || options.data_packs.iter().any(|pack| pack != "vanilla")
+            }) {
+                return Err("external world data packs are disabled in disposable gameplay".into());
+            }
+            sandbox.check_selector(folder, create.is_some())?;
+        }
         log::info!("Horizon checkpoint: world-open requested (path/name omitted)");
         #[cfg(feature = "helium-direct-metal")]
         horizon_metal_bridge::checkpoint(7);
         // openWorldLoadLevelData: an existing world whose level data does not read opens
         // RecoverWorldDataScreen instead.
-        if create.is_none()
+        if disposable::active().is_none()
+            && create.is_none()
             && let Some(title) = self.title.as_mut()
             && title.open_recover(folder)
         {
@@ -13283,7 +13308,7 @@ impl Game<'_> {
         // to read: the picked packs on, the feature packs left out off.
         // Only when `install` did not run (no Data Packs screen opened): it
         // writes the file itself, and its `disabled` must not be lost.
-        if let Some(o) = create.filter(|o| o.pack_dir.is_none()) {
+        if let Some(o) = create.filter(|o| disposable::active().is_none() && o.pack_dir.is_none()) {
             let world = std::env::current_dir()?.join("saves").join(folder);
             if let Err(e) = std::fs::create_dir_all(&world) {
                 log::warn!("Horizon: data packs for {folder}: {}: {e}", world.display());
@@ -19015,6 +19040,21 @@ impl Game<'_> {
     /// it a handler both can call and a `gamepad::Route` (screenshot and fullscreen do this). A
     /// screen's own raw keys, text and mods' key hooks stay raw on purpose.
     fn handle_window_event_inner(&mut self, event_loop: &dyn EventLoopCtl, mut event: WindowEvent) {
+        if disposable::active().is_some()
+            && self.title.is_some()
+            && matches!(
+                &event,
+                WindowEvent::Touch(_)
+                    | WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+                    | WindowEvent::DroppedFile(_)
+            )
+        {
+            // The native launcher owns the title. The desktop title's file
+            // widgets cannot be driven behind it in this configuration.
+            return;
+        }
         if let WindowEvent::Focused(false) = &event {
             self.physical_keys.clear();
             self.modifiers = winit::keyboard::ModifiersState::empty();
@@ -24144,12 +24184,25 @@ pub fn run_with() -> Result<()> {
 }
 
 fn run_game() -> Result<()> {
+    #[cfg(all(target_os = "ios", feature = "helium-native-metal-gameplay"))]
+    if disposable::active().is_none() {
+        return Err("standalone disposable storage was not initialized".into());
+    }
     let Some(mut options) = Options::read()? else {
         return Ok(());
     };
     #[cfg(feature = "helium-direct-metal")]
     {
-        options.native_gameplay = horizon_metal_bridge::Controller::select_native_gameplay()?;
+        options.native_gameplay = if disposable::active().is_some() {
+            if std::env::var_os("HELIUM_DIRECT_METAL").is_some_and(|mode| mode != "native-gameplay")
+            {
+                return Err("disposable gameplay does not allow a renderer override".into());
+            }
+            horizon_metal_bridge::Controller::require_native_gameplay()?;
+            true
+        } else {
+            horizon_metal_bridge::Controller::select_native_gameplay()?
+        };
         if options.native_gameplay
             && (!cfg!(feature = "helium-native-metal-gameplay")
                 || !options.execution_role.is_client()

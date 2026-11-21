@@ -31,8 +31,13 @@ impl WorldRequest {
         creative: bool,
         create: Option<&horizon_client::title::WorldOptions>,
     ) -> Result<Self> {
+        let save_root = if let Some(sandbox) = disposable::active() {
+            sandbox.prepare_world(folder, create.is_some())?
+        } else {
+            std::env::current_dir()?.join("saves").join(folder)
+        };
         Ok(Self {
-            save_root: std::env::current_dir()?.join("saves").join(folder),
+            save_root,
             folder: folder.to_owned(),
             name: name.map(str::to_owned),
             seed,
@@ -98,7 +103,16 @@ impl WorldRequest {
             creative,
             create,
         } = self;
+        if let Some(sandbox) = disposable::active()
+            && (options.execution_role != execution_role::ExecutionRole::IntegratedServer
+                || sandbox.authorized_world()?.as_ref() != Some(&save_root))
+        {
+            return Err("world preparation is outside the disposable admission".into());
+        }
         let session_lock = horizon_client::save::SessionLock::acquire(&save_root)?;
+        if disposable::active().is_some() && create.is_none() {
+            disposable::require_level_data(&save_root)?;
+        }
         let name = name.as_deref();
         let create = create.as_ref();
         // openWorldLoadLevelData: level data that does not read is RecoverWorldDataScreen's to

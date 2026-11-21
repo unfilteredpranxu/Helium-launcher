@@ -903,6 +903,9 @@ impl Game<'_> {
         cookies: Option<horizon_client::net::Cookies>,
         lan: bool,
     ) -> Result<()> {
+        if super::disposable::active().is_some() {
+            return Err("external servers are disabled in disposable gameplay".into());
+        }
         super::world_loading::preload_server_loot(&self.options.resources);
         if self.defer_world_entry(super::PendingWorldEntry::Server {
             address: address.to_owned(),

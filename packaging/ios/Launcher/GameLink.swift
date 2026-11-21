@@ -1,13 +1,18 @@
 import SwiftUI
 import UIKit
 
-/// The game's `Documents`: where it keeps saves, screenshots, options.txt and the imported game files.
+/// The document exchange folder and paths used by the launcher.
 enum GameFolder {
     static let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
         ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents")
-    static var saves: URL { documents.appendingPathComponent("saves") }
-    static var screenshots: URL { documents.appendingPathComponent("screenshots") }
-    static var resources: URL { documents.appendingPathComponent("resources") }
+    static let disposableTest = Bundle.main.object(forInfoDictionaryKey: "HeliumDisposableWorldTestVersion") as? Int == 1
+    private static var gameStorage: URL {
+        guard disposableTest else { return documents }
+        return URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Application Support/Helium-Disposable-v1", isDirectory: true)
+    }
+    static var screenshots: URL { gameStorage.appendingPathComponent("screenshots") }
+    static var resources: URL { gameStorage.appendingPathComponent("resources") }
     /// Content `.hmod` mods the game loads, and the folder `horizon-mods.txt` names.
     static var mods: URL { documents.appendingPathComponent("horizon-mods") }
     /// Native `.hnmod` mods; on iOS they cannot be built into the game, but the folder is still the game's.
@@ -41,7 +46,10 @@ struct World: Identifiable, Equatable {
 
     /// The picture the game took when the world was last left (`icon.png`), if any.
     var icon: UIImage? {
-        UIImage(contentsOfFile: GameFolder.saves.appendingPathComponent(folder).appendingPathComponent("icon.png").path)
+        // Disposable world files are opened only by the Rust storage policy.
+        guard !GameFolder.disposableTest else { return nil }
+        return UIImage(contentsOfFile: GameFolder.documents.appendingPathComponent("saves")
+            .appendingPathComponent(folder).appendingPathComponent("icon.png").path)
     }
 }
 

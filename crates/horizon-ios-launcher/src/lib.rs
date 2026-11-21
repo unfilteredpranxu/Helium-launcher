@@ -17,6 +17,36 @@ use std::{
     sync::{Mutex, PoisonError},
 };
 
+/// Compare the guest-facing executable with dyld's process main image before
+/// accepting the Foundation container reported by the standalone test host.
+#[cfg(target_os = "ios")]
+pub fn standalone_test_image(home: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::{
+        ffi::{CStr, CString},
+        os::unix::ffi::OsStrExt,
+        path::Path,
+    };
+    // SAFETY: index zero is dyld's process main image. Copy its static C string before use.
+    let raw = unsafe { libc::_dyld_get_image_name(0) };
+    if raw.is_null() {
+        return None;
+    }
+    let image = Path::new(std::ffi::OsStr::from_bytes(
+        unsafe { CStr::from_ptr(raw) }.to_bytes(),
+    ))
+    .canonicalize()
+    .ok()?;
+    if std::env::current_exe().ok()?.canonicalize().ok()? != image {
+        return None;
+    }
+    let path = CString::new(home.as_os_str().as_bytes()).ok()?;
+    let symbol = ios::symbol(c"horizon_disposable_container_matches")?;
+    // SAFETY: fixed Swift C ABI, and path remains NUL terminated for the call.
+    let matches: extern "C" fn(*const std::ffi::c_char) -> bool =
+        unsafe { std::mem::transmute(symbol) };
+    matches(path.as_ptr()).then_some(image)
+}
+
 /// Service the current Apple run loop after the gameplay event handler has
 /// gone away. The scoped timer keeps the default mode runnable even with no
 /// open windows. A timer turn is a status probe, never an exit deadline.
@@ -382,7 +412,7 @@ mod ios {
     }
 
     /// Load the launcher framework and find `symbol_name` in it.
-    fn symbol(symbol_name: &CStr) -> Option<*mut c_void> {
+    pub(super) fn symbol(symbol_name: &CStr) -> Option<*mut c_void> {
         static HANDLE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
         let handle = *HANDLE.get_or_init(|| {
             let Some(path) = framework() else {

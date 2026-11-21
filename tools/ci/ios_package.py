@@ -180,6 +180,9 @@ def verify_bundle(folder, profile, source, expected_app_digest, expected_framewo
     config = manifest.get("UISceneConfigurations", {}).get("UIWindowSceneSessionRoleApplication", [])
     if profile == GAME and (len(config) != 1 or config[0].get("UISceneDelegateClassName") != "WinitSceneDelegate"):
         raise ValueError("wrong Rust game scene delegate")
+    if profile == GAME and (type(info.get("HeliumDisposableWorldTestVersion")) is not int
+                            or info["HeliumDisposableWorldTestVersion"] != 1):
+        raise ValueError("missing supported disposable world test marker")
     if profile == PROBE and (len(config) != 1 or config[0].get("UISceneDelegateClassName") != "HeliumProbeSceneDelegate" or info.get("HeliumNoWorldProbe") is not True):
         raise ValueError("wrong generated SwiftUI scene or probe marker")
     if not (folder / "Assets.car").is_file() or not info.get("CFBundleIcons"):

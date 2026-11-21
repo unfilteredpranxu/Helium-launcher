@@ -496,11 +496,15 @@ impl Controller {
         if !matches!(selected_mode(), Ok(Mode::NativeGameplay)) {
             return Ok(false);
         }
+        Self::require_native_gameplay().map(|()| true)
+    }
+
+    pub fn require_native_gameplay() -> Result<(), String> {
         #[cfg(target_os = "ios")]
         if helium_metal_prototype::attached::gameplay_supported()? {
-            return Ok(true);
+            return Ok(());
         }
-        Err("direct Metal gameplay requires the isolated iOS UIKit launcher".into())
+        Err("direct Metal gameplay requires the standalone disposable iOS UIKit launcher".into())
     }
 
     pub fn native_gameplay() -> Self {

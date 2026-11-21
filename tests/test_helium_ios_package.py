@@ -91,6 +91,23 @@ class IpaContract(unittest.TestCase):
         self.assertEqual((result["verification"], result["bundle_id"], result["hardware"]),
                          ("PASS", BUNDLE, "NOT TESTED"))
 
+    def test_game_requires_versioned_disposable_marker(self):
+        name, executable, kit, bundle = package.GAME
+        folder = self.ipa.parent / (name + ".app")
+        fw = folder / "Frameworks" / (kit + ".framework")
+        fw.mkdir(parents=True)
+        (fw / "Info.plist").write_bytes(plistlib.dumps({}))
+        info = metadata()
+        info.update(CFBundleExecutable=executable, CFBundleIdentifier=bundle)
+        info["UIApplicationSceneManifest"]["UISceneConfigurations"][
+            "UIWindowSceneSessionRoleApplication"][0]["UISceneDelegateClassName"] = "WinitSceneDelegate"
+        for invalid in (None, True, 2):
+            if invalid is not None:
+                info["HeliumDisposableWorldTestVersion"] = invalid
+            (folder / "Info.plist").write_bytes(plistlib.dumps(info))
+            with self.assertRaisesRegex(ValueError, "disposable world test marker"):
+                package.verify_bundle(folder, package.GAME, SOURCE, "", "")
+
     def test_missing_framework_is_rejected(self):
         del self.entries[KIT_PATH + KIT]
         with self.assertRaisesRegex(ValueError, "missing executable or framework"):

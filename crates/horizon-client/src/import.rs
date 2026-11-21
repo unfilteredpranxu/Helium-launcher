@@ -92,7 +92,18 @@ pub fn boot_importing() -> bool {
 ///
 /// Called once, before the event loop; [`wait_for_boot_import`] is how the loader hears it is over.
 pub fn boot(home: &Path) {
-    if !cfg!(any(target_os = "ios", target_os = "android")) || BOOT_STARTED.swap(true, Ordering::Relaxed)
+    begin_boot(home, true);
+}
+
+/// Only recover an interrupted resource installation inside a private game
+/// directory. Disposable mode never scans the shared Documents ingress.
+pub fn boot_prepared_only(home: &Path) {
+    begin_boot(home, false);
+}
+
+fn begin_boot(home: &Path, scan_archives: bool) {
+    if !cfg!(any(target_os = "ios", target_os = "android"))
+        || BOOT_STARTED.swap(true, Ordering::Relaxed)
     {
         return;
     }
@@ -112,7 +123,9 @@ pub fn boot(home: &Path) {
             }
             // The cable's door: an archive dragged into `Documents` is installed here, so the launch
             // it was dragged for is the one that finds it.
-            scan(&home);
+            if scan_archives {
+                scan(&home);
+            }
         });
     if let Err(error) = spawned {
         log::error!("Horizon: could not start the import worker: {error}");
@@ -140,7 +153,10 @@ pub fn wait_for_boot_import() {
     }
     let mut done = BOOT_DONE.0.lock().unwrap_or_else(PoisonError::into_inner);
     while !*done {
-        done = BOOT_DONE.1.wait(done).unwrap_or_else(PoisonError::into_inner);
+        done = BOOT_DONE
+            .1
+            .wait(done)
+            .unwrap_or_else(PoisonError::into_inner);
     }
 }
 
@@ -347,10 +363,14 @@ impl Pack {
     /// Look inside an archive and say what it is, writing nothing. Only the central directory is
     /// read, so this is cheap even for a prepared tree.
     pub fn open(path: &Path) -> Result<Self> {
-        if fs::metadata(path)?.len() > MAX_PACKED {
+        Self::open_file(path, File::open(path)?)
+    }
+
+    fn open_file(path: &Path, file: File) -> Result<Self> {
+        if file.metadata()?.len() > MAX_PACKED {
             return Err("the archive is larger than this will unpack".into());
         }
-        let archive = ZipArchive::new(File::open(path)?)?;
+        let archive = ZipArchive::new(file)?;
         // `name_for_index` borrows the archive, so the list is finished before anything is read out.
         let mut names: Vec<String> = (0..archive.len())
             .filter_map(|index| {
@@ -416,7 +436,11 @@ impl Pack {
 
     /// Read every entry out into `into`, which is created here. Anything that goes wrong removes
     /// `into` again: the game must never see a half tree.
-    fn unpack(&mut self, into: &Path, progress: &mut dyn FnMut(usize, u64)) -> Result<(usize, u64)> {
+    fn unpack(
+        &mut self,
+        into: &Path,
+        progress: &mut dyn FnMut(usize, u64),
+    ) -> Result<(usize, u64)> {
         fs::create_dir_all(into)?;
         let mut files = 0;
         let mut written = 0u64;
@@ -461,6 +485,39 @@ impl Pack {
     /// it: a phone does not have 589 MB to spend twice, and what arrives is a copy of something that
     /// is still on the computer that sent it.
     pub fn install(self, home: &Path) -> Result<Installed> {
+        self.install_reported(home, true)
+    }
+
+    /// Disposable ingress has an already-open read-only file. Reject world
+    /// and resource-pack archives before creating any destination path.
+    pub fn install_prepared_copy(
+        path: &Path,
+        file: File,
+        private_home: &Path,
+    ) -> Result<Installed> {
+        let pack = Self::open_file(path, file)?;
+        if pack.kind != Kind::Resources
+            || (0..pack.archive.len()).any(|i| {
+                pack.archive
+                    .name_for_index(i)
+                    .and_then(|name| name.ok())
+                    .is_none_or(|name| {
+                        let name = name.replace('\\', "/");
+                        name.split('/').any(|part| {
+                            matches!(
+                                part.to_ascii_lowercase().as_str(),
+                                "level.dat" | "level.dat_old" | "session.lock" | "playerdata"
+                            ) || part.to_ascii_lowercase().ends_with(".mca")
+                        })
+                    })
+            })
+        {
+            return Err("disposable gameplay accepts prepared resources only".into());
+        }
+        pack.install_reported(private_home, false)
+    }
+
+    fn install_reported(self, home: &Path, consume: bool) -> Result<Installed> {
         let label = self
             .path
             .file_name()
@@ -474,7 +531,7 @@ impl Pack {
             bytes: 0,
             error: None,
         }));
-        let result = self.install_now(home);
+        let result = self.install_now(home, consume);
         let mut status = STATUS.lock().unwrap_or_else(PoisonError::into_inner);
         match &result {
             Ok(_) => *status = None,
@@ -497,7 +554,7 @@ impl Pack {
         result
     }
 
-    fn install_now(mut self, home: &Path) -> Result<Installed> {
+    fn install_now(mut self, home: &Path, consume: bool) -> Result<Installed> {
         let archive = self.path.clone();
         let folder = Path::new(self.kind.folder());
         let (path, files, bytes) = match self.kind {
@@ -513,7 +570,9 @@ impl Pack {
             Kind::World => {
                 let dest = unique(&home.join(folder).join(&self.item));
                 let (files, bytes) = self.unpack(&dest, &mut report_progress)?;
-                fs::remove_file(&archive)?;
+                if consume {
+                    fs::remove_file(&archive)?;
+                }
                 (dest, files, bytes)
             }
             Kind::Resources => {
@@ -528,7 +587,9 @@ impl Pack {
                 let dest = home.join(folder);
                 publish(&scratch, &dest)?;
                 let _ = fs::remove_file(&marker);
-                fs::remove_file(&archive)?;
+                if consume {
+                    fs::remove_file(&archive)?;
+                }
                 (dest, files, bytes)
             }
         };

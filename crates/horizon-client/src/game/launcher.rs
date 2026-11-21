@@ -115,9 +115,11 @@ fn start_import(request: horizon_ios_launcher::Request) {
     let spawned = std::thread::Builder::new()
         .name("horizon-import".into())
         .spawn(move || {
-            let installed = Pack::open(&path)
-                .and_then(|pack| pack.install(&home))
-                .map_err(|e| e.to_string());
+            let installed = match super::disposable::active() {
+                Some(sandbox) => sandbox.import_resources(&path),
+                None => Pack::open(&path).and_then(|pack| pack.install(&home)),
+            }
+            .map_err(|e| e.to_string());
             let _ = sender.send(installed);
         });
     match spawned {
@@ -129,6 +131,10 @@ fn start_import(request: horizon_ios_launcher::Request) {
 /// Install the `.hmod` named by `mods-install PATH` on a worker: it validates the package's content
 /// and moves it into `horizon-mods`, off the thread that draws.
 fn start_mods_install(request: horizon_ios_launcher::Request) {
+    if super::disposable::active().is_some() {
+        request.answer(r#"{"error":"content imports are disabled in disposable gameplay"}"#);
+        return;
+    }
     let staged = match super::mods_control::install_arg(&request.line) {
         Ok(staged) => staged,
         Err(error) => {
@@ -151,6 +157,10 @@ fn start_mods_install(request: horizon_ios_launcher::Request) {
 
 /// `mods-list`, `mods-set` and `mods-delete`: files only, so both launchers answer them at once.
 fn mods_command(request: horizon_ios_launcher::Request) {
+    if super::disposable::active().is_some() {
+        request.answer(r#"{"error":"content modifications are disabled in disposable gameplay"}"#);
+        return;
+    }
     let dir = std::env::current_dir().unwrap_or_default();
     let answer = match super::mods_control::command(&dir, &request.line) {
         Ok(Some(value)) => value,
@@ -207,6 +217,9 @@ impl Game<'_> {
                     });
                     request.answer(&state.to_string());
                 }
+                "import" if super::disposable::active().is_some() => request.answer(
+                    r#"{"error":"import prepared resources before starting disposable gameplay"}"#,
+                ),
                 "import" => start_import(request),
                 "mods-list" | "mods-set" | "mods-delete" => mods_command(request),
                 "mods-install" => start_mods_install(request),
@@ -283,6 +296,17 @@ fn world_files(request: horizon_ios_launcher::Request) -> Option<horizon_ios_lau
         request.answer(r#"{"error":"launcher-world {\"action\", \"folder\"}"}"#);
         return None;
     };
+    let sandbox = super::disposable::active();
+    if let Some(sandbox) = sandbox {
+        let result = match action {
+            "open" | "backup" => sandbox.check_selector(folder, false),
+            _ => Err("this world operation is disabled in disposable gameplay".into()),
+        };
+        if let Err(error) = result {
+            request.answer(&json!({"error": error.to_string()}).to_string());
+            return None;
+        }
+    }
     let saves = std::env::current_dir().unwrap_or_default().join("saves");
     let done = match action {
         "open" => return Some(request),
@@ -300,7 +324,11 @@ fn world_files(request: horizon_ios_launcher::Request) -> Option<horizon_ios_lau
             let (reply, answers) = mpsc::channel();
             let folder = folder.to_owned();
             std::thread::spawn(move || {
-                let value = match horizon_client::title::world_management::backup(&saves, &folder) {
+                let result = match sandbox {
+                    Some(sandbox) => sandbox.backup(&folder),
+                    None => horizon_client::title::world_management::backup(&saves, &folder),
+                };
+                let value = match result {
                     Ok(bytes) => json!({ "ok": true, "bytes": bytes }),
                     Err(e) => json!({ "error": format!("backup of {folder} failed: {e}") }),
                 };
